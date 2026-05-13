@@ -20,7 +20,7 @@ const (
 	DefaultHTTPClientTimeout        = 30 * time.Second
 	DefaultHTTPDialTimeout          = 10 * time.Second
 	DefaultHTTPTLSHandshakeTimeout  = 10 * time.Second
-	DefaultHTTPResponseHeaderTimout = 30 * time.Second
+	DefaultHTTPResponseHeaderTimout = 600 * time.Second
 	DefaultHTTPIdleConnTimeout      = 90 * time.Second
 )
 
