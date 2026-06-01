@@ -183,10 +183,7 @@ func contentHasImage(item gjson.Result) bool {
 	}
 	// Plain string content with data URL
 	text := content.String()
-	if strings.HasPrefix(text, "data:image") {
-		return true
-	}
-	return false
+	return strings.HasPrefix(text, "data:image")
 }
 
 // opencodeGoPreprocessVision replaces images in the current user message with

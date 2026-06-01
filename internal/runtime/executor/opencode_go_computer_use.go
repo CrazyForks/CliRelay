@@ -226,21 +226,19 @@ func opencodeGoInjectComputerUseTools(payload []byte) []byte {
 	//   3. Responses API:           {"type":"function","name":"...","parameters":{...}} (no "function" key but has "type"="function")
 	isClaudeFormat := false
 	isResponsesAPIFormat := false
-	for _, tool := range toolArray {
-		if tool.Get("function").Exists() {
-			// #1: OpenAI Chat Completions format
-			isClaudeFormat = false
-			isResponsesAPIFormat = false
-		} else if tool.Get("type").String() == "function" && tool.Get("name").Exists() {
-			// #3: Responses API format - has top-level "type"="function" and "name"
-			isClaudeFormat = false
-			isResponsesAPIFormat = true
-		} else if tool.Get("name").Exists() {
-			// #2: Claude format - only has top-level "name" (no "type"="function")
-			isClaudeFormat = true
-			isResponsesAPIFormat = false
-		}
-		break
+	firstTool := toolArray[0]
+	if firstTool.Get("function").Exists() {
+		// #1: OpenAI Chat Completions format
+		isClaudeFormat = false
+		isResponsesAPIFormat = false
+	} else if firstTool.Get("type").String() == "function" && firstTool.Get("name").Exists() {
+		// #3: Responses API format - has top-level "type"="function" and "name"
+		isClaudeFormat = false
+		isResponsesAPIFormat = true
+	} else if firstTool.Get("name").Exists() {
+		// #2: Claude format - only has top-level "name" (no "type"="function")
+		isClaudeFormat = true
+		isResponsesAPIFormat = false
 	}
 
 	// If Computer Use tools are already present, do nothing.
