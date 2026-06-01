@@ -927,19 +927,11 @@ func opencodeGoStripOrphanedToolCalls(payload []byte) []byte {
 		return payload
 	}
 
-	// Build a map of tool_call_ids that are resolved by tool messages
-	resolved := make(map[string]bool)
-	for _, item := range msgs.Array() {
-		if item.Get("role").String() == "tool" {
-			if id := item.Get("tool_call_id").String(); id != "" {
-				resolved[id] = true
-			}
-		}
-	}
-
 	items := msgs.Array()
 	needsStrip := make([]int, 0)
 
+	// For each assistant message with tool_calls, check if tool messages
+	// AFTER it resolve ALL the tool_call_ids, respecting message order.
 	for i, item := range items {
 		if item.Get("role").String() != "assistant" {
 			continue
@@ -948,7 +940,18 @@ func opencodeGoStripOrphanedToolCalls(payload []byte) []byte {
 		if !tc.Exists() || !tc.IsArray() {
 			continue
 		}
-		// Check if ALL tool_calls are resolved by a following tool message
+
+		// Collect tool_call_ids resolved by tool messages after this message
+		resolved := make(map[string]bool)
+		for _, later := range items[i+1:] {
+			if later.Get("role").String() == "tool" {
+				if id := later.Get("tool_call_id").String(); id != "" {
+					resolved[id] = true
+				}
+			}
+		}
+
+		// Check if EVERY tool_call in this assistant message has a matching tool response
 		allResolved := true
 		for _, call := range tc.Array() {
 			if id := call.Get("id").String(); id != "" {
