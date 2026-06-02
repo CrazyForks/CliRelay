@@ -547,6 +547,21 @@ func TestSyncOpenRouterModelsQwen8DigitDateSuffixUpdatesBaseModel(t *testing.T) 
 	if updated.OwnedBy != "qwen" {
 		t.Fatalf("expected qwen3.5-plus owner to be qwen, got %q", updated.OwnedBy)
 	}
+
+	// Variant ID should have non-zero billing via CalculateCost
+	if cost := CalculateCost("qwen3.5-plus-20260420", 1_000_000, 0, 0); cost != 1.75 {
+		t.Fatalf("expected CalculateCost(variant, 1M input) = 1.75, got %v", cost)
+	}
+	if cost := CalculateCost("qwen3.5-plus-20260420", 0, 1_000_000, 0); cost != 14 {
+		t.Fatalf("expected CalculateCost(variant, 1M output) = 14, got %v", cost)
+	}
+	if cost := CalculateCost("qwen3.5-plus-20260420", 0, 0, 1_000_000); cost != 0.175 {
+		t.Fatalf("expected CalculateCost(variant, 1M cached) = 0.175, got %v", cost)
+	}
+	// Base model billing should also work after merge
+	if cost := CalculateCost("qwen3.5-plus", 1_000_000, 0, 0); cost != 1.75 {
+		t.Fatalf("expected CalculateCost(base, 1M input) = 1.75, got %v", cost)
+	}
 }
 
 func TestSyncOpenRouterModelsQwenSegmentedDateSuffixUpdatesBaseModel(t *testing.T) {
@@ -796,5 +811,154 @@ func TestSyncOpenRouterModelsUserDescriptionNotOverwrittenByVariantMerge(t *test
 	}
 	if model.Source != "user" {
 		t.Fatalf("user source should be preserved, got %q", model.Source)
+	}
+}
+
+
+func TestSyncOpenRouterModelsAnthropicDottedExactFirstThenDatedVariant(t *testing.T) {
+	initModelConfigTestDB(t)
+
+	// Dotted exact base first (higher price), then dated variant (lower price).
+	// The merge pass must keep the highest prices.
+	_, err := SyncOpenRouterModelList(context.Background(), []OpenRouterRemoteModel{
+		{
+			ID:          "anthropic/claude-3.5-haiku",
+			Description: "Claude 3.5 Haiku (exact, high price)",
+			Pricing: OpenRouterRemotePricing{
+				Prompt:         "0.000001",
+				Completion:     "0.000005",
+				InputCacheRead: "0.0000001",
+			},
+		},
+		{
+			ID:          "anthropic/claude-3-5-haiku-20241022",
+			Description: "Claude 3.5 Haiku (dated, low price)",
+			Pricing: OpenRouterRemotePricing{
+				Prompt:         "0.0000008",
+				Completion:     "0.000004",
+				InputCacheRead: "0.00000008",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("SyncOpenRouterModelList() error = %v", err)
+	}
+
+	base, ok := GetModelConfig("claude-3-5-haiku")
+	if !ok {
+		t.Fatal("expected claude-3-5-haiku to exist")
+	}
+	// Should retain highest prices from exact match (not overwritten by dated variant)
+	if base.InputPricePerMillion != 1 || base.OutputPricePerMillion != 5 || base.CachedPricePerMillion != 0.1 {
+		t.Fatalf("expected highest prices across both variants, got input=%v output=%v cached=%v",
+			base.InputPricePerMillion, base.OutputPricePerMillion, base.CachedPricePerMillion)
+	}
+}
+
+func TestSyncOpenRouterModelsAnthropicDatedVariantFirstThenDottedExact(t *testing.T) {
+	initModelConfigTestDB(t)
+
+	// Dated variant first (lower price), then dotted exact base (higher price).
+	// The merge pass must keep the highest prices regardless of order.
+	_, err := SyncOpenRouterModelList(context.Background(), []OpenRouterRemoteModel{
+		{
+			ID:          "anthropic/claude-3-5-haiku-20241022",
+			Description: "Claude 3.5 Haiku (dated, low price)",
+			Pricing: OpenRouterRemotePricing{
+				Prompt:         "0.0000008",
+				Completion:     "0.000004",
+				InputCacheRead: "0.00000008",
+			},
+		},
+		{
+			ID:          "anthropic/claude-3.5-haiku",
+			Description: "Claude 3.5 Haiku (exact, high price)",
+			Pricing: OpenRouterRemotePricing{
+				Prompt:         "0.000001",
+				Completion:     "0.000005",
+				InputCacheRead: "0.0000001",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("SyncOpenRouterModelList() error = %v", err)
+	}
+
+	base, ok := GetModelConfig("claude-3-5-haiku")
+	if !ok {
+		t.Fatal("expected claude-3-5-haiku to exist")
+	}
+	// Should retain highest prices from exact match (not overwritten by dated variant)
+	if base.InputPricePerMillion != 1 || base.OutputPricePerMillion != 5 || base.CachedPricePerMillion != 0.1 {
+		t.Fatalf("expected highest prices across both variants regardless of order, got input=%v output=%v cached=%v",
+			base.InputPricePerMillion, base.OutputPricePerMillion, base.CachedPricePerMillion)
+	}
+}
+
+func TestUnionModalities(t *testing.T) {
+	tests := []struct {
+		name     string
+		a, b     []string
+		expected []string
+	}{
+		{
+			name:     "identical",
+			a:        []string{"text", "image"},
+			b:        []string{"text", "image"},
+			expected: []string{"text", "image"},
+		},
+		{
+			name:     "different content same length",
+			a:        []string{"text", "image"},
+			b:        []string{"text", "video"},
+			expected: []string{"text", "image", "video"},
+		},
+		{
+			name:     "a superset of b",
+			a:        []string{"text", "image", "video"},
+			b:        []string{"text"},
+			expected: []string{"text", "image", "video"},
+		},
+		{
+			name:     "b superset of a",
+			a:        []string{"text"},
+			b:        []string{"text", "image", "video"},
+			expected: []string{"text", "image", "video"},
+		},
+		{
+			name:     "empty a",
+			a:        nil,
+			b:        []string{"text"},
+			expected: []string{"text"},
+		},
+		{
+			name:     "empty b",
+			a:        []string{"text"},
+			b:        nil,
+			expected: []string{"text"},
+		},
+		{
+			name:     "both empty",
+			a:        nil,
+			b:        nil,
+			expected: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := unionModalities(tt.a, tt.b)
+			if len(got) != len(tt.expected) {
+				t.Fatalf("unionModalities(%v, %v) = %v, want %v", tt.a, tt.b, got, tt.expected)
+			}
+			seen := make(map[string]struct{}, len(got))
+			for _, m := range got {
+				seen[m] = struct{}{}
+			}
+			for _, m := range tt.expected {
+				if _, ok := seen[m]; !ok {
+					t.Fatalf("unionModalities(%v, %v) = %v, missing expected %q", tt.a, tt.b, got, m)
+				}
+			}
+		})
 	}
 }
