@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -351,70 +350,18 @@ func deletedAuthChannelIdentifiers(auth *coreauth.Auth) []string {
 	return managementauthfiles.DeletedChannelIdentifiers(auth)
 }
 
-func (h *Handler) authIDForPath(path string) string {
-	if h == nil || h.cfg == nil {
-		return managementauthfiles.AuthIDForPath("", path)
-	}
-	return managementauthfiles.AuthIDForPath(h.cfg.AuthDir, path)
-}
-
 func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []byte) error {
 	if h.authManager == nil {
 		return nil
-	}
-	if path == "" {
-		return fmt.Errorf("auth path is empty")
-	}
-	if data == nil {
-		var err error
-		data, err = os.ReadFile(path)
-		if err != nil {
-			return fmt.Errorf("failed to read auth file: %w", err)
-		}
-	}
-	metadata := make(map[string]any)
-	if err := json.Unmarshal(data, &metadata); err != nil {
-		return fmt.Errorf("invalid auth file: %w", err)
-	}
-	provider := sdkAuth.InferAuthProvider(metadata)
-	normalized := sdkAuth.NormalizeAuthMetadata(metadata, provider)
-	if !reflect.DeepEqual(metadata, normalized) {
-		metadata = normalized
-		normalizedData, errMarshal := json.Marshal(metadata)
-		if errMarshal != nil {
-			return fmt.Errorf("failed to normalize auth file: %w", errMarshal)
-		}
-		if errWrite := os.WriteFile(path, normalizedData, 0o600); errWrite != nil {
-			return fmt.Errorf("failed to write normalized auth file: %w", errWrite)
-		}
-	}
-	authID := h.authIDForPath(path)
-	if authID == "" {
-		authID = path
 	}
 	authDir := ""
 	if h.cfg != nil {
 		authDir = h.cfg.AuthDir
 	}
-	if existing, ok := h.authManager.GetByID(authID); ok {
-		auth := managementauthfiles.BuildRecord(managementauthfiles.RecordOptions{
-			AuthDir:  authDir,
-			Path:     path,
-			Provider: provider,
-			Metadata: metadata,
-			Existing: existing,
-		})
-		_, err := h.authManager.Update(ctx, auth)
-		return err
-	}
-	auth := managementauthfiles.BuildRecord(managementauthfiles.RecordOptions{
-		AuthDir:  authDir,
-		Path:     path,
-		Provider: provider,
-		Metadata: metadata,
-	})
-	_, err := h.authManager.Register(ctx, auth)
-	return err
+	return managementauthfiles.Registrar{
+		Manager: h.authManager,
+		AuthDir: authDir,
+	}.RegisterFile(ctx, path, data)
 }
 
 // PatchAuthFileStatus toggles the disabled state of an auth file

@@ -370,9 +370,6 @@ func TestRegisterAuthFromFileUsesRelativeIDForRelativeAuthDir(t *testing.T) {
 	if err := os.WriteFile(absPath, data, 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	if got := h.authIDForPath(absPath); got != fileName {
-		t.Fatalf("authIDForPath(%q) = %q, want %q", absPath, got, fileName)
-	}
 
 	watcherID := fileName
 	if _, err := manager.Register(context.Background(), &coreauth.Auth{
