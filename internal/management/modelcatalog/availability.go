@@ -50,7 +50,9 @@ func (s *Service) ConfiguredAvailability(allowedChannelsRaw, allowedGroupsRaw st
 		if ownedBy, exists := model["owned_by"]; exists {
 			entry["owned_by"] = ownedBy
 		}
-		if sources := s.modelSourceEntries(modelRegistry, id, authByID, ownerMappings, ownerKeys); len(sources) > 0 {
+		row, hasConfig := configByID[strings.ToLower(id)]
+		modelOwnedByMappedOwner := hasConfig && row.Enabled && ownerKeys[normalizeModelOwnerKey(row.OwnedBy)]
+		if sources := s.modelSourceEntries(modelRegistry, id, authByID, ownerMappings, ownerKeys, modelOwnedByMappedOwner); len(sources) > 0 {
 			entry["sources"] = sources
 		}
 		if row, ok := configByID[strings.ToLower(id)]; ok {
@@ -421,6 +423,7 @@ func (s *Service) modelSourceEntries(
 	authByID map[string]*coreauth.Auth,
 	ownerMappings map[string]string,
 	ownerKeys map[string]bool,
+	modelOwnedByMappedOwner bool,
 ) []map[string]any {
 	if modelRegistry == nil {
 		return nil
@@ -432,7 +435,7 @@ func (s *Service) modelSourceEntries(
 	out := make([]map[string]any, 0, len(rawSources))
 	seen := make(map[string]struct{}, len(rawSources))
 	for _, raw := range rawSources {
-		if sourceCoveredByMappedOwners(raw, authByID, ownerMappings, ownerKeys) {
+		if !modelOwnedByMappedOwner && sourceCoveredByMappedOwners(raw, authByID, ownerMappings, ownerKeys) {
 			continue
 		}
 		clientID := strings.TrimSpace(raw.ClientID)

@@ -353,6 +353,7 @@ func TestDefaultConfiguredAvailabilityUsesMappedOwnerModels(t *testing.T) {
 	})
 	reg.RegisterClient(authID, "codex", []*registry.ModelInfo{
 		{ID: codexConfigModel, Object: "model", OwnedBy: "openai", Type: "openai"},
+		{ID: mappedModel, Object: "model", OwnedBy: "openai", Type: "openai"},
 	})
 	reg.RegisterClient(codexConfigAuthID, "codex", []*registry.ModelInfo{
 		{ID: codexConfigModel, Object: "model", OwnedBy: "openai", Type: "openai", UserDefined: true},
@@ -375,7 +376,7 @@ func TestDefaultConfiguredAvailabilityUsesMappedOwnerModels(t *testing.T) {
 	if _, err := manager.Register(context.Background(), &coreauth.Auth{
 		ID:       authID,
 		Provider: "codex",
-		Label:    "Codex",
+		Label:    "Codex Plus",
 		Status:   coreauth.StatusActive,
 	}); err != nil {
 		t.Fatalf("Register codex auth: %v", err)
@@ -476,8 +477,11 @@ func TestDefaultConfiguredAvailabilityUsesMappedOwnerModels(t *testing.T) {
 	if !sourcesByID[codexConfigModel]["codex · tabcode-pro"] {
 		t.Fatalf("missing explicit codex provider source for %q; sources=%v", codexConfigModel, sourcesByID[codexConfigModel])
 	}
-	if sourcesByID[codexConfigModel]["codex · Codex"] {
+	if sourcesByID[codexConfigModel]["codex · Codex Plus"] {
 		t.Fatalf("unexpected mapped owner oauth source for %q; sources=%v", codexConfigModel, sourcesByID[codexConfigModel])
+	}
+	if !sourcesByID[mappedModel]["codex · Codex Plus"] {
+		t.Fatalf("missing mapped owner auth source for %q; sources=%v", mappedModel, sourcesByID[mappedModel])
 	}
 	if _, ok := ids[oldModel]; ok {
 		t.Fatalf("unexpected registry model outside mapped owner %q; ids=%v", oldModel, ids)
