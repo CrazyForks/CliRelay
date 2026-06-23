@@ -21,7 +21,7 @@ services:
       CLIRELAY_LOCALE: ${CLIRELAY_LOCALE:-zh}
       CLIRELAY_UPDATE_CHANNEL: ${CLIRELAY_UPDATE_CHANNEL:-main}
       CLIRELAY_UPDATER_URL: ${CLIRELAY_UPDATER_URL:-http://clirelay-updater:8320}
-      CLIRELAY_UPDATER_TOKEN: ${CLIRELAY_UPDATER_TOKEN:-}
+      CLIRELAY_UPDATER_TOKEN: ${CLIRELAY_UPDATER_TOKEN:?CLIRELAY_UPDATER_TOKEN is required for updater sidecar}
       CLIRELAY_TARGET_SERVICE: ${CLIRELAY_TARGET_SERVICE:-cli-proxy-api}
       AUTH_PATH: ${AUTH_PATH:-/root/.cli-proxy-api}
       LANG: ${CLIRELAY_LANG:-C.UTF-8}
@@ -46,7 +46,7 @@ services:
     pull_policy: ${CLI_PROXY_PULL_POLICY:-always}
     command: ["./clirelay-updater"]
     environment:
-      CLIRELAY_UPDATER_TOKEN: ${CLIRELAY_UPDATER_TOKEN:-}
+      CLIRELAY_UPDATER_TOKEN: ${CLIRELAY_UPDATER_TOKEN:?CLIRELAY_UPDATER_TOKEN is required for updater sidecar}
       CLIRELAY_PROJECT_DIR: ${CLIRELAY_PROJECT_DIR:-${PWD:-.}}
       CLIRELAY_COMPOSE_FILE: ${CLIRELAY_PROJECT_DIR:-${PWD:-.}}/docker-compose.yml
       CLIRELAY_ENV_FILE: ${CLIRELAY_ENV_FILE:-${CLIRELAY_PROJECT_DIR:-${PWD:-.}}/.env}
