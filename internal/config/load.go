@@ -108,6 +108,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	cfg.ApplyEnvOverrides()
 	cfg.SanitizeIdentityFingerprint()
+	cfg.SanitizeCodexOAuthAdmission()
 	cfg.SanitizeOAuthModelAlias()
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
 	cfg.SanitizeAutoUpdate()

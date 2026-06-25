@@ -346,17 +346,7 @@ func opencodeGoPayloadHasImage(payload []byte) bool {
 }
 
 func opencodeGoCurrentRequestHasImage(payload []byte) bool {
-	if len(payload) == 0 || !json.Valid(payload) {
-		return false
-	}
-	var value any
-	if err := json.Unmarshal(payload, &value); err != nil {
-		return false
-	}
-	if hasImage, recognized := opencodeGoCurrentValueHasImage(value); recognized {
-		return hasImage
-	}
-	return opencodeGoValueHasImage(value)
+	return vision.CurrentTurnHasImages(payload)
 }
 
 func opencodeGoSanitizeHistoricalImages(payload []byte) ([]byte, bool) {

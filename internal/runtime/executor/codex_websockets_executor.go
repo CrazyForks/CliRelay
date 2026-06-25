@@ -90,6 +90,10 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	reporter := execCtx.Reporter()
 	defer reporter.trackFailure(execCtx.Context, &err)
 
+	if errAdmission := enforceCodexClientAdmission(execCtx.Context, e.cfg, auth); errAdmission != nil {
+		return resp, errAdmission
+	}
+
 	apiKey, baseURL := codexCreds(auth)
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
@@ -120,7 +124,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		return resp, err
 	}
 
-	body, wsHeaders := applyCodexPromptCacheHeaders(execCtx.SourceFormat, req, body)
+	body, wsHeaders := applyCodexPromptCacheHeaders(auth, execCtx.SourceFormat, req, body)
 	wsHeaders = applyCodexWebsocketHeaders(execCtx.Context, wsHeaders, e.cfg, auth, apiKey)
 	recorder := execCtx.Recorder()
 
@@ -287,6 +291,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	reporter := execCtx.Reporter()
 	defer reporter.trackFailure(execCtx.Context, &err)
 
+	if errAdmission := enforceCodexClientAdmission(execCtx.Context, e.cfg, auth); errAdmission != nil {
+		return nil, errAdmission
+	}
+
 	apiKey, baseURL := codexCreds(auth)
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
@@ -308,7 +316,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		return nil, err
 	}
 
-	body, wsHeaders := applyCodexPromptCacheHeaders(execCtx.SourceFormat, req, body)
+	body, wsHeaders := applyCodexPromptCacheHeaders(auth, execCtx.SourceFormat, req, body)
 	wsHeaders = applyCodexWebsocketHeaders(execCtx.Context, wsHeaders, e.cfg, auth, apiKey)
 	recorder := execCtx.Recorder()
 

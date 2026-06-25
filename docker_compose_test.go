@@ -38,6 +38,22 @@ func TestRepositoryComposePassesContainerAuthPath(t *testing.T) {
 	}
 }
 
+func TestRepositoryComposeRequiresUpdaterToken(t *testing.T) {
+	data, err := os.ReadFile("docker-compose.yml")
+	if err != nil {
+		t.Fatalf("read docker-compose.yml: %v", err)
+	}
+	content := string(data)
+
+	want := "CLIRELAY_UPDATER_TOKEN: ${CLIRELAY_UPDATER_TOKEN:?CLIRELAY_UPDATER_TOKEN is required for updater sidecar}"
+	if got := strings.Count(content, want); got != 2 {
+		t.Fatalf("docker-compose.yml has %d required updater token entries, want 2", got)
+	}
+	if strings.Contains(content, "CLIRELAY_UPDATER_TOKEN: ${CLIRELAY_UPDATER_TOKEN:-}") {
+		t.Fatal("docker-compose.yml still allows an empty updater token")
+	}
+}
+
 func TestRepositoryComposeMirrorsDeploymentFilesAtProjectDirInUpdater(t *testing.T) {
 	data, err := os.ReadFile("docker-compose.yml")
 	if err != nil {

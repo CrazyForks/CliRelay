@@ -132,6 +132,9 @@ type Config struct {
 	// IdentityFingerprint controls provider-specific upstream identity headers.
 	IdentityFingerprint IdentityFingerprintConfig `yaml:"identity-fingerprint,omitempty" json:"identity-fingerprint,omitempty"`
 
+	// CodexOAuthAdmission controls global fixed allowed-client presets for Codex OAuth accounts.
+	CodexOAuthAdmission CodexOAuthAdmissionConfig `yaml:"codex-oauth-admission,omitempty" json:"codex-oauth-admission,omitempty"`
+
 	// ProxyPool stores reusable outbound proxies that can be referenced by providers and auth files.
 	ProxyPool []ProxyPoolEntry `yaml:"proxy-pool,omitempty" json:"proxy-pool,omitempty"`
 
