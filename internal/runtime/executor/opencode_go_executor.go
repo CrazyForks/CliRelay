@@ -26,6 +26,7 @@ var opencodeGoBaseURL = "https://opencode.ai/zen/go/v1"
 var opencodeGoMessagesModels = map[string]struct{}{
 	"minimax-m2.7": {},
 	"minimax-m2.5": {},
+	"glm-5.2":      {},
 }
 
 var opencodeGoKnownNativeVisionModels = map[string]struct{}{
