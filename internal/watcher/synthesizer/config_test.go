@@ -345,6 +345,7 @@ func TestConfigSynthesizer_OpenCodeGoKeys(t *testing.T) {
 					ProxyURL:            "http://proxy",
 					ProxyID:             "hk",
 					Headers:             map[string]string{"X-Test": "yes"},
+					Models:              []config.OpenCodeGoModel{{Name: "glm-5.2"}},
 					ExcludedModels:      []string{"minimax-m2.5"},
 					VisionFallbackModel: "qwen3.5-plus",
 				},
@@ -373,6 +374,9 @@ func TestConfigSynthesizer_OpenCodeGoKeys(t *testing.T) {
 	}
 	if auth.Attributes["auth_kind"] != "apikey" || auth.Attributes["excluded_models"] != "minimax-m2.5" {
 		t.Fatalf("expected api key exclusion metadata, got %#v", auth.Attributes)
+	}
+	if auth.Attributes["models_hash"] == "" {
+		t.Fatalf("expected models_hash for explicit OpenCode Go models, got %#v", auth.Attributes)
 	}
 	if auth.Attributes["vision_fallback_model"] != "qwen3.5-plus" {
 		t.Fatalf("expected vision fallback metadata, got %#v", auth.Attributes)
