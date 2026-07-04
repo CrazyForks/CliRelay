@@ -315,6 +315,55 @@ func TestUpdateClientsDisableAllModelsMarksConfigAuthDisabled(t *testing.T) {
 	}
 }
 
+func TestUpdateClientsRegistersOpenCodeGoConfigModels(t *testing.T) {
+	server := newTestServer(t)
+	next := *server.cfg
+	next.OpenCodeGoKey = []proxyconfig.OpenCodeGoKey{{
+		APIKey: "go-key",
+		Models: []proxyconfig.OpenCodeGoModel{{Name: "glm-5.2"}},
+	}}
+
+	server.UpdateClients(&next)
+
+	var authID string
+	for _, candidate := range server.handlers.AuthManager.List() {
+		if candidate != nil && candidate.Provider == "opencode-go" {
+			authID = candidate.ID
+			break
+		}
+	}
+	if authID == "" {
+		t.Fatal("expected config-derived OpenCode Go auth")
+	}
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(authID)
+	})
+
+	models := registry.GetGlobalRegistry().GetModelsForClient(authID)
+	if len(models) != 1 || !hasRegistryModelID(models, "glm-5.2") {
+		t.Fatalf("OpenCode Go registry models = %+v, want glm-5.2", models)
+	}
+	if !registry.GetGlobalRegistry().ClientSupportsModel(authID, "glm-5.2") {
+		t.Fatal("expected OpenCode Go config auth to support glm-5.2")
+	}
+
+	removed := next
+	removed.OpenCodeGoKey = nil
+	server.UpdateClients(&removed)
+	if models := registry.GetGlobalRegistry().GetModelsForClient(authID); len(models) != 0 {
+		t.Fatalf("OpenCode Go registry models after removal = %+v, want none", models)
+	}
+}
+
+func hasRegistryModelID(models []*registry.ModelInfo, id string) bool {
+	for _, model := range models {
+		if model != nil && strings.EqualFold(strings.TrimSpace(model.ID), id) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestGroupedV1RouteForbiddenByAPIKeyGroups(t *testing.T) {
 	server := newTestServerWithConfig(t, func(cfg *proxyconfig.Config) {
 		cfg.SDKConfig.APIKeys = nil
