@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"math"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -482,6 +483,50 @@ func TestQueryLogsSupportsExplicitEmptyMultiSelectFilters(t *testing.T) {
 	}
 }
 
+func TestQueryLogsReturnsVisionFallbackModelSeparately(t *testing.T) {
+	initTestUsageDB(t, config.RequestLogStorageConfig{})
+
+	now := time.Now().UTC()
+	InsertLogWithDetailsIdentitySubjectUpstreamVision(
+		"sk-live-123",
+		"key-1",
+		"subject-1",
+		"Primary",
+		"alias-model",
+		"real-model",
+		"vision-model",
+		"codex",
+		"Codex",
+		"auth-1",
+		false,
+		now,
+		140,
+		14,
+		TokenStats{InputTokens: 1, OutputTokens: 1, TotalTokens: 2},
+		"",
+		"",
+		"",
+	)
+
+	result, err := QueryLogs(LogQueryParams{Page: 1, Size: 10, Days: 1})
+	if err != nil {
+		t.Fatalf("QueryLogs() error = %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("items = %d, want 1", len(result.Items))
+	}
+	row := result.Items[0]
+	if row.Model != "alias-model" {
+		t.Fatalf("Model = %q, want alias-model", row.Model)
+	}
+	if row.UpstreamModel != "real-model" {
+		t.Fatalf("UpstreamModel = %q, want real-model", row.UpstreamModel)
+	}
+	if row.VisionFallbackModel != "vision-model" {
+		t.Fatalf("VisionFallbackModel = %q, want vision-model", row.VisionFallbackModel)
+	}
+}
+
 func TestQueryLogContentKeepsMissingFailedOutputEmpty(t *testing.T) {
 	initTestUsageDB(t, config.RequestLogStorageConfig{
 		StoreContent:           true,
@@ -612,7 +657,7 @@ func TestInitDBMigratesFirstTokenAndStreamingColumns(t *testing.T) {
 		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &pk); err != nil {
 			t.Fatalf("scan table info: %v", err)
 		}
-		if name == "first_token_ms" || name == "streaming" {
+		if name == "first_token_ms" || name == "streaming" || name == "vision_fallback_model" {
 			found[name] = true
 		}
 	}
@@ -621,6 +666,46 @@ func TestInitDBMigratesFirstTokenAndStreamingColumns(t *testing.T) {
 	}
 	if !found["streaming"] {
 		t.Fatalf("expected streaming column to exist after InitDB migration")
+	}
+	if !found["vision_fallback_model"] {
+		t.Fatalf("expected vision_fallback_model column to exist after InitDB migration")
+	}
+}
+
+func TestInitDBEnsuresRequestLogLookupIndexes(t *testing.T) {
+	initTestUsageDB(t, config.RequestLogStorageConfig{})
+
+	rows, err := getDB().Query("PRAGMA index_list(request_logs)")
+	if err != nil {
+		t.Fatalf("PRAGMA index_list(request_logs): %v", err)
+	}
+	defer rows.Close()
+
+	found := map[string]bool{}
+	for rows.Next() {
+		var seq int
+		var name string
+		var unique int
+		var origin string
+		var partial int
+		if err := rows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
+			t.Fatalf("scan index_list: %v", err)
+		}
+		found[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate index_list: %v", err)
+	}
+
+	for _, name := range []string{
+		"idx_logs_api_key_timestamp",
+		"idx_logs_api_key_id_timestamp",
+		"idx_logs_api_key_chart_cover",
+		"idx_logs_api_key_id_chart_cover",
+	} {
+		if !found[name] {
+			t.Fatalf("expected %s to exist after InitDB", name)
+		}
 	}
 }
 
@@ -1539,6 +1624,33 @@ func TestBackfillRequestLogAPIKeyIDsUsesHistoricalRawKeyIdentity(t *testing.T) {
 	}
 }
 
+func TestUniqueRequestLogAPIKeyIDByKeyOnlyChecksMissingRawKeys(t *testing.T) {
+	initTestUsageDB(t, config.RequestLogStorageConfig{})
+
+	db := getDB()
+	now := time.Now().UTC()
+	InsertLogWithDetailsIdentity("sk-missing", "missing-id", "", "gpt-test", "source", "channel", "auth-1", false, now, 1, 1, TokenStats{TotalTokens: 1}, "", "", "")
+	InsertLogWithDetailsIdentity("sk-unrelated", "unrelated-id", "", "gpt-test", "source", "channel", "auth-1", false, now, 1, 1, TokenStats{TotalTokens: 1}, "", "", "")
+	if _, err := db.Exec(
+		`INSERT INTO request_logs
+			(timestamp, api_key, api_key_id, api_key_name, model, source, channel_name, auth_index,
+			 failed, latency_ms, first_token_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		now.Add(time.Second).Format(time.RFC3339Nano), "sk-missing", "", "", "gpt-test", "source", "channel", "auth-1",
+		0, 123, 45, 10, 20, 0, 0, 30, 0,
+	); err != nil {
+		t.Fatalf("insert missing api_key_id request_log: %v", err)
+	}
+
+	got := uniqueRequestLogAPIKeyIDByKeyFromDB(db)
+	if got["sk-missing"] != "missing-id" {
+		t.Fatalf("sk-missing id = %q, want missing-id", got["sk-missing"])
+	}
+	if _, ok := got["sk-unrelated"]; ok {
+		t.Fatalf("sk-unrelated should not be queried when it has no missing api_key_id rows")
+	}
+}
+
 func TestQueryAPIKeySelectorsHandleLegacyRowsWithoutAPIKeyID(t *testing.T) {
 	initTestUsageDB(t, config.RequestLogStorageConfig{})
 
@@ -1581,6 +1693,50 @@ func TestQueryAPIKeySelectorsHandleLegacyRowsWithoutAPIKeyID(t *testing.T) {
 	}
 	if dist[0].Requests != 1 || dist[0].Tokens != 30 {
 		t.Fatalf("distribution point = %#v, want one request and 30 tokens", dist[0])
+	}
+}
+
+func TestQueryFiltersForLogsLinksFilterFacets(t *testing.T) {
+	initTestUsageDB(t, config.RequestLogStorageConfig{})
+
+	now := time.Now().UTC()
+	InsertLog("sk-a", "A", "glm-5.2", "source-a", "OpenCode", "auth-a", false, now, 1, 1, TokenStats{TotalTokens: 1}, "", "")
+	InsertLog("sk-b", "B", "gpt-4.1", "source-b", "Codex", "auth-b", false, now, 1, 1, TokenStats{TotalTokens: 1}, "", "")
+	InsertLog("sk-c", "C", "glm-5.2", "source-c", "Anthropic", "auth-c", true, now, 1, 1, TokenStats{TotalTokens: 1}, "", "")
+
+	filters, err := QueryFiltersForLogs(LogQueryParams{Days: 7, Models: []string{"glm-5.2"}})
+	if err != nil {
+		t.Fatalf("QueryFiltersForLogs() error = %v", err)
+	}
+	if !slices.Equal(filters.APIKeys, []string{"sk-a", "sk-c"}) {
+		t.Fatalf("filters.APIKeys = %#v, want [sk-a sk-c]", filters.APIKeys)
+	}
+	if !slices.Equal(filters.Channels, []string{"Anthropic", "OpenCode"}) {
+		t.Fatalf("filters.Channels = %#v, want [Anthropic OpenCode]", filters.Channels)
+	}
+	if !slices.Equal(filters.Models, []string{"glm-5.2", "gpt-4.1"}) {
+		t.Fatalf("filters.Models = %#v, want own facet to stay expandable", filters.Models)
+	}
+	if !slices.Equal(filters.Statuses, []string{"success", "failed"}) {
+		t.Fatalf("filters.Statuses = %#v, want [success failed]", filters.Statuses)
+	}
+
+	filters, err = QueryFiltersForLogs(LogQueryParams{
+		Days:    7,
+		APIKeys: []string{"sk-a"},
+		Models:  []string{"glm-5.2"},
+	})
+	if err != nil {
+		t.Fatalf("QueryFiltersForLogs(api key + model) error = %v", err)
+	}
+	if !slices.Equal(filters.APIKeys, []string{"sk-a", "sk-c"}) {
+		t.Fatalf("filters.APIKeys = %#v, want model-compatible keys", filters.APIKeys)
+	}
+	if !slices.Equal(filters.Models, []string{"glm-5.2"}) {
+		t.Fatalf("filters.Models = %#v, want key-compatible models", filters.Models)
+	}
+	if !slices.Equal(filters.Statuses, []string{"success"}) {
+		t.Fatalf("filters.Statuses = %#v, want key-compatible statuses", filters.Statuses)
 	}
 }
 
@@ -1833,6 +1989,98 @@ func TestClearRequestLogsClearsBodiesButKeepsRequestRows(t *testing.T) {
 	}
 	if after != 0 {
 		t.Fatalf("expected request log storage bytes to be 0 after cleanup, got %d", after)
+	}
+}
+
+func TestQueryStatsAndHeatmapCountSessionsFromDetails(t *testing.T) {
+	initTestUsageDB(t, config.RequestLogStorageConfig{
+		StoreContent:           true,
+		ContentRetentionDays:   30,
+		CleanupIntervalMinutes: 1440,
+	})
+
+	today := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	yesterday := today.AddDate(0, 0, -1)
+	InsertLogWithDetails("sk-heatmap", "Heatmap", "gpt-5.4", "codex", "Codex", "auth-1", false, today, 10, 5, TokenStats{
+		InputTokens: 10, OutputTokens: 20, TotalTokens: 30,
+	}, "{}", "{}", `{"session_id":"session-a","request_id":"req-a1"}`)
+	InsertLogWithDetails("sk-heatmap", "Heatmap", "gpt-5.4", "codex", "Codex", "auth-1", false, today.Add(time.Minute), 10, 5, TokenStats{
+		InputTokens: 20, OutputTokens: 30, TotalTokens: 50,
+	}, "{}", "{}", `{"session_id":"session-a","request_id":"req-a2"}`)
+	InsertLogWithDetails("sk-heatmap", "Heatmap", "gpt-5.4", "codex", "Codex", "auth-1", false, yesterday, 10, 5, TokenStats{
+		InputTokens: 1, OutputTokens: 2, TotalTokens: 3,
+	}, "{}", "{}", `{"conversation_id":"session-b"}`)
+
+	var storedSessions int
+	if err := getDB().QueryRow("SELECT COUNT(*) FROM request_log_content WHERE session_id <> ''").Scan(&storedSessions); err != nil {
+		t.Fatalf("count stored session_id rows: %v", err)
+	}
+	if storedSessions != 3 {
+		t.Fatalf("stored session_id rows = %d, want 3", storedSessions)
+	}
+
+	stats, err := QueryStats(LogQueryParams{APIKey: "sk-heatmap", Days: 7})
+	if err != nil {
+		t.Fatalf("QueryStats() error = %v", err)
+	}
+	if stats.Total != 3 || stats.TotalTokens != 83 {
+		t.Fatalf("stats = %#v, want total=3 total_tokens=83", stats)
+	}
+	sessionCount, err := QuerySessionCount(LogQueryParams{APIKey: "sk-heatmap", Days: 7})
+	if err != nil {
+		t.Fatalf("QuerySessionCount() error = %v", err)
+	}
+	if sessionCount != 2 {
+		t.Fatalf("QuerySessionCount() = %d, want 2", sessionCount)
+	}
+
+	points, err := QueryDailyHeatmapSeries("sk-heatmap", 7)
+	if err != nil {
+		t.Fatalf("QueryDailyHeatmapSeries() error = %v", err)
+	}
+	byDate := make(map[string]DailyHeatmapPoint, len(points))
+	for _, point := range points {
+		byDate[point.Date] = point
+	}
+	todayPoint := byDate[LocalDayKeyAt(today)]
+	if todayPoint.Requests != 2 || todayPoint.Tokens != 80 || todayPoint.Sessions != 1 {
+		t.Fatalf("today heatmap point = %#v, want requests=2 tokens=80 sessions=1", todayPoint)
+	}
+	yesterdayPoint := byDate[LocalDayKeyAt(yesterday)]
+	if yesterdayPoint.Requests != 1 || yesterdayPoint.Tokens != 3 || yesterdayPoint.Sessions != 1 {
+		t.Fatalf("yesterday heatmap point = %#v, want requests=1 tokens=3 sessions=1", yesterdayPoint)
+	}
+
+	chartData, err := QueryPublicChartData("sk-heatmap", 7)
+	if err != nil {
+		t.Fatalf("QueryPublicChartData() error = %v", err)
+	}
+	if chartData.Stats.Total != 3 || chartData.Stats.TotalTokens != 83 || chartData.Stats.TotalSessions != 2 {
+		t.Fatalf("public chart stats = %#v, want total=3 total_tokens=83 sessions=2", chartData.Stats)
+	}
+	if len(chartData.DailySeries) != 2 {
+		t.Fatalf("public chart daily len = %d, want 2", len(chartData.DailySeries))
+	}
+	if len(chartData.ModelDistribution) != 1 || chartData.ModelDistribution[0].Requests != 3 || chartData.ModelDistribution[0].Tokens != 83 {
+		t.Fatalf("public chart models = %#v, want one model with 3 requests and 83 tokens", chartData.ModelDistribution)
+	}
+	chartHeatmap := make(map[string]DailyHeatmapPoint, len(chartData.HeatmapSeries))
+	for _, point := range chartData.HeatmapSeries {
+		chartHeatmap[point.Date] = point
+	}
+	if chartHeatmap[LocalDayKeyAt(today)].Sessions != 1 || chartHeatmap[LocalDayKeyAt(yesterday)].Sessions != 1 {
+		t.Fatalf("public chart heatmap = %#v, want sessions by day populated", chartHeatmap)
+	}
+
+	if _, err := ClearRequestLogs(ClearRequestLogsOptions{ClearDetailContent: true}); err != nil {
+		t.Fatalf("ClearRequestLogs(details) error = %v", err)
+	}
+	sessionCount, err = QuerySessionCount(LogQueryParams{APIKey: "sk-heatmap", Days: 7})
+	if err != nil {
+		t.Fatalf("QuerySessionCount() after detail cleanup error = %v", err)
+	}
+	if sessionCount != 0 {
+		t.Fatalf("QuerySessionCount() after detail cleanup = %d, want 0", sessionCount)
 	}
 }
 

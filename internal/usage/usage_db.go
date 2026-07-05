@@ -16,25 +16,27 @@ import (
 
 // LogRow represents a single request log entry returned by QueryLogs.
 type LogRow struct {
-	ID              int64     `json:"id"`
-	Timestamp       time.Time `json:"timestamp"`
-	APIKey          string    `json:"api_key"`
-	APIKeyName      string    `json:"api_key_name"`
-	Model           string    `json:"model"`
-	Source          string    `json:"source"`
-	ChannelName     string    `json:"channel_name"`
-	AuthIndex       string    `json:"auth_index"`
-	Failed          bool      `json:"failed"`
-	Streaming       bool      `json:"streaming"`
-	LatencyMs       int64     `json:"latency_ms"`
-	FirstTokenMs    int64     `json:"first_token_ms"`
-	InputTokens     int64     `json:"input_tokens"`
-	OutputTokens    int64     `json:"output_tokens"`
-	ReasoningTokens int64     `json:"reasoning_tokens"`
-	CachedTokens    int64     `json:"cached_tokens"`
-	TotalTokens     int64     `json:"total_tokens"`
-	Cost            float64   `json:"cost"`
-	HasContent      bool      `json:"has_content"`
+	ID                  int64     `json:"id"`
+	Timestamp           time.Time `json:"timestamp"`
+	APIKey              string    `json:"api_key"`
+	APIKeyName          string    `json:"api_key_name"`
+	Model               string    `json:"model"`
+	UpstreamModel       string    `json:"upstream_model,omitempty"`
+	VisionFallbackModel string    `json:"vision_fallback_model,omitempty"`
+	Source              string    `json:"source"`
+	ChannelName         string    `json:"channel_name"`
+	AuthIndex           string    `json:"auth_index"`
+	Failed              bool      `json:"failed"`
+	Streaming           bool      `json:"streaming"`
+	LatencyMs           int64     `json:"latency_ms"`
+	FirstTokenMs        int64     `json:"first_token_ms"`
+	InputTokens         int64     `json:"input_tokens"`
+	OutputTokens        int64     `json:"output_tokens"`
+	ReasoningTokens     int64     `json:"reasoning_tokens"`
+	CachedTokens        int64     `json:"cached_tokens"`
+	TotalTokens         int64     `json:"total_tokens"`
+	Cost                float64   `json:"cost"`
+	HasContent          bool      `json:"has_content"`
 }
 
 // LogQueryParams holds filter/pagination parameters for QueryLogs.
@@ -73,15 +75,17 @@ type FilterOptions struct {
 	APIKeyNames map[string]string `json:"api_key_names"`
 	Models      []string          `json:"models"`
 	Channels    []string          `json:"channels"`
+	Statuses    []string          `json:"statuses"`
 }
 
 // LogStats holds aggregated stats over the filtered result set.
 type LogStats struct {
-	Total       int64   `json:"total"`
-	SuccessRate float64 `json:"success_rate"`
-	TotalTokens int64   `json:"total_tokens"`
-	TotalCost   float64 `json:"total_cost"`
-	CacheRate   float64 `json:"cache_rate"`
+	Total         int64   `json:"total"`
+	SuccessRate   float64 `json:"success_rate"`
+	TotalTokens   int64   `json:"total_tokens"`
+	TotalSessions int64   `json:"total_sessions"`
+	TotalCost     float64 `json:"total_cost"`
+	CacheRate     float64 `json:"cache_rate"`
 }
 
 const cacheRateEffectiveInputSQL = "CASE WHEN cached_tokens > input_tokens THEN input_tokens + cached_tokens ELSE input_tokens END"
@@ -125,6 +129,8 @@ CREATE TABLE IF NOT EXISTS request_logs (
   api_key_id       TEXT NOT NULL DEFAULT '',
   auth_subject_id  TEXT NOT NULL DEFAULT '',
   model            TEXT NOT NULL DEFAULT '',
+  upstream_model   TEXT NOT NULL DEFAULT '',
+  vision_fallback_model TEXT NOT NULL DEFAULT '',
   source           TEXT NOT NULL DEFAULT '',
   channel_name     TEXT NOT NULL DEFAULT '',
   auth_index       TEXT NOT NULL DEFAULT '',
@@ -148,11 +154,13 @@ CREATE TABLE IF NOT EXISTS request_log_content (
   input_content    BLOB NOT NULL DEFAULT X'',
   output_content   BLOB NOT NULL DEFAULT X'',
   detail_content   BLOB NOT NULL DEFAULT X'',
+  session_id       TEXT NOT NULL DEFAULT '',
   FOREIGN KEY(log_id) REFERENCES request_logs(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON request_logs(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_logs_api_key ON request_logs(api_key);
+CREATE INDEX IF NOT EXISTS idx_logs_api_key_timestamp ON request_logs(api_key, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_logs_model ON request_logs(model);
 CREATE INDEX IF NOT EXISTS idx_logs_failed ON request_logs(failed);
 CREATE INDEX IF NOT EXISTS idx_logs_auth_index ON request_logs(auth_index);
@@ -240,6 +248,24 @@ func migrateApiKeyNameColumn(db *sql.DB) {
 	}
 }
 
+func migrateUpstreamModelColumn(db *sql.DB) {
+	_, err := db.Exec("ALTER TABLE request_logs ADD COLUMN upstream_model TEXT NOT NULL DEFAULT ''")
+	if err != nil {
+		if !strings.Contains(err.Error(), "duplicate") {
+			log.Warnf("usage: migrate column upstream_model: %v", err)
+		}
+	}
+}
+
+func migrateVisionFallbackModelColumn(db *sql.DB) {
+	_, err := db.Exec("ALTER TABLE request_logs ADD COLUMN vision_fallback_model TEXT NOT NULL DEFAULT ''")
+	if err != nil {
+		if !strings.Contains(err.Error(), "duplicate") {
+			log.Warnf("usage: migrate column vision_fallback_model: %v", err)
+		}
+	}
+}
+
 func migrateAPIKeyIDColumn(db *sql.DB) {
 	_, err := db.Exec("ALTER TABLE request_logs ADD COLUMN api_key_id TEXT NOT NULL DEFAULT ''")
 	if err != nil {
@@ -249,6 +275,19 @@ func migrateAPIKeyIDColumn(db *sql.DB) {
 	}
 	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_logs_api_key_id ON request_logs(api_key_id)"); err != nil {
 		log.Warnf("usage: create idx_logs_api_key_id: %v", err)
+	}
+}
+
+func ensureRequestLogLookupIndexes(db *sql.DB) {
+	for _, stmt := range []string{
+		"CREATE INDEX IF NOT EXISTS idx_logs_api_key_timestamp ON request_logs(api_key, timestamp DESC)",
+		"CREATE INDEX IF NOT EXISTS idx_logs_api_key_id_timestamp ON request_logs(api_key_id, timestamp DESC)",
+		"CREATE INDEX IF NOT EXISTS idx_logs_api_key_chart_cover ON request_logs(api_key, api_key_id, timestamp DESC, model, failed, input_tokens, output_tokens, total_tokens, cost, cached_tokens)",
+		"CREATE INDEX IF NOT EXISTS idx_logs_api_key_id_chart_cover ON request_logs(api_key_id, timestamp DESC, model, failed, input_tokens, output_tokens, total_tokens, cost, cached_tokens)",
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			log.Warnf("usage: create request log lookup index: %v", err)
+		}
 	}
 }
 
@@ -324,6 +363,15 @@ func migrateRequestLogDetailColumn(db *sql.DB) {
 	}
 }
 
+func migrateRequestLogContentSessionIDColumn(db *sql.DB) {
+	_, err := db.Exec("ALTER TABLE request_log_content ADD COLUMN session_id TEXT NOT NULL DEFAULT ''")
+	if err != nil {
+		if !strings.Contains(err.Error(), "duplicate") {
+			log.Warnf("usage: migrate column session_id: %v", err)
+		}
+	}
+}
+
 func ensureRequestLogDetailIndexes(db *sql.DB) {
 	if _, err := db.Exec(`
 		CREATE INDEX IF NOT EXISTS idx_log_content_detail_timestamp
@@ -332,6 +380,104 @@ func ensureRequestLogDetailIndexes(db *sql.DB) {
 	`); err != nil {
 		log.Warnf("usage: create idx_log_content_detail_timestamp: %v", err)
 	}
+	if _, err := db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_log_content_session_timestamp
+		ON request_log_content(session_id, timestamp DESC)
+		WHERE session_id <> ''
+	`); err != nil {
+		log.Warnf("usage: create idx_log_content_session_timestamp: %v", err)
+	}
+}
+
+func backfillRequestLogContentSessionIDs(db *sql.DB) {
+	rows, err := db.Query(`
+		SELECT log_id, compression, detail_content
+		  FROM request_log_content
+		 WHERE session_id = ''
+		   AND length(detail_content) > 0
+	`)
+	if err != nil {
+		log.Warnf("usage: query request log session_id backfill rows: %v", err)
+		return
+	}
+
+	type update struct {
+		logID     int64
+		sessionID string
+	}
+	updates := make([]update, 0)
+	var scanned int64
+	for rows.Next() {
+		var logID int64
+		var compression string
+		var compressed []byte
+		if err := rows.Scan(&logID, &compression, &compressed); err != nil {
+			_ = rows.Close()
+			log.Warnf("usage: scan request log session_id backfill row: %v", err)
+			return
+		}
+		scanned++
+		detail, err := decompressLogContent(compression, compressed)
+		if err != nil {
+			log.Warnf("usage: decompress request log session_id backfill row %d: %v", logID, err)
+			continue
+		}
+		if sessionID := extractSessionIDFromDetails(detail); sessionID != "" {
+			updates = append(updates, update{logID: logID, sessionID: sessionID})
+		}
+	}
+	if err := rows.Close(); err != nil {
+		log.Warnf("usage: close request log session_id backfill rows: %v", err)
+		return
+	}
+	if err := rows.Err(); err != nil {
+		log.Warnf("usage: iterate request log session_id backfill rows: %v", err)
+		return
+	}
+	if len(updates) == 0 {
+		return
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		log.Warnf("usage: begin request log session_id backfill: %v", err)
+		return
+	}
+	stmt, err := tx.Prepare("UPDATE request_log_content SET session_id = ? WHERE log_id = ?")
+	if err != nil {
+		_ = tx.Rollback()
+		log.Warnf("usage: prepare request log session_id backfill: %v", err)
+		return
+	}
+	for _, update := range updates {
+		if _, err := stmt.Exec(update.sessionID, update.logID); err != nil {
+			_ = stmt.Close()
+			_ = tx.Rollback()
+			log.Warnf("usage: update request log session_id backfill row %d: %v", update.logID, err)
+			return
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		_ = tx.Rollback()
+		log.Warnf("usage: close request log session_id backfill statement: %v", err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		log.Warnf("usage: commit request log session_id backfill: %v", err)
+		return
+	}
+	log.Infof("usage: backfilled request log session_id values: %d/%d", len(updates), scanned)
+}
+
+func startRequestLogContentSessionIDBackfill(db *sql.DB) {
+	if db == nil {
+		return
+	}
+	requestLogMaintenanceWG.Add(1)
+	go func() {
+		defer requestLogMaintenanceWG.Done()
+		backfillRequestLogContentSessionIDs(db)
+	}()
 }
 
 // InitDB opens (or creates) the SQLite database at the given path and creates
@@ -426,8 +572,14 @@ func InitDB(dbPath string, storageCfg config.RequestLogStorageConfig, loc *time.
 	migrateCostColumn(db)
 	log.Debugf("usage: running api_key_name column migration")
 	migrateApiKeyNameColumn(db)
+	log.Debugf("usage: running upstream_model column migration")
+	migrateUpstreamModelColumn(db)
+	log.Debugf("usage: running vision_fallback_model column migration")
+	migrateVisionFallbackModelColumn(db)
 	log.Debugf("usage: running api_key_id column migration")
 	migrateAPIKeyIDColumn(db)
+	log.Debugf("usage: ensuring request log lookup indexes")
+	ensureRequestLogLookupIndexes(db)
 	log.Debugf("usage: running auth_subject_id column migration")
 	migrateAuthSubjectIDColumns(db)
 	log.Debugf("usage: running first_token_ms column migration")
@@ -436,6 +588,8 @@ func InitDB(dbPath string, storageCfg config.RequestLogStorageConfig, loc *time.
 	migrateStreamingColumn(db)
 	log.Debugf("usage: running request log detail column migration")
 	migrateRequestLogDetailColumn(db)
+	log.Debugf("usage: running request log content session_id column migration")
+	migrateRequestLogContentSessionIDColumn(db)
 	log.Debugf("usage: ensuring request log detail indexes")
 	ensureRequestLogDetailIndexes(db)
 	log.Debugf("usage: initializing pricing table")
@@ -459,6 +613,8 @@ func InitDB(dbPath string, storageCfg config.RequestLogStorageConfig, loc *time.
 	log.Debugf("usage: initializing identity_fingerprints table")
 	initIdentityFingerprintsTable(db)
 	startRequestLogMaintenance(db)
+	log.Debugf("usage: scheduling request log content session_id backfill")
+	startRequestLogContentSessionIDBackfill(db)
 	log.Infof("usage: SQLite database initialised at %s", dbPath)
 	return nil
 }
@@ -486,28 +642,40 @@ func CloseDB() {
 func InsertLog(apiKey, apiKeyName, model, source, channelName, authIndex string,
 	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
 	inputContent, outputContent string) {
-	insertLogIdentity(apiKey, "", "", apiKeyName, model, source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, "")
+	insertLogIdentity(apiKey, "", "", apiKeyName, model, "", "", source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, "")
 }
 
 func InsertLogWithDetails(apiKey, apiKeyName, model, source, channelName, authIndex string,
 	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
 	inputContent, outputContent, detailContent string) {
-	insertLogIdentity(apiKey, "", "", apiKeyName, model, source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
+	insertLogIdentity(apiKey, "", "", apiKeyName, model, "", "", source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
 }
 
 func InsertLogWithDetailsIdentity(apiKey, apiKeyID, apiKeyName, model, source, channelName, authIndex string,
 	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
 	inputContent, outputContent, detailContent string) {
-	insertLogIdentity(apiKey, apiKeyID, "", apiKeyName, model, source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
+	insertLogIdentity(apiKey, apiKeyID, "", apiKeyName, model, "", "", source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
 }
 
 func InsertLogWithDetailsIdentitySubject(apiKey, apiKeyID, authSubjectID, apiKeyName, model, source, channelName, authIndex string,
 	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
 	inputContent, outputContent, detailContent string) {
-	insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
+	insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, "", "", source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
 }
 
-func insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, source, channelName, authIndex string,
+func InsertLogWithDetailsIdentitySubjectUpstream(apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstreamModel, source, channelName, authIndex string,
+	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
+	inputContent, outputContent, detailContent string) {
+	insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstreamModel, "", source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
+}
+
+func InsertLogWithDetailsIdentitySubjectUpstreamVision(apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstreamModel, visionFallbackModel, source, channelName, authIndex string,
+	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
+	inputContent, outputContent, detailContent string) {
+	insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstreamModel, visionFallbackModel, source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
+}
+
+func insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstreamModel, visionFallbackModel, source, channelName, authIndex string,
 	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
 	inputContent, outputContent, detailContent string) {
 	db := getDB()
@@ -530,6 +698,8 @@ func insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, sourc
 	apiKeyID = strings.TrimSpace(apiKeyID)
 	authSubjectID = strings.TrimSpace(authSubjectID)
 	apiKeyName = strings.TrimSpace(apiKeyName)
+	upstreamModel = strings.TrimSpace(upstreamModel)
+	visionFallbackModel = strings.TrimSpace(visionFallbackModel)
 	if identity := ResolveAPIKeyIdentity(apiKey); identity != nil {
 		if apiKeyID == "" {
 			apiKeyID = identity.ID
@@ -549,11 +719,11 @@ func insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, sourc
 
 	result, err := tx.Exec(
 		`INSERT INTO request_logs
-			(timestamp, api_key, api_key_id, auth_subject_id, api_key_name, model, source, channel_name, auth_index,
+			(timestamp, api_key, api_key_id, auth_subject_id, api_key_name, model, upstream_model, vision_fallback_model, source, channel_name, auth_index,
 			 failed, streaming, latency_ms, first_token_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		timestamp.UTC().Format(time.RFC3339Nano),
-		apiKey, apiKeyID, authSubjectID, apiKeyName, model, source, channelName, authIndex,
+		apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstreamModel, visionFallbackModel, source, channelName, authIndex,
 		failedInt, streamingInt, latencyMs, firstTokenMs,
 		tokens.InputTokens, tokens.OutputTokens, tokens.ReasoningTokens,
 		tokens.CachedTokens, tokens.TotalTokens, cost,

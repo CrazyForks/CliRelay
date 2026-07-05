@@ -24,7 +24,6 @@ import (
 
 const (
 	// Main API requests can legitimately spend several minutes waiting on upstream model execution.
-	// Long-lived SSE and websocket routes explicitly clear this deadline before streaming/upgrading.
 	mainAPIServerWriteTimeout = 10 * time.Minute
 )
 

@@ -48,7 +48,9 @@ func SyncConfigDerivedAuths(cfg *config.Config, coreManager *coreauth.Manager) {
 		}
 		if err != nil {
 			log.WithError(err).Warnf("failed to apply config auth %s", next.ID)
+			continue
 		}
+		syncConfigDerivedAuthModels(cfg, next)
 	}
 
 	for _, existing := range coreManager.List() {
@@ -71,8 +73,194 @@ func SyncConfigDerivedAuths(cfg *config.Config, coreManager *coreauth.Manager) {
 		disabled.UpdatedAt = time.Now()
 		if _, err := coreManager.Update(ctx, disabled); err != nil {
 			log.WithError(err).Warnf("failed to disable removed config auth %s", disabled.ID)
+			continue
+		}
+		syncConfigDerivedAuthModels(cfg, disabled)
+	}
+}
+
+func syncConfigDerivedAuthModels(cfg *config.Config, auth *coreauth.Auth) {
+	if cfg == nil || auth == nil || strings.TrimSpace(auth.ID) == "" {
+		return
+	}
+	reg := sdkmodelcatalog.GlobalRegistry()
+	if reg == nil {
+		return
+	}
+	if auth.Disabled {
+		reg.UnregisterClient(auth.ID)
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
+	case "opencode-go":
+		syncOpenCodeGoConfigAuthModels(reg, cfg, auth)
+	}
+}
+
+func syncOpenCodeGoConfigAuthModels(reg sdkmodelcatalog.Registry, cfg *config.Config, auth *coreauth.Auth) {
+	entry := resolveConfigOpenCodeGoKey(cfg, auth)
+	if entry == nil {
+		reg.UnregisterClient(auth.ID)
+		return
+	}
+	models := sdkmodelcatalog.StaticModelDefinitionsByChannel("opencode-go")
+	if len(entry.Models) > 0 {
+		models = buildOpenCodeGoConfigModels(entry.Models, models)
+	}
+	models = applyConfigModelExclusions(models, entry.ExcludedModels)
+	reg.RegisterClient(auth.ID, "opencode-go", applyConfigModelPrefixes(models, auth.Prefix, cfg.ForceModelPrefix))
+}
+
+func resolveConfigOpenCodeGoKey(cfg *config.Config, auth *coreauth.Auth) *config.OpenCodeGoKey {
+	if cfg == nil || auth == nil || auth.Attributes == nil {
+		return nil
+	}
+	attrKey := strings.TrimSpace(auth.Attributes["api_key"])
+	if attrKey == "" {
+		return nil
+	}
+	for i := range cfg.OpenCodeGoKey {
+		if strings.EqualFold(strings.TrimSpace(cfg.OpenCodeGoKey[i].APIKey), attrKey) {
+			return &cfg.OpenCodeGoKey[i]
 		}
 	}
+	return nil
+}
+
+func buildOpenCodeGoConfigModels(models []config.OpenCodeGoModel, staticModels []*sdkmodelcatalog.ModelInfo) []*sdkmodelcatalog.ModelInfo {
+	staticByID := make(map[string]*sdkmodelcatalog.ModelInfo, len(staticModels))
+	for _, model := range staticModels {
+		if model == nil {
+			continue
+		}
+		if id := strings.ToLower(strings.TrimSpace(model.ID)); id != "" {
+			staticByID[id] = model
+		}
+	}
+
+	now := time.Now().Unix()
+	seen := make(map[string]struct{}, len(models))
+	out := make([]*sdkmodelcatalog.ModelInfo, 0, len(models))
+	for i := range models {
+		name := strings.TrimSpace(models[i].Name)
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		if model := staticByID[key]; model != nil {
+			clone := *model
+			clone.UserDefined = true
+			out = append(out, &clone)
+			continue
+		}
+		out = append(out, &sdkmodelcatalog.ModelInfo{
+			ID:          name,
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "opencode",
+			Type:        "opencode-go",
+			DisplayName: name,
+			UserDefined: true,
+		})
+	}
+	return out
+}
+
+func applyConfigModelExclusions(models []*sdkmodelcatalog.ModelInfo, excluded []string) []*sdkmodelcatalog.ModelInfo {
+	if len(models) == 0 || len(excluded) == 0 {
+		return models
+	}
+	patterns := make([]string, 0, len(excluded))
+	for _, item := range excluded {
+		if trimmed := strings.TrimSpace(item); trimmed != "" {
+			patterns = append(patterns, strings.ToLower(trimmed))
+		}
+	}
+	if len(patterns) == 0 {
+		return models
+	}
+	out := make([]*sdkmodelcatalog.ModelInfo, 0, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		id := strings.ToLower(strings.TrimSpace(model.ID))
+		blocked := false
+		for _, pattern := range patterns {
+			if matchConfigModelPattern(pattern, id) {
+				blocked = true
+				break
+			}
+		}
+		if !blocked {
+			out = append(out, model)
+		}
+	}
+	return out
+}
+
+func applyConfigModelPrefixes(models []*sdkmodelcatalog.ModelInfo, prefix string, forceModelPrefix bool) []*sdkmodelcatalog.ModelInfo {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" || len(models) == 0 {
+		return models
+	}
+	out := make([]*sdkmodelcatalog.ModelInfo, 0, len(models)*2)
+	seen := make(map[string]struct{}, len(models)*2)
+	add := func(model *sdkmodelcatalog.ModelInfo) {
+		if model == nil || strings.TrimSpace(model.ID) == "" {
+			return
+		}
+		if _, exists := seen[model.ID]; exists {
+			return
+		}
+		seen[model.ID] = struct{}{}
+		out = append(out, model)
+	}
+	for _, model := range models {
+		if !forceModelPrefix {
+			add(model)
+		}
+		if model == nil || strings.TrimSpace(model.ID) == "" {
+			continue
+		}
+		clone := *model
+		clone.ID = prefix + "/" + strings.TrimSpace(model.ID)
+		add(&clone)
+	}
+	return out
+}
+
+func matchConfigModelPattern(pattern, value string) bool {
+	if pattern == "" {
+		return false
+	}
+	if !strings.Contains(pattern, "*") {
+		return pattern == value
+	}
+	parts := strings.Split(pattern, "*")
+	if parts[0] != "" && !strings.HasPrefix(value, parts[0]) {
+		return false
+	}
+	if parts[len(parts)-1] != "" && !strings.HasSuffix(value, parts[len(parts)-1]) {
+		return false
+	}
+	offset := len(parts[0])
+	for i := 1; i < len(parts)-1; i++ {
+		part := parts[i]
+		if part == "" {
+			continue
+		}
+		idx := strings.Index(value[offset:], part)
+		if idx < 0 {
+			return false
+		}
+		offset += idx + len(part)
+	}
+	return true
 }
 
 func isConfigDerivedAuth(auth *coreauth.Auth) bool {

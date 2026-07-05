@@ -232,7 +232,8 @@ func TestOpenAICompatExecutorStreamUsagePreservesRequestModelOverUpstreamEcho(t 
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte(strings.Join([]string{
 			`data: {"id":"chatcmpl-echo","object":"chat.completion.chunk","created":1,"model":"accounts/fireworks/models/glm-5p2","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"finish_reason":null}]}`,
-			`data: {"id":"chatcmpl-echo","object":"chat.completion.chunk","created":1,"model":"accounts/fireworks/models/glm-5p2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}`,
+			`data: {"id":"chatcmpl-echo","object":"chat.completion.chunk","created":1,"model":"accounts/fireworks/models/glm-5p2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8,"prompt_tokens_details":null}}`,
+			`data: {"id":"chatcmpl-echo","object":"chat.completion.chunk","created":1,"model":"accounts/fireworks/models/glm-5p2","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8,"prompt_tokens_details":{"cached_tokens":10}}}`,
 			`data: [DONE]`,
 			``,
 		}, "\n\n")))
@@ -270,10 +271,83 @@ func TestOpenAICompatExecutorStreamUsagePreservesRequestModelOverUpstreamEcho(t 
 				t.Fatalf("stream usage record model = upstream echo %q; must stay the clean request model", record.Model)
 			}
 			if record.Model == "glm-5.2" {
+				if record.Detail.CachedTokens != 10 {
+					t.Fatalf("stream cached tokens = %d, want 10", record.Detail.CachedTokens)
+				}
 				return
 			}
 		case <-timer:
 			t.Fatal("timed out waiting for stream usage record with clean model glm-5.2")
+		}
+	}
+}
+
+func TestOpenAICompatExecutorResponsesStreamUsesFinalUsageChunk(t *testing.T) {
+	usagePlugin := &usageCapturePlugin{records: make(chan cliproxyusage.Record, 4)}
+	cliproxyusage.RegisterPlugin(usagePlugin)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`data: {"id":"chatcmpl-cache","object":"chat.completion.chunk","created":1,"model":"provider/cache-model","choices":[{"index":0,"delta":{"role":"assistant","content":"pong"},"finish_reason":null}]}`,
+			`data: {"id":"chatcmpl-cache","object":"chat.completion.chunk","created":1,"model":"provider/cache-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":31,"completion_tokens":7,"total_tokens":38,"prompt_tokens_details":null}}`,
+			`data: {"id":"chatcmpl-cache","object":"chat.completion.chunk","created":1,"model":"provider/cache-model","choices":[],"usage":{"prompt_tokens":31,"completion_tokens":7,"total_tokens":38,"prompt_tokens_details":{"cached_tokens":10}}}`,
+			`data: [DONE]`,
+			``,
+		}, "\n\n")))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	payload := []byte(`{"model":"cache-model","stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":"ping"}]}]}`)
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "cache-model",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		OriginalRequest: payload,
+		SourceFormat:    sdktranslator.FromString("openai-response"),
+		Stream:          true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var response strings.Builder
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+		response.Write(chunk.Payload)
+		response.WriteByte('\n')
+	}
+	out := response.String()
+	if got := strings.Count(out, `"type":"response.completed"`); got != 1 {
+		t.Fatalf("response.completed count = %d, want 1:\n%s", got, out)
+	}
+	completed := responseCompletedPayload(out)
+	if len(completed) == 0 {
+		t.Fatalf("missing response.completed payload:\n%s", out)
+	}
+	if got := gjson.GetBytes(completed, "response.usage.input_tokens_details.cached_tokens").Int(); got != 10 {
+		t.Fatalf("client cached_tokens = %d, want 10:\n%s", got, out)
+	}
+
+	timer := time.After(time.Second)
+	for {
+		select {
+		case record := <-usagePlugin.records:
+			if record.Model == "cache-model" {
+				if record.Detail.CachedTokens != 10 {
+					t.Fatalf("usage cached tokens = %d, want 10", record.Detail.CachedTokens)
+				}
+				return
+			}
+		case <-timer:
+			t.Fatal("timed out waiting for stream usage record")
 		}
 	}
 }
@@ -360,6 +434,21 @@ func TestOpenAICompatExecutorClaudeStreamSkipsEmptyToolNameEndToEnd(t *testing.T
 	if !strings.Contains(out, `"stop_reason":"end_turn"`) {
 		t.Fatalf("empty-only OpenAI tool_calls finish must map to Claude end_turn:\n%s", out)
 	}
+}
+
+func responseCompletedPayload(stream string) []byte {
+	var event string
+	for _, line := range strings.Split(stream, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "event:") {
+			event = strings.TrimSpace(strings.TrimPrefix(trimmed, "event:"))
+			continue
+		}
+		if event == "response.completed" && strings.HasPrefix(trimmed, "data:") {
+			return []byte(strings.TrimSpace(strings.TrimPrefix(trimmed, "data:")))
+		}
+	}
+	return nil
 }
 
 func TestOpenAICompatExecutorClaudeStreamSkipsMissingToolNameArgumentsEndToEnd(t *testing.T) {

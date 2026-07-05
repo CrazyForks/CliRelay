@@ -14,6 +14,7 @@ import (
 
 	gin "github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/bodyutil"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/middleware"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	internalrouting "github.com/router-for-me/CLIProxyAPI/v6/internal/routing"
@@ -102,6 +103,18 @@ func newTestServerWithConfig(t *testing.T, configure func(*proxyconfig.Config)) 
 
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	return NewServer(cfg, authManager, accessManager, configPath)
+}
+
+func TestHealthzReturnsNoContent(t *testing.T) {
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusNoContent, rr.Body.String())
+	}
 }
 
 func TestAmpProviderModelRoutes(t *testing.T) {
@@ -300,6 +313,55 @@ func TestUpdateClientsDisableAllModelsMarksConfigAuthDisabled(t *testing.T) {
 	if !updated.Disabled || updated.Status != auth.StatusDisabled {
 		t.Fatalf("expected disable-all config auth to be disabled, got disabled=%t status=%s", updated.Disabled, updated.Status)
 	}
+}
+
+func TestUpdateClientsRegistersOpenCodeGoConfigModels(t *testing.T) {
+	server := newTestServer(t)
+	next := *server.cfg
+	next.OpenCodeGoKey = []proxyconfig.OpenCodeGoKey{{
+		APIKey: "go-key",
+		Models: []proxyconfig.OpenCodeGoModel{{Name: "glm-5.2"}},
+	}}
+
+	server.UpdateClients(&next)
+
+	var authID string
+	for _, candidate := range server.handlers.AuthManager.List() {
+		if candidate != nil && candidate.Provider == "opencode-go" {
+			authID = candidate.ID
+			break
+		}
+	}
+	if authID == "" {
+		t.Fatal("expected config-derived OpenCode Go auth")
+	}
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(authID)
+	})
+
+	models := registry.GetGlobalRegistry().GetModelsForClient(authID)
+	if len(models) != 1 || !hasRegistryModelID(models, "glm-5.2") {
+		t.Fatalf("OpenCode Go registry models = %+v, want glm-5.2", models)
+	}
+	if !registry.GetGlobalRegistry().ClientSupportsModel(authID, "glm-5.2") {
+		t.Fatal("expected OpenCode Go config auth to support glm-5.2")
+	}
+
+	removed := next
+	removed.OpenCodeGoKey = nil
+	server.UpdateClients(&removed)
+	if models := registry.GetGlobalRegistry().GetModelsForClient(authID); len(models) != 0 {
+		t.Fatalf("OpenCode Go registry models after removal = %+v, want none", models)
+	}
+}
+
+func hasRegistryModelID(models []*registry.ModelInfo, id string) bool {
+	for _, model := range models {
+		if model != nil && strings.EqualFold(strings.TrimSpace(model.ID), id) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestGroupedV1RouteForbiddenByAPIKeyGroups(t *testing.T) {
@@ -680,7 +742,7 @@ func TestGetContextWithCancelClearsWriteDeadlineForStreamingRequests(t *testing.
 	req.Header.Set("Content-Type", "application/json")
 	c.Request = req
 	tracking := &deadlineTrackingWriter{ResponseWriter: c.Writer}
-	c.Writer = tracking
+	c.Writer = middleware.NewResponseWriterWrapper(tracking, nil, &middleware.RequestInfo{}, c)
 
 	handler := &sdkhandlers.BaseAPIHandler{Cfg: &sdkconfig.SDKConfig{}}
 	_, cancelHandler := handler.GetContextWithCancel(nil, c, c.Request.Context())
@@ -688,6 +750,24 @@ func TestGetContextWithCancelClearsWriteDeadlineForStreamingRequests(t *testing.
 
 	if !tracking.sawZeroDeadline() {
 		t.Fatal("expected streaming request to clear the server write deadline")
+	}
+}
+
+func TestGetContextWithCancelKeepsWriteDeadlineForNonStreamingRequests(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test-model"}`))
+	req.Header.Set("Content-Type", "application/json")
+	c.Request = req
+	tracking := &deadlineTrackingWriter{ResponseWriter: c.Writer}
+	c.Writer = tracking
+
+	handler := &sdkhandlers.BaseAPIHandler{Cfg: &sdkconfig.SDKConfig{}}
+	_, cancelHandler := handler.GetContextWithCancel(nil, c, c.Request.Context())
+	cancelHandler()
+
+	if tracking.sawZeroDeadline() {
+		t.Fatal("expected non-streaming request to keep the server write deadline")
 	}
 }
 
@@ -772,8 +852,27 @@ func TestCORSMiddlewareAllowsConfiguredOrigin(t *testing.T) {
 	}
 }
 
-func TestCORSMiddlewareAllowsChromeExtensionOriginByDefault(t *testing.T) {
+func TestCORSMiddlewareRejectsUnconfiguredChromeExtensionOrigin(t *testing.T) {
 	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodOptions, "/v1/models", nil)
+	req.Header.Set("Origin", "chrome-extension://abcdefghijklmnop")
+
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusForbidden, rr.Body.String())
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want empty", got)
+	}
+}
+
+func TestCORSMiddlewareAllowsConfiguredChromeExtensionOrigin(t *testing.T) {
+	server := newTestServerWithConfig(t, func(cfg *proxyconfig.Config) {
+		cfg.CORSAllowOrigins = []string{"chrome-extension://abcdefghijklmnop"}
+	})
 
 	req := httptest.NewRequest(http.MethodOptions, "/v1/models", nil)
 	req.Header.Set("Origin", "chrome-extension://abcdefghijklmnop")

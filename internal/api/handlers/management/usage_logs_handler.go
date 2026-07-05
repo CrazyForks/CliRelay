@@ -145,12 +145,16 @@ func (h *UsageLogsHandler) GetPublicUsageLogs(c *gin.Context) {
 		return
 	}
 	payload, err := h.service().PublicUsageLogs(managementusagelogs.PublicLogQueryInput{
-		APIKey: req.APIKey,
-		Model:  req.Model,
-		Status: req.Status,
-		Page:   req.Page,
-		Size:   req.Size,
-		Days:   req.Days,
+		APIKey:          req.APIKey,
+		Models:          req.Models,
+		Channels:        req.Channels,
+		Statuses:        req.Statuses,
+		MatchNoModels:   req.ModelsEmpty,
+		MatchNoChannels: req.ChannelsEmpty,
+		MatchNoStatuses: req.StatusesEmpty,
+		Page:            req.Page,
+		Size:            req.Size,
+		Days:            req.Days,
 	})
 	if err != nil {
 		log.Warnf("management usage logs: public usage logs failed: %v", err)

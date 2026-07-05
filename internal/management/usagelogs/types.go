@@ -17,12 +17,16 @@ type ManagementLogQueryInput struct {
 }
 
 type PublicLogQueryInput struct {
-	APIKey string
-	Model  string
-	Status string
-	Page   int
-	Size   int
-	Days   int
+	APIKey          string
+	Models          []string
+	Channels        []string
+	Statuses        []string
+	MatchNoModels   bool
+	MatchNoChannels bool
+	MatchNoStatuses bool
+	Page            int
+	Size            int
+	Days            int
 }
 
 type LogContentResponse struct {

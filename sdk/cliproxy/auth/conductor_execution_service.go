@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 )
 
 type executionService struct {
@@ -189,7 +190,7 @@ func (s executionService) executeStreamMixedOnce(ctx context.Context, providers 
 			continue
 		}
 
-		return s.wrapStreamResult(candidate.execCtx, candidate.auth, candidate.provider, scope.routeModel, streamResult), nil
+		return s.wrapStreamResult(candidate.execCtx, candidate.auth, candidate.provider, scope.routeModel, scope.opts.SourceFormat, streamResult), nil
 	}
 }
 
@@ -251,6 +252,7 @@ func (s executionService) wrapStreamResult(
 	auth *Auth,
 	provider string,
 	routeModel string,
+	sourceFormat sdktranslator.Format,
 	streamResult *cliproxyexecutor.StreamResult,
 ) *cliproxyexecutor.StreamResult {
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -259,7 +261,11 @@ func (s executionService) wrapStreamResult(
 		defer close(out)
 		var failed bool
 		forward := true
+		completionTracker := newResponsesStreamCompletionTracker(sourceFormat)
 		for chunk := range streamChunks {
+			if chunk.Err == nil && completionTracker != nil && len(chunk.Payload) > 0 {
+				completionTracker.Observe(chunk.Payload)
+			}
 			if chunk.Err != nil && !failed {
 				failed = true
 				rerr := errorFromExecution(chunk.Err)
@@ -288,6 +294,32 @@ func (s executionService) wrapStreamResult(
 			case <-streamCtx.Done():
 				forward = false
 			case out <- chunk:
+			}
+		}
+		if !failed && completionTracker != nil {
+			if err := completionTracker.ErrIfIncomplete(); err != nil {
+				failed = true
+				rerr := errorFromExecution(err)
+				s.manager.MarkResult(streamCtx, Result{
+					AuthID:     streamAuth.ID,
+					Provider:   streamProvider,
+					Model:      routeModel,
+					Success:    false,
+					Error:      rerr,
+					RetryAfter: retryAfterFromError(err),
+					Headers:    headers.Clone(),
+				})
+				if forward {
+					chunk := cliproxyexecutor.StreamChunk{Err: err}
+					if streamCtx == nil {
+						out <- chunk
+					} else {
+						select {
+						case <-streamCtx.Done():
+						case out <- chunk:
+						}
+					}
+				}
 			}
 		}
 		if !failed {

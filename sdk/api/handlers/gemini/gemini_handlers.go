@@ -190,7 +190,12 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 	}
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, c.Request.Context())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, alt)
+	dataChan, upstreamHeaders, errChan, startErr := h.StartStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, alt)
+	if startErr != nil {
+		h.WriteErrorResponse(c, startErr)
+		cliCancel(startErr.Error)
+		return
+	}
 
 	if alt == "" {
 		handlers.PrepareStreamingResponse(c)

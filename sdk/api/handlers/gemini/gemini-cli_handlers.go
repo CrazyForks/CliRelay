@@ -159,10 +159,6 @@ func (h *GeminiCLIAPIHandler) CLIHandler(c *gin.Context) {
 func (h *GeminiCLIAPIHandler) handleInternalStreamGenerateContent(c *gin.Context, rawJSON []byte) {
 	alt := h.GetAlt(c)
 
-	if alt == "" {
-		handlers.PrepareStreamingResponse(c)
-	}
-
 	// Get the http.Flusher interface to manually flush the response.
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
@@ -179,7 +175,15 @@ func (h *GeminiCLIAPIHandler) handleInternalStreamGenerateContent(c *gin.Context
 	modelName := modelResult.String()
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, c.Request.Context())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+	dataChan, upstreamHeaders, errChan, startErr := h.StartStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+	if startErr != nil {
+		h.WriteErrorResponse(c, startErr)
+		cliCancel(startErr.Error)
+		return
+	}
+	if alt == "" {
+		handlers.PrepareStreamingResponse(c)
+	}
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	h.forwardCLIStream(c, flusher, "", func(err error) { cliCancel(err) }, dataChan, errChan)
 }

@@ -172,7 +172,12 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	// New core execution path
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, c.Request.Context())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+	dataChan, upstreamHeaders, errChan, startErr := h.StartStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+	if startErr != nil {
+		h.WriteErrorResponse(c, startErr)
+		cliCancel(startErr.Error)
+		return
+	}
 
 	handlers.PrepareStreamingResponse(c)
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)

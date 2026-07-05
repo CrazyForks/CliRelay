@@ -78,10 +78,15 @@ func uniqueRequestLogAPIKeyIDByKeyFromDB(db *sql.DB) map[string]string {
 	}
 
 	rows, err := db.Query(`
-		SELECT api_key, api_key_id
-		FROM request_logs
-		WHERE trim(coalesce(api_key, '')) <> ''
-		  AND trim(coalesce(api_key_id, '')) <> ''
+		SELECT existing.api_key, existing.api_key_id
+		FROM request_logs AS existing
+		JOIN (
+			SELECT DISTINCT api_key
+			FROM request_logs
+			WHERE api_key_id = ''
+			  AND api_key != ''
+		) AS missing ON missing.api_key = existing.api_key
+		WHERE existing.api_key_id != ''
 	`)
 	if err != nil {
 		log.Warnf("usage: query unique request_log api_key_id by raw key failed: %v", err)
@@ -126,24 +131,31 @@ func backfillRequestLogAPIKeyIDs(db *sql.DB) {
 	if db == nil {
 		return
 	}
+	if !hasRequestLogsMissingAPIKeyID(db) {
+		return
+	}
 
 	result, err := db.Exec(`
 		UPDATE request_logs
 		SET api_key_id = (
 			SELECT id FROM api_keys WHERE api_keys.key = request_logs.api_key
 		)
-		WHERE trim(coalesce(api_key_id, '')) = ''
+		WHERE api_key_id = ''
+		  AND api_key != ''
 		  AND EXISTS (
 			SELECT 1
 			FROM api_keys
 			WHERE api_keys.key = request_logs.api_key
-			  AND trim(coalesce(api_keys.id, '')) <> ''
+			  AND api_keys.id != ''
 		  )
 	`)
 	if err != nil {
 		log.Warnf("usage: backfill request_logs api_key_id by key failed: %v", err)
 	} else if rows, rowsErr := result.RowsAffected(); rowsErr == nil && rows > 0 {
 		log.Infof("usage: backfilled api_key_id for %d request_logs by exact key match", rows)
+	}
+	if !hasRequestLogsMissingAPIKeyID(db) {
+		return
 	}
 
 	nameToID := uniqueAPIKeyIDByNameFromDB(db)
@@ -154,9 +166,9 @@ func backfillRequestLogAPIKeyIDs(db *sql.DB) {
 		result, err := db.Exec(`
 			UPDATE request_logs
 			SET api_key_id = ?
-			WHERE trim(coalesce(api_key_id, '')) = ''
+			WHERE api_key_id = ''
 			  AND lower(trim(coalesce(api_key_name, ''))) = ?
-			  AND trim(coalesce(api_key, '')) <> ''
+			  AND api_key != ''
 		`, id, lowerName)
 		if err != nil {
 			log.Warnf("usage: backfill request_logs api_key_id by name failed for %q: %v", lowerName, err)
@@ -165,6 +177,9 @@ func backfillRequestLogAPIKeyIDs(db *sql.DB) {
 		if rows, rowsErr := result.RowsAffected(); rowsErr == nil && rows > 0 {
 			log.Infof("usage: backfilled api_key_id for %d request_logs by unique api_key_name=%q", rows, lowerName)
 		}
+	}
+	if !hasRequestLogsMissingAPIKeyID(db) {
+		return
 	}
 
 	keyToID := uniqueRequestLogAPIKeyIDByKeyFromDB(db)
@@ -175,8 +190,8 @@ func backfillRequestLogAPIKeyIDs(db *sql.DB) {
 		result, err := db.Exec(`
 			UPDATE request_logs
 			SET api_key_id = ?
-			WHERE trim(coalesce(api_key_id, '')) = ''
-			  AND trim(coalesce(api_key, '')) = ?
+			WHERE api_key_id = ''
+			  AND api_key = ?
 		`, id, rawKey)
 		if err != nil {
 			log.Warnf("usage: backfill request_logs api_key_id by historical raw key failed for %q: %v", rawKey, err)
@@ -186,4 +201,17 @@ func backfillRequestLogAPIKeyIDs(db *sql.DB) {
 			log.Infof("usage: backfilled api_key_id for %d request_logs by historical raw api_key=%q", rows, rawKey)
 		}
 	}
+}
+
+func hasRequestLogsMissingAPIKeyID(db *sql.DB) bool {
+	var exists int
+	err := db.QueryRow("SELECT 1 FROM request_logs WHERE api_key_id = '' AND api_key != '' LIMIT 1").Scan(&exists)
+	if err == sql.ErrNoRows {
+		return false
+	}
+	if err != nil {
+		log.Warnf("usage: query request_logs missing api_key_id failed: %v", err)
+		return false
+	}
+	return exists == 1
 }

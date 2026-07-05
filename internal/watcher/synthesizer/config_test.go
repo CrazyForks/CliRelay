@@ -345,6 +345,7 @@ func TestConfigSynthesizer_OpenCodeGoKeys(t *testing.T) {
 					ProxyURL:            "http://proxy",
 					ProxyID:             "hk",
 					Headers:             map[string]string{"X-Test": "yes"},
+					Models:              []config.OpenCodeGoModel{{Name: "glm-5.2"}},
 					ExcludedModels:      []string{"minimax-m2.5"},
 					VisionFallbackModel: "qwen3.5-plus",
 				},
@@ -374,7 +375,61 @@ func TestConfigSynthesizer_OpenCodeGoKeys(t *testing.T) {
 	if auth.Attributes["auth_kind"] != "apikey" || auth.Attributes["excluded_models"] != "minimax-m2.5" {
 		t.Fatalf("expected api key exclusion metadata, got %#v", auth.Attributes)
 	}
+	if auth.Attributes["models_hash"] == "" {
+		t.Fatalf("expected models_hash for explicit OpenCode Go models, got %#v", auth.Attributes)
+	}
 	if auth.Attributes["vision_fallback_model"] != "qwen3.5-plus" {
+		t.Fatalf("expected vision fallback metadata, got %#v", auth.Attributes)
+	}
+}
+
+func TestConfigSynthesizer_ClineKeys(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			ClineKey: []config.ClineKey{
+				{
+					APIKey:              "cline-key",
+					Name:                "cline",
+					Priority:            7,
+					Prefix:              "team",
+					BaseURL:             "https://api.cline.bot/api/v1/",
+					ProxyURL:            "http://proxy",
+					ProxyID:             "hk",
+					Headers:             map[string]string{"X-Test": "yes"},
+					ExcludedModels:      []string{"cline-pass/minimax-m3"},
+					VisionFallbackModel: "cline-pass/mimo-v2.5-pro",
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	auth := auths[0]
+	if auth.Provider != "cline" || auth.Label != "cline" || auth.Prefix != "team" {
+		t.Fatalf("unexpected auth identity: %+v", auth)
+	}
+	if auth.Attributes["api_key"] != "cline-key" || auth.Attributes["base_url"] != config.DefaultClineBaseURL || auth.Attributes["provider_key"] != "cline" || auth.Attributes["compat_name"] != "ClinePass" {
+		t.Fatalf("unexpected attrs: %#v", auth.Attributes)
+	}
+	if auth.Attributes["priority"] != "7" || auth.Attributes["header:X-Test"] != "yes" {
+		t.Fatalf("unexpected attrs: %#v", auth.Attributes)
+	}
+	if auth.ProxyURL != "http://proxy" || auth.ProxyID != "hk" {
+		t.Fatalf("unexpected proxy settings: %+v", auth)
+	}
+	if auth.Attributes["auth_kind"] != "apikey" || auth.Attributes["excluded_models"] != "cline-pass/minimax-m3" {
+		t.Fatalf("expected api key exclusion metadata, got %#v", auth.Attributes)
+	}
+	if auth.Attributes["vision_fallback_model"] != "cline-pass/mimo-v2.5-pro" {
 		t.Fatalf("expected vision fallback metadata, got %#v", auth.Attributes)
 	}
 }
@@ -806,6 +861,9 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 			OpenCodeGoKey: []config.OpenCodeGoKey{
 				{APIKey: "opencode-go-key"},
 			},
+			ClineKey: []config.ClineKey{
+				{APIKey: "cline-key"},
+			},
 			OpenAICompatibility: []config.OpenAICompatibility{
 				{Name: "compat", BaseURL: "https://compat.api"},
 			},
@@ -824,8 +882,8 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(auths) != 7 {
-		t.Fatalf("expected 7 auths, got %d", len(auths))
+	if len(auths) != 8 {
+		t.Fatalf("expected 8 auths, got %d", len(auths))
 	}
 
 	providers := make(map[string]bool)
@@ -833,7 +891,7 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 		providers[a.Provider] = true
 	}
 
-	expected := []string{"gemini", "claude", "codex", "opencode-go", "compat", "vertex", "bedrock"}
+	expected := []string{"gemini", "claude", "codex", "opencode-go", "cline", "compat", "vertex", "bedrock"}
 	for _, p := range expected {
 		if !providers[p] {
 			t.Errorf("expected provider %s not found", p)

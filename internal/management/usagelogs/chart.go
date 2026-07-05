@@ -3,31 +3,17 @@ package usagelogs
 import "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 
 func (s *Service) PublicChartData(apiKey string, days int) (map[string]any, error) {
-	daily, err := usage.QueryDailySeries(apiKey, days)
-	if err != nil {
-		return nil, err
-	}
-	if daily == nil {
-		daily = []usage.DailySeriesPoint{}
-	}
-
-	models, err := usage.QueryModelDistribution(apiKey, days)
-	if err != nil {
-		return nil, err
-	}
-	if models == nil {
-		models = []usage.ModelDistributionPoint{}
-	}
-
-	stats, err := usage.QueryStats(usage.LogQueryParams{APIKey: apiKey, Days: days})
+	chartData, err := usage.QueryPublicChartData(apiKey, days)
 	if err != nil {
 		return nil, err
 	}
 
 	return map[string]any{
-		"daily_series":       daily,
-		"model_distribution": models,
-		"stats":              stats,
+		"daily_series":       chartData.DailySeries,
+		"heatmap_series":     chartData.HeatmapSeries,
+		"model_distribution": chartData.ModelDistribution,
+		"stats":              chartData.Stats,
+		"api_key_name":       s.publicAPIKeyName(apiKey),
 	}, nil
 }
 

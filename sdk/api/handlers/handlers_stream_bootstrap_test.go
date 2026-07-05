@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -141,6 +142,8 @@ type authAwareStreamExecutor struct {
 
 type invalidJSONStreamExecutor struct{}
 
+type incompleteResponsesStreamExecutor struct{}
+
 func (e *invalidJSONStreamExecutor) Identifier() string { return "codex" }
 
 func (e *invalidJSONStreamExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
@@ -163,6 +166,35 @@ func (e *invalidJSONStreamExecutor) CountTokens(context.Context, *coreauth.Auth,
 }
 
 func (e *invalidJSONStreamExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
+	return nil, &coreauth.Error{
+		Code:       "not_implemented",
+		Message:    "HttpRequest not implemented",
+		HTTPStatus: http.StatusNotImplemented,
+	}
+}
+
+func (e *incompleteResponsesStreamExecutor) Identifier() string { return "codex" }
+
+func (e *incompleteResponsesStreamExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "Execute not implemented"}
+}
+
+func (e *incompleteResponsesStreamExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	ch := make(chan coreexecutor.StreamChunk, 1)
+	ch <- coreexecutor.StreamChunk{Payload: []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n")}
+	close(ch)
+	return &coreexecutor.StreamResult{Chunks: ch}, nil
+}
+
+func (e *incompleteResponsesStreamExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *incompleteResponsesStreamExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "CountTokens not implemented"}
+}
+
+func (e *incompleteResponsesStreamExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
 	return nil, &coreauth.Error{
 		Code:       "not_implemented",
 		Message:    "HttpRequest not implemented",
@@ -831,5 +863,77 @@ func TestExecuteStreamWithAuthManager_ValidatesOpenAIResponsesStreamDataJSON(t *
 	}
 	if !gotErr {
 		t.Fatalf("expected terminal error")
+	}
+}
+
+func TestExecuteStreamWithAuthManager_RejectsOpenAIResponsesStreamWithoutCompleted(t *testing.T) {
+	executor := &incompleteResponsesStreamExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth1 := &coreauth.Auth{
+		ID:       "auth1",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"email": "test1@example.com"},
+	}
+	if _, err := manager.Register(context.Background(), auth1); err != nil {
+		t.Fatalf("manager.Register(auth1): %v", err)
+	}
+
+	registry.GetGlobalRegistry().RegisterClient(auth1.ID, auth1.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth1.ID)
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai-response", "test-model", []byte(`{"model":"test-model"}`), "")
+	if dataChan == nil || errChan == nil {
+		t.Fatalf("expected non-nil channels")
+	}
+
+	var got []byte
+	for chunk := range dataChan {
+		got = append(got, chunk...)
+	}
+	if len(got) == 0 {
+		t.Fatalf("expected partial payload before protocol error")
+	}
+
+	var gotErr *interfaces.ErrorMessage
+	for msg := range errChan {
+		if msg != nil {
+			gotErr = msg
+		}
+	}
+	if gotErr == nil {
+		t.Fatalf("expected terminal error")
+	}
+	if gotErr.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected status %d, got %d", http.StatusBadGateway, gotErr.StatusCode)
+	}
+	if gotErr.Error == nil || !strings.Contains(gotErr.Error.Error(), "upstream responses stream closed before response.completed") {
+		t.Fatalf("unexpected error: %v", gotErr.Error)
+	}
+
+	updated, ok := manager.GetByID("auth1")
+	if !ok {
+		t.Fatalf("expected auth to be present")
+	}
+	if updated.Unavailable {
+		t.Fatalf("incomplete responses stream must not mark auth unavailable")
+	}
+	if updated.LastError == nil || updated.LastError.Code != "response_stream_incomplete" || !strings.Contains(updated.LastError.Message, "upstream responses stream closed before response.completed") {
+		t.Fatalf("expected protocol failure LastError, got %+v", updated.LastError)
+	}
+	state := updated.ModelStates["test-model"]
+	if state == nil {
+		t.Fatalf("expected model state for incomplete stream")
+	}
+	if state.LastError == nil || state.LastError.Code != "response_stream_incomplete" {
+		t.Fatalf("expected model protocol failure LastError, got %+v", state.LastError)
+	}
+	if !state.NextRetryAfter.IsZero() {
+		t.Fatalf("incomplete responses stream must not set model retry cooldown, got %v", state.NextRetryAfter)
 	}
 }
