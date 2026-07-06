@@ -764,6 +764,157 @@ func TestRunComposeUpdateUpgradesLegacySQLiteComposeWithRuntimeStack(t *testing.
 	}
 }
 
+func TestRunComposeUpdateBootstrapsProductionLegacySQLiteStack(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "docker.log")
+	dockerPath := filepath.Join(dir, "docker")
+	composePath := filepath.Join(dir, "docker-compose.yml")
+	envPath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(dockerPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$COMPOSE_LOG\"\n"), 0o755); err != nil {
+		t.Fatalf("write fake docker: %v", err)
+	}
+	composeText := `services:
+  cli-proxy-api:
+    container_name: cli-proxy-api
+    image: ${CLI_PROXY_IMAGE:-ghcr.io/kittors/clirelay:latest}
+    restart: unless-stopped
+    ports:
+      - "8317:8317"
+    volumes:
+      - /root/cliproxy/data:/CLIProxyAPI/data
+      - /root/cliproxy/logs:/CLIProxyAPI/logs
+    environment:
+      GIN_MODE: release
+  clirelay-updater:
+    container_name: clirelay-updater
+    image: ${CLI_PROXY_IMAGE:-ghcr.io/kittors/clirelay:latest}
+    command:
+      - ./clirelay-updater
+    environment:
+      CLIRELAY_COMPOSE_FILE: /workspace/docker-compose.yml
+      CLIRELAY_ENV_FILE: /workspace/.env
+      CLIRELAY_TARGET_SERVICE: cli-proxy-api
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /root/cliproxy/docker-compose.yml:/workspace/docker-compose.yml:ro
+      - /root/cliproxy/.env:/workspace/.env
+    restart: unless-stopped
+`
+	if err := os.WriteFile(composePath, []byte(composeText), 0o644); err != nil {
+		t.Fatalf("write compose: %v", err)
+	}
+	if err := os.WriteFile(envPath, []byte("CLI_PROXY_IMAGE=ghcr.io/kittors/clirelay:dev\n"), 0o644); err != nil {
+		t.Fatalf("write env: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("COMPOSE_LOG", logPath)
+
+	err := runComposeUpdate(context.Background(), composePath, envPath, "cliproxy", "cli-proxy-api", updaterRunReporter{})
+	if err != nil {
+		t.Fatalf("runComposeUpdate failed: %v", err)
+	}
+
+	composeData, err := os.ReadFile(composePath)
+	if err != nil {
+		t.Fatalf("read upgraded compose: %v", err)
+	}
+	upgraded := string(composeData)
+	for _, want := range []string{"cli-proxy-api:", "clirelay-updater:", "clirelay-init:", "clirelay-migrate:", "postgres:", "redis:"} {
+		if !strings.Contains(upgraded, want) {
+			t.Fatalf("upgraded compose missing %q:\n%s", want, upgraded)
+		}
+	}
+	if strings.Contains(upgraded, "${CLI_PROXY_IMAGE:-${CLI_PROXY_IMAGE:-") {
+		t.Fatalf("upgraded compose contains nested CLI_PROXY_IMAGE fallback:\n%s", upgraded)
+	}
+
+	var doc map[string]any
+	if err := yaml.Unmarshal(composeData, &doc); err != nil {
+		t.Fatalf("parse upgraded compose: %v", err)
+	}
+	services, ok := stringMap(doc["services"])
+	if !ok {
+		t.Fatalf("services not found in upgraded compose:\n%s", upgraded)
+	}
+	target, ok := stringMap(services["cli-proxy-api"])
+	if !ok {
+		t.Fatalf("target service missing:\n%s", upgraded)
+	}
+	if target["container_name"] != "cli-proxy-api" {
+		t.Fatalf("container_name = %#v, want preserved", target["container_name"])
+	}
+	if !reflect.DeepEqual(target["ports"], []any{"8317:8317"}) {
+		t.Fatalf("ports = %#v, want preserved", target["ports"])
+	}
+	targetEnv, ok := stringMap(target["environment"])
+	if !ok {
+		t.Fatalf("target environment is not a map:\n%s", upgraded)
+	}
+	if targetEnv["GIN_MODE"] != "release" {
+		t.Fatalf("GIN_MODE = %#v, want release", targetEnv["GIN_MODE"])
+	}
+	if targetEnv["CLIRELAY_SQLITE_AUTO_MIGRATE"] != "false" {
+		t.Fatalf("target CLIRELAY_SQLITE_AUTO_MIGRATE = %#v, want false", targetEnv["CLIRELAY_SQLITE_AUTO_MIGRATE"])
+	}
+	migrate, ok := stringMap(services["clirelay-migrate"])
+	if !ok {
+		t.Fatalf("migrate service missing:\n%s", upgraded)
+	}
+	migrateEnv, ok := stringMap(migrate["environment"])
+	if !ok {
+		t.Fatalf("migrate environment is not a map:\n%s", upgraded)
+	}
+	if _, ok := migrateEnv["CLIRELAY_SQLITE_AUTO_MIGRATE"]; ok {
+		t.Fatalf("migrate service must not disable SQLite import: %#v", migrateEnv)
+	}
+	updater, ok := stringMap(services["clirelay-updater"])
+	if !ok {
+		t.Fatalf("updater service missing:\n%s", upgraded)
+	}
+	updaterEnv, ok := stringMap(updater["environment"])
+	if !ok {
+		t.Fatalf("updater environment is not a map:\n%s", upgraded)
+	}
+	if updaterEnv["CLIRELAY_COMPOSE_FILE"] != "${CLIRELAY_PROJECT_DIR:-"+dir+"}/docker-compose.yml" {
+		t.Fatalf("updater compose file = %#v, want writable project compose path", updaterEnv["CLIRELAY_COMPOSE_FILE"])
+	}
+	updaterVolumes, ok := updater["volumes"].([]any)
+	if !ok || !containsAnyString(updaterVolumes, "${CLIRELAY_PROJECT_DIR:-"+dir+"}:${CLIRELAY_PROJECT_DIR:-"+dir+"}") {
+		t.Fatalf("updater volumes = %#v, want writable project dir mount", updater["volumes"])
+	}
+
+	envData, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("read upgraded env: %v", err)
+	}
+	envText := string(envData)
+	for _, want := range []string{
+		"CLI_PROXY_IMAGE=ghcr.io/kittors/clirelay:dev\n",
+		"CLIRELAY_POSTGRES_DSN=postgres://",
+		"CLIRELAY_REDIS_ENABLE=true\n",
+		"CLIRELAY_TARGET_SERVICE=cli-proxy-api\n",
+	} {
+		if !strings.Contains(envText, want) {
+			t.Fatalf("upgraded env missing %q:\n%s", want, envText)
+		}
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read compose log: %v", err)
+	}
+	got := strings.Split(strings.TrimSpace(string(data)), "\n")
+	want := []string{
+		"compose --project-name cliproxy --env-file " + envPath + " -f " + composePath + " pull cli-proxy-api",
+		"compose --project-name cliproxy --env-file " + envPath + " -f " + composePath + " up -d postgres redis",
+		"compose --project-name cliproxy --env-file " + envPath + " -f " + composePath + " run --rm clirelay-migrate",
+		"compose --project-name cliproxy --env-file " + envPath + " -f " + composePath + " up -d --no-deps --remove-orphans cli-proxy-api",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("compose commands = %#v, want %#v", got, want)
+	}
+}
+
 func TestUpgradeComposeRuntimeStackPreservesListEnvironment(t *testing.T) {
 	upgraded, _, err := upgradeComposeRuntimeStack(`
 services:
@@ -840,6 +991,13 @@ services:
 		if !ok || healthcheck["disable"] != true {
 			t.Fatalf("%s healthcheck = %#v, want disabled\n%s", name, service["healthcheck"], upgraded)
 		}
+	}
+}
+
+func TestImageFallbackUnwrapsCliProxyImageDefault(t *testing.T) {
+	got := imageFallback("${CLI_PROXY_IMAGE:-ghcr.io/kittors/clirelay:latest}")
+	if got != "ghcr.io/kittors/clirelay:latest" {
+		t.Fatalf("imageFallback = %q, want literal image", got)
 	}
 }
 

@@ -27,10 +27,10 @@ func (s *updaterServer) updateProgressFromStage(stage string, message string) {
 		case "starting PostgreSQL/Redis before SQLite migration", "starting PostgreSQL/Redis before data migration check":
 			migration.Phase = "starting_runtime"
 			s.status.ProgressPercent = maxFloat(s.status.ProgressPercent, 35)
-		case "checking legacy SQLite migration before service restart":
+		case "checking legacy SQLite migration before service restart", "checking runtime data migration before service restart":
 			migration.Phase = "checking"
 			s.status.ProgressPercent = maxFloat(s.status.ProgressPercent, 40)
-		case "legacy SQLite migration check finished before service restart", "finishing SQLite migration before service restart":
+		case "legacy SQLite migration check finished before service restart", "runtime data migration check finished before service restart", "finishing SQLite migration before service restart":
 			if migration.Phase == "skipped" {
 				s.status.Message = migrationSkippedMessage(migration.SkipReason)
 				s.status.ProgressPercent = maxFloat(s.status.ProgressPercent, 90)
@@ -135,7 +135,7 @@ func migrationSkippedMessage(reason string) string {
 	case "import_disabled":
 		return "SQLite import dry-run complete; apply is disabled"
 	default:
-		return "legacy SQLite migration check finished before service restart"
+		return "runtime data migration check finished before service restart"
 	}
 }
 

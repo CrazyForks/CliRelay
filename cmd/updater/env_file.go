@@ -18,6 +18,18 @@ func configuredImageInFile(envFile string) string {
 	return configuredImageRef(splitEnvLines(string(data)))
 }
 
+func imageFallback(image string) string {
+	text := strings.TrimSpace(image)
+	const cliProxyImagePrefix = "${CLI_PROXY_IMAGE:-"
+	if strings.HasPrefix(text, cliProxyImagePrefix) && strings.HasSuffix(text, "}") {
+		fallback := strings.TrimSuffix(strings.TrimPrefix(text, cliProxyImagePrefix), "}")
+		if strings.TrimSpace(fallback) != "" {
+			return strings.TrimSpace(fallback)
+		}
+	}
+	return text
+}
+
 func restoreRequestedImage(ctx context.Context, envFile string, imageRef string, reporter updateReporter, updateErr error) error {
 	if strings.TrimSpace(envFile) == "" || strings.TrimSpace(imageRef) == "" {
 		return updateErr
