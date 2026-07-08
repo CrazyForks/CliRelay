@@ -100,6 +100,23 @@ func TestOllamaCloudExecutorRoutesResponsesToNativeChat(t *testing.T) {
 	}
 }
 
+func TestOllamaCloudNativeChatConvertsToolCallArguments(t *testing.T) {
+	body, _ := ollamaNativeChatRequest([]byte(`{
+		"model":"deepseek-v4-flash",
+		"messages":[
+			{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"exec_command","arguments":"{\"cmd\":\"cat /Users/kittors/.codex/RTK.md\"}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"ok"}
+		]
+	}`), true)
+
+	if got := gjson.GetBytes(body, "messages.0.tool_calls.0.function.arguments.cmd").String(); got != "cat /Users/kittors/.codex/RTK.md" {
+		t.Fatalf("tool call arguments not converted for Ollama: %s", body)
+	}
+	if got := gjson.GetBytes(body, "messages.1.tool_name").String(); got != "exec_command" {
+		t.Fatalf("tool response name = %q, want exec_command; body=%s", got, body)
+	}
+}
+
 func TestOllamaCloudExecutorNativeResponsesReportsEstimatedCacheHit(t *testing.T) {
 	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

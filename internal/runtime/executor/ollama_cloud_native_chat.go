@@ -271,6 +271,7 @@ func ollamaNativeMessages(raw any) ([]any, string) {
 	items, _ := raw.([]any)
 	messages := make([]any, 0, len(items))
 	var prompt strings.Builder
+	toolNames := map[string]string{}
 	for _, item := range items {
 		msg, ok := item.(map[string]any)
 		if !ok {
@@ -286,7 +287,15 @@ func ollamaNativeMessages(raw any) ([]any, string) {
 			next["images"] = images
 		}
 		if calls, ok := msg["tool_calls"]; ok {
+			if list, ok := calls.([]any); ok {
+				normalizeOllamaNativeToolCalls(list, toolNames)
+			}
 			next["tool_calls"] = calls
+		}
+		if role == "tool" {
+			if name := ollamaNativeToolName(msg, toolNames); name != "" {
+				next["tool_name"] = name
+			}
 		}
 		messages = append(messages, next)
 		prompt.WriteString(role)
@@ -295,6 +304,51 @@ func ollamaNativeMessages(raw any) ([]any, string) {
 		prompt.WriteByte('\n')
 	}
 	return messages, prompt.String()
+}
+
+func normalizeOllamaNativeToolCalls(calls []any, toolNames map[string]string) {
+	for _, item := range calls {
+		call, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		fn, ok := call["function"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if args, ok := fn["arguments"].(string); ok {
+			fn["arguments"] = ollamaNativeToolArguments(args)
+		}
+		if id, _ := call["id"].(string); id != "" {
+			if name, _ := fn["name"].(string); strings.TrimSpace(name) != "" {
+				toolNames[id] = strings.TrimSpace(name)
+			}
+		}
+	}
+}
+
+func ollamaNativeToolArguments(raw string) any {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return map[string]any{}
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return raw
+	}
+	return parsed
+}
+
+func ollamaNativeToolName(msg map[string]any, toolNames map[string]string) string {
+	for _, key := range []string{"tool_name", "name"} {
+		if name, _ := msg[key].(string); strings.TrimSpace(name) != "" {
+			return strings.TrimSpace(name)
+		}
+	}
+	if id, _ := msg["tool_call_id"].(string); id != "" {
+		return toolNames[id]
+	}
+	return ""
 }
 
 func ollamaNativeContent(raw any) (string, []string) {
