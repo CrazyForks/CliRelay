@@ -114,7 +114,6 @@ func TestBlueGreenDeployScriptSyntaxAndGuards(t *testing.T) {
 func TestReleaseAndDeployWorkflowsRejectVendoredPanelAssets(t *testing.T) {
 	for _, path := range []string{
 		".github/workflows/deploy.yml",
-		".github/workflows/docker-image.yml",
 		".github/workflows/docker-publish.yml",
 		".github/workflows/release.yaml",
 	} {
@@ -140,5 +139,42 @@ func TestReleaseAndDeployWorkflowsRejectVendoredPanelAssets(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `./scripts/ensure-no-vendored-panel-assets.sh`) {
 		t.Fatalf("PR check script must reject committed frontend panel build output")
+	}
+}
+
+func TestDockerPublishWorkflowUsesGHCRForBranchesAndReleaseTags(t *testing.T) {
+	if _, err := os.Stat(".github/workflows/docker-image.yml"); !os.IsNotExist(err) {
+		t.Fatalf("legacy DockerHub workflow must be removed, stat err = %v", err)
+	}
+
+	data, err := os.ReadFile(".github/workflows/docker-publish.yml")
+	if err != nil {
+		t.Fatalf("read Docker publish workflow: %v", err)
+	}
+	content := string(data)
+
+	for _, want := range []string{
+		"tags:\n      - 'v*'",
+		"REGISTRY: ghcr.io",
+		"IMAGE_NAME: kittors/clirelay",
+		`if [[ "${GITHUB_REF_TYPE:-branch}" == "tag" ]]; then`,
+		`FRONTEND_REF="main"`,
+		`VERSION="${REF_NAME}"`,
+		"type=ref,event=tag",
+		"github.ref_name == 'main' || github.ref_type == 'tag'",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("Docker publish workflow missing GHCR release marker %q", want)
+		}
+	}
+
+	for _, forbidden := range []string{
+		"DOCKERHUB_USERNAME",
+		"DOCKERHUB_TOKEN",
+		"eceasy/cli-proxy-api",
+	} {
+		if strings.Contains(content, forbidden) {
+			t.Fatalf("Docker publish workflow still contains legacy DockerHub marker %q", forbidden)
+		}
 	}
 }

@@ -3,6 +3,8 @@ name: Build & Push Docker Image
 on:
   push:
     branches: [main, dev]
+    tags:
+      - 'v*'
   schedule:
     - cron: '17 3 * * *'
   workflow_dispatch:
@@ -31,15 +33,24 @@ jobs:
           set -euo pipefail
           REF_NAME="${GITHUB_REF_NAME:-main}"
           BACKEND_SHORT="$(git rev-parse --short HEAD)"
-          FRONTEND_REF="${REF_NAME}"
+          if [[ "${GITHUB_REF_TYPE:-branch}" == "tag" ]]; then
+            # Release tags pin the backend commit while using the released frontend from main.
+            FRONTEND_REF="main"
+            VERSION="${REF_NAME}"
+            UI_VERSION_REF="${REF_NAME}"
+          else
+            FRONTEND_REF="${REF_NAME}"
+            VERSION="${REF_NAME}-${BACKEND_SHORT}"
+            UI_VERSION_REF="${FRONTEND_REF}"
+          fi
           FRONTEND_COMMIT="$(git ls-remote https://github.com/kittors/codeProxy.git "refs/heads/${FRONTEND_REF}" | awk '{print $1}')"
           if [ -z "${FRONTEND_COMMIT}" ]; then
             echo "Unable to resolve frontend ref: ${FRONTEND_REF}" >&2
             exit 1
           fi
           FRONTEND_SHORT="${FRONTEND_COMMIT:0:7}"
-          echo "VERSION=${REF_NAME}-${BACKEND_SHORT}" >> "$GITHUB_ENV"
-          echo "UI_VERSION=panel-${FRONTEND_REF}-${FRONTEND_SHORT}" >> "$GITHUB_ENV"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "UI_VERSION=panel-${UI_VERSION_REF}-${FRONTEND_SHORT}" >> "$GITHUB_ENV"
           echo "FRONTEND_REF=${FRONTEND_REF}" >> "$GITHUB_ENV"
           echo "FRONTEND_COMMIT=${FRONTEND_COMMIT}" >> "$GITHUB_ENV"
           echo "backend_short=${BACKEND_SHORT}" >> "$GITHUB_OUTPUT"
@@ -65,9 +76,10 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable=${{ github.ref_name == 'main' }}
+            type=raw,value=latest,enable=${{ github.ref_name == 'main' || github.ref_type == 'tag' }}
             type=raw,value=main,enable=${{ github.ref_name == 'main' }}
             type=raw,value=dev,enable=${{ github.ref_name == 'dev' }}
+            type=ref,event=tag
             type=raw,value=${{ github.ref_name }}-${{ steps.build_meta.outputs.backend_short }}
             type=sha,prefix=
             type=raw,value={{date 'YYYYMMDD'}}
