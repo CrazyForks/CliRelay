@@ -878,22 +878,12 @@ func BenchmarkCodexIdentityFingerprintHotPathCached(b *testing.B) {
 	}
 }
 
-func TestTenantCredentialCannotUseLearnedIdentityFingerprints(t *testing.T) {
+func TestTenantCredentialCanObserveLearnedIdentityFingerprints(t *testing.T) {
+	// After multi-tenant migrations, business-tenant OAuth accounts still share
+	// the system-tenant fingerprint catalog by account_key. Runtime must learn
+	// and apply those profiles for non-system tenants, not only the platform tenant.
 	resetIdentityFingerprintRuntimeStateForTest()
 	t.Cleanup(resetIdentityFingerprintRuntimeStateForTest)
-
-	var observeCalls atomic.Int32
-	var listCalls atomic.Int32
-	runtimeIdentityFingerprintStoreFuncMu.Lock()
-	runtimeObserveIdentityFingerprint = func(input identityfingerprint.LearnInput) (*identityfingerprint.LearnedRecord, identityfingerprint.MergeResult, error) {
-		observeCalls.Add(1)
-		return nil, identityfingerprint.MergeResult{}, nil
-	}
-	runtimeListCodexIdentityFingerprintProfiles = func(provider identityfingerprint.Provider, accountKey string) ([]identityfingerprint.LearnedRecord, error) {
-		listCalls.Add(1)
-		return nil, nil
-	}
-	runtimeIdentityFingerprintStoreFuncMu.Unlock()
 
 	auth := &cliproxyauth.Auth{
 		ID:       "tenant-codex-auth",
@@ -910,19 +900,21 @@ func TestTenantCredentialCannotUseLearnedIdentityFingerprints(t *testing.T) {
 		"Originator": {"codex_cli_rs"},
 	}
 	ctx := contextWithInboundHeaders(http.MethodPost, "/v1/responses", inbound)
-	if got := observeRuntimeIdentityFingerprint(identityfingerprint.ProviderCodex, auth, ctx); got != nil {
-		t.Fatalf("observeRuntimeIdentityFingerprint() = %#v, want nil", got)
+	got := observeRuntimeIdentityFingerprint(identityfingerprint.ProviderCodex, auth, ctx)
+	if got == nil {
+		t.Fatal("observeRuntimeIdentityFingerprint() = nil, want learned record for tenant credential")
+	}
+	if got.Version != "0.200.0" {
+		t.Fatalf("learned version = %q, want 0.200.0", got.Version)
 	}
 	cfg := &config.Config{IdentityFingerprint: config.IdentityFingerprintConfig{
 		Codex: config.CodexIdentityFingerprintConfig{Enabled: true},
 	}}
-	if _, enabled := codexIdentityFingerprint(cfg, auth, ctx); !enabled {
-		t.Fatal("codexIdentityFingerprint() disabled safe fallback")
+	resolved, enabled := codexIdentityFingerprint(cfg, auth, ctx)
+	if !enabled {
+		t.Fatal("codexIdentityFingerprint() disabled for tenant credential")
 	}
-	if got := observeCalls.Load(); got != 0 {
-		t.Fatalf("identity fingerprint observe calls = %d, want 0", got)
-	}
-	if got := listCalls.Load(); got != 0 {
-		t.Fatalf("identity fingerprint list calls = %d, want 0", got)
+	if resolved.UserAgent == "" && resolved.Version == "" {
+		t.Fatalf("codexIdentityFingerprint() returned empty resolved config: %#v", resolved)
 	}
 }

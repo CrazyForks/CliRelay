@@ -17,6 +17,12 @@ func TestTenantScopedManagementPathIncludesProviderRuntimeRoutes(t *testing.T) {
 		"/v0/management/codex-oauth-admission",
 		// Auth-file quota preview for tenant-imported OAuth credentials.
 		"/v0/management/api-call",
+		// Per-account identity fingerprints must stay readable by tenant admins
+		// after credentials migrate off the system tenant.
+		"/v0/management/identity-fingerprint",
+		"/v0/management/identity-fingerprint/account",
+		"/v0/management/identity-fingerprint/account/policy",
+		"/v0/management/identity-fingerprint/codex/recommendations",
 	} {
 		if !isTenantScopedManagementPath(path) {
 			t.Errorf("isTenantScopedManagementPath(%q) = false", path)

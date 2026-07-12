@@ -24,6 +24,14 @@ func TestPermissionForManagementRequest(t *testing.T) {
 		{http.MethodGet, "/v0/management/get-auth-status", "auth_files.oauth"},
 		{http.MethodPost, "/v0/management/proxy-pool/check", "proxies.test"},
 		{http.MethodPut, "/v0/management/config.yaml", "system.config.write"},
+		// Account fingerprint APIs are auth-file scoped; global preset PUT stays platform-only.
+		{http.MethodGet, "/v0/management/identity-fingerprint", "auth_files.read"},
+		{http.MethodGet, "/v0/management/identity-fingerprint/account", "auth_files.read"},
+		{http.MethodGet, "/v0/management/identity-fingerprint/codex/recommendations", "auth_files.read"},
+		{http.MethodPut, "/v0/management/identity-fingerprint/account/policy", "auth_files.write"},
+		{http.MethodDelete, "/v0/management/identity-fingerprint/account/profile", "auth_files.write"},
+		{http.MethodDelete, "/v0/management/identity-fingerprint/learned", "auth_files.write"},
+		{http.MethodPut, "/v0/management/identity-fingerprint", "system.config.write"},
 	}
 	for _, test := range tests {
 		if got := permissionForManagementRequest(test.method, test.path); got != test.want {

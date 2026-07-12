@@ -75,7 +75,7 @@ func codexIdentityFingerprint(cfg *config.Config, auth *cliproxyauth.Auth, ctx c
 	if cfg == nil || !cfg.IdentityFingerprint.Codex.Enabled {
 		return config.CodexIdentityFingerprintConfig{}, false
 	}
-	if !isCodexOAuthAdmissionAuth(auth) || !usesSystemIdentityFingerprint(auth) {
+	if !isCodexOAuthAdmissionAuth(auth) {
 		resolved, _ := identityfingerprint.ResolveCodexSafeFallback(cfg.IdentityFingerprint.Codex)
 		return resolved, true
 	}

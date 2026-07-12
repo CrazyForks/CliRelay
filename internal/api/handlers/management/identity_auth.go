@@ -504,6 +504,7 @@ func isTenantScopedManagementPath(path string) bool {
 	case relative == "/dashboard-summary", relative == "/config":
 		return true
 	case strings.HasPrefix(relative, "/auth-files"),
+		strings.HasPrefix(relative, "/identity-fingerprint"),
 		strings.HasPrefix(relative, "/model-definitions/"),
 		strings.HasPrefix(relative, "/image-generation"),
 		relative == "/vertex/import",
@@ -621,6 +622,16 @@ func permissionForManagementRequest(method, path string) string {
 		if relative == "/get-auth-status" || strings.Contains(relative, "auth-url") || strings.Contains(relative, "oauth") {
 			return "auth_files.oauth"
 		}
+		if write {
+			return "auth_files.write"
+		}
+		return "auth_files.read"
+	// Account/profile fingerprint APIs are auth-file scoped. Global preset PUT
+	// (/identity-fingerprint) still uses process runtime settings; tenants can
+	// read learned state but only platform admins rewrite the shared preset.
+	case relative == "/identity-fingerprint" && write:
+		return "system.config.write"
+	case strings.HasPrefix(relative, "/identity-fingerprint"):
 		if write {
 			return "auth_files.write"
 		}
