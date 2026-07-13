@@ -18,6 +18,15 @@ import (
 // drifts as new migrations land and stops testing the real production upgrade.
 const publishedBaselineVersion = "202607100001_identity_fingerprint_profiles"
 
+// publishedMigrationChecksums freezes the SHA-256 of each migration shipped on
+// origin/main. Fixture DBs derive checksums from current SQL; without these
+// constants, editing published SQL would still green the upgrade test while
+// production DBs that stored the original checksum would fail on restart.
+var publishedMigrationChecksums = map[string]string{
+	"202607050001_runtime_schema":                "317006f359fe24774669019d8bee978e1b7d8e0cfe65787299369fd6bad78943",
+	"202607100001_identity_fingerprint_profiles": "28c575b2828152d5ab2771119c5c7f5274e4524eb46ef506dc1362be6f89bdd5",
+}
+
 const systemTenantID = "00000000-0000-0000-0000-000000000001"
 
 // TestApplyMigrationsUpgradeFromPublishedSchema applies only the migrations
@@ -69,6 +78,7 @@ func TestApplyMigrationsUpgradeFromPublishedSchema(t *testing.T) {
 	}
 
 	all := RuntimeMigrations()
+	assertPublishedMigrationChecksums(t, all)
 	baseline := publishedBaselineMigrations(t, all)
 	if len(baseline) != 2 {
 		t.Fatalf("published baseline should be 2 migrations (runtime + fingerprint profiles), got %d", len(baseline))
@@ -106,6 +116,30 @@ func publishedBaselineMigrations(t *testing.T, all []Migration) []Migration {
 	}
 	t.Fatalf("published baseline version %q not found in RuntimeMigrations()", publishedBaselineVersion)
 	return nil
+}
+
+// TestPublishedMigrationChecksums locks the two origin/main migrations so a
+// silent edit to published SQL fails CI before it can poison upgrade fixtures.
+func TestPublishedMigrationChecksums(t *testing.T) {
+	assertPublishedMigrationChecksums(t, RuntimeMigrations())
+}
+
+func assertPublishedMigrationChecksums(t *testing.T, all []Migration) {
+	t.Helper()
+	byVersion := make(map[string]Migration, len(all))
+	for _, m := range all {
+		byVersion[m.Version] = m
+	}
+	for version, want := range publishedMigrationChecksums {
+		m, ok := byVersion[version]
+		if !ok {
+			t.Fatalf("published migration %q missing from RuntimeMigrations()", version)
+		}
+		got := migrationChecksum(m.SQL)
+		if got != want {
+			t.Fatalf("published migration %q checksum = %s, want %s (do not edit shipped SQL; add a new migration instead)", version, got, want)
+		}
+	}
 }
 
 func seedPublishedSchemaFixture(t *testing.T, ctx context.Context, db *sql.DB) {

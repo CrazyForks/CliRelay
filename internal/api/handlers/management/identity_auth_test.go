@@ -1,12 +1,22 @@
 package management
 
 import (
+	"context"
+	"database/sql"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
+	postgresstore "github.com/router-for-me/CLIProxyAPI/v6/internal/storage/postgres"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/storage/postgres/compatdriver"
 )
 
 func TestPermissionForManagementRequest(t *testing.T) {
@@ -91,36 +101,171 @@ func TestServiceCredentialCannotAccessTenantGovernance(t *testing.T) {
 	}
 }
 
-// TestLogsDeleteRequiresExplicitPermission mirrors authenticateSessionToken's
-// permission gate: read-only log viewers must not pass DELETE /logs.
-func TestLogsDeleteRequiresExplicitPermission(t *testing.T) {
-	readOnly := identity.Principal{
-		Permissions: map[string]bool{"system.logs.read": true},
+// TestLogsDeleteMiddlewareRequiresExplicitPermission drives real sessions
+// through Handler.Middleware(): read-only DELETE is 403 and never reaches the
+// handler; delete-capable DELETE and read-only GET both enter the handler.
+//
+// Uses a disposable database so parallel package tests that TRUNCATE the shared
+// CLIRELAY_POSTGRES_TEST_DSN catalog cannot race this middleware fixture.
+func TestLogsDeleteMiddlewareRequiresExplicitPermission(t *testing.T) {
+	dsn := strings.TrimSpace(os.Getenv("CLIRELAY_POSTGRES_TEST_DSN"))
+	if dsn == "" {
+		t.Skip("CLIRELAY_POSTGRES_TEST_DSN is not set")
 	}
-	deleter := identity.Principal{
-		Permissions: map[string]bool{
-			"system.logs.read":   true,
-			"system.logs.delete": true,
-		},
+	ctx := context.Background()
+
+	adminDB, err := sql.Open("pgxq", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adminDB.Close()
+	if err = adminDB.PingContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	dbName := fmt.Sprintf("logs_delete_mw_%d", time.Now().UnixNano())
+	if _, err = adminDB.ExecContext(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create disposable db: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = adminDB.ExecContext(context.Background(), `
+			SELECT pg_terminate_backend(pid)
+			  FROM pg_stat_activity
+			 WHERE datname = $1 AND pid <> pg_backend_pid()
+		`, dbName)
+		_, _ = adminDB.ExecContext(context.Background(), "DROP DATABASE IF EXISTS "+dbName)
+	})
+	testDSN, err := replacePostgresDatabaseForTest(dsn, dbName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := postgresstore.OpenRuntimeDB(ctx, config.PostgresConfig{DSN: testDSN, MaxOpenConns: 4, MaxIdleConns: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	service := identity.NewService(db)
+	if err = service.Bootstrap(ctx, "bootstrap-password-123"); err != nil {
+		t.Fatal(err)
+	}
+	// Pin the service on the handler so Middleware does not depend on process-global Default().
+	h := NewHandler(nil, "", nil)
+	h.identityService = service
+	t.Cleanup(h.Close)
+
+	// Platform roles that grant only the log permissions under test. CreateRole
+	// rejects platform-scoped permissions, so seed via SQL like production would
+	// for a custom platform operator role.
+	type logUserFixture struct {
+		username, password, userID, roleID string
+		permissions                        []string
+	}
+	seedPlatformLogUser := func(fx logUserFixture) string {
+		t.Helper()
+		hash, hashErr := identity.HashPassword(fx.password)
+		if hashErr != nil {
+			t.Fatal(hashErr)
+		}
+		if _, err = db.ExecContext(ctx, `
+			INSERT INTO roles (id, tenant_id, code, name, description, scope, system_protected)
+			VALUES (?, ?, ?, ?, '', 'platform', false)
+		`, fx.roleID, identity.SystemTenantID, "platform_"+fx.username, fx.username+" role"); err != nil {
+			t.Fatalf("seed role %s: %v", fx.username, err)
+		}
+		for _, perm := range fx.permissions {
+			if _, err = db.ExecContext(ctx, `
+				INSERT INTO role_permissions (role_id, permission_code) VALUES (?, ?)
+			`, fx.roleID, perm); err != nil {
+				t.Fatalf("seed role permission %s: %v", perm, err)
+			}
+		}
+		if _, err = db.ExecContext(ctx, `
+			INSERT INTO users (
+			  id, tenant_id, username, username_normalized, display_name, password_hash,
+			  status, must_change_password, password_changed_at, created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, 'active', false, now(), now(), now())
+		`, fx.userID, identity.SystemTenantID, fx.username, fx.username, fx.username, hash); err != nil {
+			t.Fatalf("seed user %s: %v", fx.username, err)
+		}
+		if _, err = db.ExecContext(ctx, `INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)`, fx.userID, fx.roleID); err != nil {
+			t.Fatalf("seed user role %s: %v", fx.username, err)
+		}
+		login, loginErr := service.Login(ctx, fx.username, fx.password, false, "middleware-test")
+		if loginErr != nil {
+			t.Fatalf("login %s: %v", fx.username, loginErr)
+		}
+		return login.AccessToken
 	}
 
-	getPerm := permissionForManagementRequest(http.MethodGet, "/v0/management/logs")
-	deletePerm := permissionForManagementRequest(http.MethodDelete, "/v0/management/logs")
-	if getPerm != "system.logs.read" {
-		t.Fatalf("GET /logs permission = %q, want system.logs.read", getPerm)
-	}
-	if deletePerm != "system.logs.delete" {
-		t.Fatalf("DELETE /logs permission = %q, want system.logs.delete", deletePerm)
+	readToken := seedPlatformLogUser(logUserFixture{
+		username:    "log-reader",
+		password:    "reader-password-123",
+		userID:      "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb1",
+		roleID:      "cccccccc-cccc-cccc-cccc-ccccccccccc1",
+		permissions: []string{"system.logs.read"},
+	})
+	deleteToken := seedPlatformLogUser(logUserFixture{
+		username:    "log-deleter",
+		password:    "deleter-password-123",
+		userID:      "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb2",
+		roleID:      "cccccccc-cccc-cccc-cccc-ccccccccccc2",
+		permissions: []string{"system.logs.read", "system.logs.delete"},
+	})
+
+	serve := func(method, token string) (int, bool) {
+		t.Helper()
+		gin.SetMode(gin.TestMode)
+		router := gin.New()
+		router.Use(h.Middleware())
+		reached := false
+		handler := func(c *gin.Context) {
+			reached = true
+			c.Status(http.StatusOK)
+		}
+		router.GET("/v0/management/logs", handler)
+		router.DELETE("/v0/management/logs", handler)
+
+		req := httptest.NewRequest(method, "/v0/management/logs", nil)
+		req.RemoteAddr = "127.0.0.1:4321"
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec.Code, reached
 	}
 
-	// Same condition as authenticateSessionToken after permission lookup.
-	if getPerm == "" || !readOnly.Has(getPerm) {
-		t.Fatal("read-only principal should pass GET /logs")
+	if code, reached := serve(http.MethodDelete, readToken); code != http.StatusForbidden || reached {
+		t.Fatalf("read-only DELETE: status=%d reached=%v, want 403 and handler not executed", code, reached)
 	}
-	if deletePerm != "" && readOnly.Has(deletePerm) {
-		t.Fatal("read-only principal must not pass DELETE /logs")
+	if code, reached := serve(http.MethodGet, readToken); code != http.StatusOK || !reached {
+		t.Fatalf("read-only GET: status=%d reached=%v, want 200 and handler executed", code, reached)
 	}
-	if deletePerm == "" || !deleter.Has(deletePerm) {
-		t.Fatal("principal with system.logs.delete should pass DELETE /logs")
+	if code, reached := serve(http.MethodDelete, deleteToken); code != http.StatusOK || !reached {
+		t.Fatalf("delete-capable DELETE: status=%d reached=%v, want 200 and handler executed", code, reached)
 	}
+}
+
+func replacePostgresDatabaseForTest(dsn, dbName string) (string, error) {
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		u, err := url.Parse(dsn)
+		if err != nil {
+			return "", err
+		}
+		u.Path = "/" + dbName
+		return u.String(), nil
+	}
+	parts := strings.Fields(dsn)
+	out := make([]string, 0, len(parts))
+	replaced := false
+	for _, p := range parts {
+		if strings.HasPrefix(p, "dbname=") {
+			out = append(out, "dbname="+dbName)
+			replaced = true
+			continue
+		}
+		out = append(out, p)
+	}
+	if !replaced {
+		out = append(out, "dbname="+dbName)
+	}
+	return strings.Join(out, " "), nil
 }
