@@ -93,6 +93,7 @@ func (s *modelRegistrarStub) RegisterClient(clientID, clientProvider string, mod
 }
 
 func TestListModelEntriesLiveForTenantCodexDoesNotReplaceRegistry(t *testing.T) {
+	ResetDiscoveryCacheForTest()
 	// Without a real upstream, refresh falls back to registry; registrar must not be called
 	// when live is empty. When we inject via a custom path, codex updateRegistry is false.
 	// Here we only assert the empty-live path never registers.
@@ -129,23 +130,106 @@ func TestListModelEntriesLiveForTenantCodexDoesNotReplaceRegistry(t *testing.T) 
 	}
 }
 
-func TestListModelEntriesLiveWithoutRefreshUsesRegistry(t *testing.T) {
+func TestListModelEntriesLiveWithoutRefreshUsesRegistryWhenNoDiscoveryCache(t *testing.T) {
+	ResetDiscoveryCacheForTest()
 	manager := coreauth.NewManager(nil, nil, nil)
 	if _, err := manager.Register(context.Background(), &coreauth.Auth{
 		ID:       "codex-auth",
 		FileName: "codex.json",
 		Provider: "codex",
+		// no credentials → warm fails → registry fallback
 	}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	source := &modelSourceStub{
-		models: []*registry.ModelInfo{{ID: "gpt-5.5"}},
+		models: []*registry.ModelInfo{{ID: "gpt-static"}},
 	}
 	reg := &modelRegistrarStub{}
 	models, label := ListModelEntriesLiveForTenant(
 		context.Background(), manager, source, reg, nil, "", "codex.json", false,
 	)
-	if label != "registry" || reg.calls != 0 || len(models) != 1 {
+	if label != "registry" || reg.calls != 0 || len(models) != 1 || models[0]["id"] != "gpt-static" {
 		t.Fatalf("label=%q calls=%d models=%#v", label, reg.calls, models)
+	}
+}
+
+func TestDiscoveryCacheSharedAcrossSameProviderAccounts(t *testing.T) {
+	ResetDiscoveryCacheForTest()
+	storeDiscoveryCache("", "codex", []*registry.ModelInfo{
+		{ID: "gpt-5.6-sol", DisplayName: "GPT-5.6 Sol", Type: "codex", OwnedBy: "openai"},
+		{ID: "gpt-5.5", DisplayName: "GPT-5.5", Type: "codex", OwnedBy: "openai"},
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	for _, auth := range []*coreauth.Auth{
+		{ID: "codex-a", FileName: "codex-a.json", Provider: "codex"},
+		{ID: "codex-b", FileName: "codex-b.json", Provider: "codex"},
+	} {
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("Register %s: %v", auth.ID, err)
+		}
+	}
+	source := &modelSourceStub{
+		models: []*registry.ModelInfo{{ID: "gpt-static-only"}},
+	}
+	reg := &modelRegistrarStub{}
+
+	// Open without refresh must serve discovery cache, not static registry.
+	for _, name := range []string{"codex-a.json", "codex-b.json"} {
+		models, label := ListModelEntriesLiveForTenant(
+			context.Background(), manager, source, reg, nil, "", name, false,
+		)
+		if label != "upstream" {
+			t.Fatalf("%s source=%q, want upstream", name, label)
+		}
+		if reg.calls != 0 {
+			t.Fatalf("RegisterClient must not run for shared discovery, calls=%d", reg.calls)
+		}
+		if len(models) != 2 || models[0]["id"] != "gpt-5.6-sol" {
+			t.Fatalf("%s models=%#v", name, models)
+		}
+	}
+
+	// Claude cache must not leak into codex and vice versa.
+	storeDiscoveryCache("", "claude", []*registry.ModelInfo{
+		{ID: "claude-sonnet-4", Type: "claude"},
+	})
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID: "claude-a", FileName: "claude-a.json", Provider: "claude",
+	}); err != nil {
+		t.Fatalf("Register claude: %v", err)
+	}
+	claudeModels, claudeLabel := ListModelEntriesLiveForTenant(
+		context.Background(), manager, source, reg, nil, "", "claude-a.json", false,
+	)
+	if claudeLabel != "upstream" || len(claudeModels) != 1 || claudeModels[0]["id"] != "claude-sonnet-4" {
+		t.Fatalf("claude models=%#v label=%q", claudeModels, claudeLabel)
+	}
+	// codex still its own cache
+	codexModels, codexLabel := ListModelEntriesLiveForTenant(
+		context.Background(), manager, source, reg, nil, "", "codex-a.json", false,
+	)
+	if codexLabel != "upstream" || len(codexModels) != 2 {
+		t.Fatalf("codex still shared cache: %#v label=%q", codexModels, codexLabel)
+	}
+}
+
+func TestDiscoveryCacheDoesNotReplaceRegistrar(t *testing.T) {
+	ResetDiscoveryCacheForTest()
+	storeDiscoveryCache("", "codex", []*registry.ModelInfo{{ID: "gpt-5.6-terra"}})
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID: "codex-auth", FileName: "codex.json", Provider: "codex",
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	source := &modelSourceStub{models: []*registry.ModelInfo{{ID: "static"}}}
+	reg := &modelRegistrarStub{}
+	_, _ = ListModelEntriesLiveForTenant(
+		context.Background(), manager, source, reg, nil, "", "codex.json", true,
+	)
+	// force with no credentials fails warm; registrar still never called
+	if reg.calls != 0 {
+		t.Fatalf("RegisterClient calls=%d want 0", reg.calls)
 	}
 }

@@ -3,6 +3,7 @@ package authfiles
 import (
 	"context"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -18,6 +19,81 @@ type ModelSource interface {
 
 type ModelRegistrar interface {
 	RegisterClient(clientID, clientProvider string, models []*registry.ModelInfo)
+}
+
+// Provider-level discovery cache for claude/codex.
+// Live manifests are shared across accounts of the same provider+tenant so we
+// only hit upstream once (or on force refresh), then every auth-file models
+// panel reuses the same list without RegisterClient-replacing the static catalog.
+const discoveryCacheTTL = 24 * time.Hour
+
+type discoveryCacheEntry struct {
+	models    []*registry.ModelInfo
+	fetchedAt time.Time
+}
+
+type discoveryInflight struct {
+	done   chan struct{}
+	models []*registry.ModelInfo
+	ok     bool
+}
+
+var (
+	discoveryCacheMu   sync.Mutex
+	discoveryCache     = map[string]discoveryCacheEntry{}
+	discoveryInflightM = map[string]*discoveryInflight{}
+)
+
+// ResetDiscoveryCacheForTest clears provider discovery cache (tests only).
+func ResetDiscoveryCacheForTest() {
+	discoveryCacheMu.Lock()
+	discoveryCache = map[string]discoveryCacheEntry{}
+	discoveryInflightM = map[string]*discoveryInflight{}
+	discoveryCacheMu.Unlock()
+}
+
+func discoveryCacheKey(tenantID, provider string) string {
+	return NormalizeTenantID(tenantID) + "|" + strings.ToLower(strings.TrimSpace(provider))
+}
+
+func supportsSharedDiscovery(provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "claude", "codex":
+		return true
+	default:
+		return false
+	}
+}
+
+func loadDiscoveryCache(tenantID, provider string) []*registry.ModelInfo {
+	if !supportsSharedDiscovery(provider) {
+		return nil
+	}
+	key := discoveryCacheKey(tenantID, provider)
+	discoveryCacheMu.Lock()
+	defer discoveryCacheMu.Unlock()
+	entry, ok := discoveryCache[key]
+	if !ok || len(entry.models) == 0 {
+		return nil
+	}
+	if time.Since(entry.fetchedAt) > discoveryCacheTTL {
+		delete(discoveryCache, key)
+		return nil
+	}
+	return cloneRegistryModels(entry.models)
+}
+
+func storeDiscoveryCache(tenantID, provider string, models []*registry.ModelInfo) {
+	if !supportsSharedDiscovery(provider) || len(models) == 0 {
+		return
+	}
+	key := discoveryCacheKey(tenantID, provider)
+	discoveryCacheMu.Lock()
+	discoveryCache[key] = discoveryCacheEntry{
+		models:    cloneRegistryModels(models),
+		fetchedAt: time.Now(),
+	}
+	discoveryCacheMu.Unlock()
 }
 
 func ModelLookupAuthID(manager *coreauth.Manager, name string) string {
@@ -72,14 +148,18 @@ func ListModelEntriesForTenant(manager *coreauth.Manager, source ModelSource, te
 	return modelEntriesFromRegistry(models)
 }
 
-// ListModelEntriesLiveForTenant optionally re-fetches models from the upstream
-// provider for discovery (refresh=1).
+// ListModelEntriesLiveForTenant returns models for an auth file panel.
 //
-// Registry update policy:
-//   - xai / antigravity: live catalog is account-complete → update runtime registry
-//   - claude / codex: live is discovery-only (ChatGPT manifest / Anthropic /models
-//     can be a subset). Return upstream list with source=upstream but NEVER
-//     RegisterClient-replace the static channel catalog (regression #673/#674).
+// Behaviour:
+//   - claude / codex (shared discovery):
+//     open (refresh=false): serve provider discovery cache if present; otherwise
+//     auto-warm once from upstream using this auth, store under provider+tenant,
+//     return source=upstream. Never RegisterClient-replace the static catalog.
+//     force (refresh=true): re-fetch upstream, refresh provider cache, return
+//     source=upstream. Same-type accounts reuse the cache without re-hitting
+//     upstream until TTL or the next force.
+//   - xai / antigravity:
+//     refresh=true updates runtime registry when live succeeds; open uses registry.
 //
 // When live fetch fails, falls back to the existing registry list so the UI
 // still shows known models.
@@ -93,29 +173,125 @@ func ListModelEntriesLiveForTenant(
 	refresh bool,
 ) (models []map[string]any, sourceLabel string) {
 	sourceLabel = "registry"
-	if !refresh {
-		return ListModelEntriesForTenant(manager, source, tenantID, name), sourceLabel
-	}
 
 	auth := FindAuthForTenant(manager, tenantID, name)
 	if auth == nil {
 		return ListModelEntriesForTenant(manager, source, tenantID, name), sourceLabel
 	}
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 
-	live, provider, updateRegistry := fetchLiveModelsForAuth(ctx, auth, cfg)
+	// Shared discovery path for Claude / Codex: prefer provider cache on open,
+	// auto-warm on first miss, force re-fetch only when refresh=1.
+	if supportsSharedDiscovery(provider) {
+		if !refresh {
+			if cached := loadDiscoveryCache(tenantID, provider); len(cached) > 0 {
+				return modelEntriesFromRegistry(cached), "upstream"
+			}
+		}
+		live, ok := warmSharedDiscovery(ctx, auth, cfg, tenantID, provider, refresh)
+		if ok && len(live) > 0 {
+			return modelEntriesFromRegistry(live), "upstream"
+		}
+		// Live miss/fail: keep last good discovery list if any (do not snap back to static).
+		if cached := loadDiscoveryCache(tenantID, provider); len(cached) > 0 {
+			return modelEntriesFromRegistry(cached), "upstream"
+		}
+		return ListModelEntriesForTenant(manager, source, tenantID, name), sourceLabel
+	}
+
+	if !refresh {
+		return ListModelEntriesForTenant(manager, source, tenantID, name), sourceLabel
+	}
+
+	live, liveProvider, updateRegistry := fetchLiveModelsForAuth(ctx, auth, cfg)
 	if len(live) == 0 {
 		return ListModelEntriesForTenant(manager, source, tenantID, name), sourceLabel
 	}
 
 	sourceLabel = "upstream"
 	if updateRegistry && registrar != nil {
-		providerKey := provider
+		providerKey := liveProvider
 		if providerKey == "" {
-			providerKey = strings.ToLower(strings.TrimSpace(auth.Provider))
+			providerKey = provider
 		}
 		registrar.RegisterClient(auth.ID, providerKey, live)
 	}
 	return modelEntriesFromRegistry(live), sourceLabel
+}
+
+// warmSharedDiscovery fetches live models for claude/codex and stores them in
+// the provider-level cache. Concurrent warmers for the same key single-flight.
+// When force is false and another warmer already populated the cache, waiters
+// receive that result without a second upstream call.
+func warmSharedDiscovery(
+	ctx context.Context,
+	auth *coreauth.Auth,
+	cfg *config.Config,
+	tenantID, provider string,
+	force bool,
+) ([]*registry.ModelInfo, bool) {
+	if auth == nil || !supportsSharedDiscovery(provider) {
+		return nil, false
+	}
+	key := discoveryCacheKey(tenantID, provider)
+
+	if !force {
+		if cached := loadDiscoveryCache(tenantID, provider); len(cached) > 0 {
+			return cached, true
+		}
+	}
+
+	discoveryCacheMu.Lock()
+	if !force {
+		if entry, ok := discoveryCache[key]; ok && len(entry.models) > 0 && time.Since(entry.fetchedAt) <= discoveryCacheTTL {
+			models := cloneRegistryModels(entry.models)
+			discoveryCacheMu.Unlock()
+			return models, true
+		}
+	}
+	if inflight, ok := discoveryInflightM[key]; ok {
+		discoveryCacheMu.Unlock()
+		<-inflight.done
+		if inflight.ok {
+			return cloneRegistryModels(inflight.models), true
+		}
+		// Leader failed; if we are not force, do not stampede — fall back.
+		if !force {
+			return nil, false
+		}
+		// Force path: try again as a new leader below.
+		discoveryCacheMu.Lock()
+		if inflight2, ok2 := discoveryInflightM[key]; ok2 {
+			discoveryCacheMu.Unlock()
+			<-inflight2.done
+			if inflight2.ok {
+				return cloneRegistryModels(inflight2.models), true
+			}
+			return nil, false
+		}
+	}
+
+	inflight := &discoveryInflight{done: make(chan struct{})}
+	discoveryInflightM[key] = inflight
+	discoveryCacheMu.Unlock()
+
+	live, _, _ := fetchLiveModelsForAuth(ctx, auth, cfg)
+	ok := len(live) > 0
+	if ok {
+		storeDiscoveryCache(tenantID, provider, live)
+	}
+
+	discoveryCacheMu.Lock()
+	inflight.models = cloneRegistryModels(live)
+	inflight.ok = ok
+	delete(discoveryInflightM, key)
+	close(inflight.done)
+	discoveryCacheMu.Unlock()
+
+	if !ok {
+		return nil, false
+	}
+	return cloneRegistryModels(live), true
 }
 
 func fetchLiveModelsForAuth(ctx context.Context, auth *coreauth.Auth, cfg *config.Config) ([]*registry.ModelInfo, string, bool) {
@@ -176,6 +352,21 @@ func cloneSDKModelsToRegistry(models []*sdkmodelcatalog.ModelInfo) []*registry.M
 			MaxCompletionTokens: model.MaxCompletionTokens,
 			UserDefined:         model.UserDefined,
 		})
+	}
+	return out
+}
+
+func cloneRegistryModels(models []*registry.ModelInfo) []*registry.ModelInfo {
+	if len(models) == 0 {
+		return nil
+	}
+	out := make([]*registry.ModelInfo, 0, len(models))
+	for _, model := range models {
+		if model == nil || strings.TrimSpace(model.ID) == "" {
+			continue
+		}
+		clone := *model
+		out = append(out, &clone)
 	}
 	return out
 }
