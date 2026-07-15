@@ -34,6 +34,8 @@ var (
 //     strip hosted image_generation so Desktop uses /v1/images + disk save path.
 //  2. Else if account bridge is enabled, inject hosted image_generation + bridge instructions.
 //     API-key custom providers typically do not expose local image_gen, so hosted is required.
+//  3. When image intent is present and only hosted tool is available, force
+//     tool_choice=image_generation so the model cannot skip the tool and reply with text.
 func maybeEnsureCodexImageGenerationTool(body []byte, auth *cliproxyauth.Auth, baseModel string, headers http.Header) []byte {
 	if requestHasLocalImageGenTool(body) {
 		return stripHostedImageGenerationTools(body)
@@ -44,7 +46,114 @@ func maybeEnsureCodexImageGenerationTool(body []byte, auth *cliproxyauth.Auth, b
 	body = ensureCodexImageGenerationTool(body, baseModel, auth, headers)
 	if requestHasHostedImageGenerationTool(body) {
 		body = ensureCodexImageGenerationBridgeInstructions(body)
+		if requestLooksLikeImageGenerationIntent(body) {
+			body = forceCodexImageGenerationToolChoice(body)
+		}
 	}
+	return body
+}
+
+func requestLooksLikeImageGenerationIntent(body []byte) bool {
+	// Explicit Image Gen skill / slash-command markers from Codex Desktop.
+	markers := []string{
+		"[$imagegen]",
+		"<name>imagegen</name>",
+		"skills/.system/imagegen",
+		"$imagegen",
+		"image_gen.imagegen",
+		"built-in `image_gen`",
+		"built-in image_gen",
+	}
+	// Prefer scanning recent user text, not the whole body (tools/schema can be huge).
+	input := gjson.GetBytes(body, "input")
+	if input.Type == gjson.String {
+		lower := strings.ToLower(input.String())
+		for _, m := range markers {
+			if strings.Contains(lower, strings.ToLower(m)) {
+				return true
+			}
+		}
+		return looksLikeChineseImageRequest(lower) || looksLikeEnglishImageRequest(lower)
+	}
+	if input.IsArray() {
+		// Scan from the end: last user turn is decisive.
+		items := input.Array()
+		for i := len(items) - 1; i >= 0 && i >= len(items)-8; i-- {
+			item := items[i]
+			role := strings.TrimSpace(item.Get("role").String())
+			if role != "" && role != "user" {
+				continue
+			}
+			text := extractCodexInputItemText(item)
+			if text == "" {
+				continue
+			}
+			lower := strings.ToLower(text)
+			for _, m := range markers {
+				if strings.Contains(lower, strings.ToLower(m)) {
+					return true
+				}
+			}
+			if looksLikeChineseImageRequest(lower) || looksLikeEnglishImageRequest(lower) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func extractCodexInputItemText(item gjson.Result) string {
+	if item.Get("content").Type == gjson.String {
+		return item.Get("content").String()
+	}
+	content := item.Get("content")
+	if !content.IsArray() {
+		if t := item.Get("text"); t.Type == gjson.String {
+			return t.String()
+		}
+		return ""
+	}
+	var b strings.Builder
+	for _, part := range content.Array() {
+		switch strings.TrimSpace(part.Get("type").String()) {
+		case "input_text", "output_text", "text":
+			if t := part.Get("text"); t.Type == gjson.String {
+				if b.Len() > 0 {
+					b.WriteByte('\n')
+				}
+				b.WriteString(t.String())
+			}
+		}
+	}
+	return b.String()
+}
+
+func looksLikeChineseImageRequest(lower string) bool {
+	// lower is already lowercased for ASCII; Chinese unchanged.
+	keys := []string{"画一", "画个", "画只", "画一张", "生成一张", "生成图片", "生图", "出图", "改图", "修图", "绘一张"}
+	for _, k := range keys {
+		if strings.Contains(lower, k) {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikeEnglishImageRequest(lower string) bool {
+	keys := []string{
+		"generate an image", "generate a image", "draw a ", "draw an ", "create an image",
+		"make an image", "edit this image", "image generation", "generate image",
+	}
+	for _, k := range keys {
+		if strings.Contains(lower, k) {
+			return true
+		}
+	}
+	return false
+}
+
+func forceCodexImageGenerationToolChoice(body []byte) []byte {
+	body, _ = sjson.SetRawBytes(body, "tool_choice", []byte(`{"type":"image_generation"}`))
 	return body
 }
 

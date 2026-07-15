@@ -161,3 +161,33 @@ func TestSynthesizeCodexImageDisplayMessageEvent(t *testing.T) {
 		t.Fatalf("display text missing data url: %s", text)
 	}
 }
+
+func TestMaybeEnsureForcesToolChoiceOnImageIntent(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"codex_image_generation_bridge": true},
+	}
+	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"function","name":"shell"}],"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"[$imagegen] 给我画一个小猫"}]}]}`)
+	out := maybeEnsureCodexImageGenerationTool(body, auth, "gpt-5.4", nil)
+	if got := gjson.GetBytes(out, "tools.1.type").String(); got != "image_generation" {
+		t.Fatalf("tools.1.type = %q, want image_generation; body=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tool_choice.type").String(); got != "image_generation" {
+		t.Fatalf("tool_choice.type = %q, want image_generation; body=%s", got, out)
+	}
+}
+
+func TestMaybeEnsureDoesNotForceToolChoiceWithoutIntent(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"codex_image_generation_bridge": true},
+	}
+	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"function","name":"shell"}],"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"refactor this function"}]}]}`)
+	out := maybeEnsureCodexImageGenerationTool(body, auth, "gpt-5.4", nil)
+	if got := gjson.GetBytes(out, "tools.1.type").String(); got != "image_generation" {
+		t.Fatalf("tools.1.type = %q, want image_generation; body=%s", got, out)
+	}
+	if gjson.GetBytes(out, "tool_choice.type").String() == "image_generation" {
+		t.Fatalf("tool_choice should not force image_generation without intent; body=%s", out)
+	}
+}
