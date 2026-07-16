@@ -229,6 +229,9 @@ func TestParseXAIBillingFullSummaryAndPlan(t *testing.T) {
 	if weeklyLimit == nil || weeklyLimit.Percent == nil || *weeklyLimit.Percent != 70 || weeklyLimit.WindowSeconds != 604800 || weeklyLimit.ResetAt == nil {
 		t.Fatalf("weekly=%+v", weeklyLimit)
 	}
+	if weeklyLimit.Meta != "" {
+		t.Fatalf("weekly meta should be empty, got %q", weeklyLimit.Meta)
+	}
 	product := quotaByKey(weeklyItems, "product:grok-code")
 	if product == nil || product.Percent == nil || *product.Percent != 80 {
 		t.Fatalf("product=%+v", product)

@@ -127,20 +127,11 @@ func parseXAIWeeklyBilling(body []byte) []usage.QuotaWindowDTO {
 	if !reset.Exists() {
 		reset = firstJSONResult(cfg, "billingPeriodEnd", "billing_period_end")
 	}
-	start := strings.TrimSpace(firstJSONResult(current, "start").String())
-	if start == "" {
-		start = strings.TrimSpace(firstJSONResult(cfg, "billingPeriodStart", "billing_period_start").String())
-	}
-	end := strings.TrimSpace(reset.String())
-	meta := ""
-	if start != "" && end != "" {
-		meta = start + " - " + end
-	} else {
-		meta = firstNonEmpty(end, start)
-	}
+	// Weekly cards already show relative reset from ResetAt; keep Meta empty so the
+	// UI is not flooded with raw ISO period strings like "2026-07-16T06:45:51+00:00 - …".
 	out := []usage.QuotaWindowDTO{{
 		QuotaKey: "weekly_limit", QuotaLabel: "xai_quota.weekly_limit", Percent: &remaining,
-		Value: formatPercent(remaining), ResetAt: parseFlexibleTime(reset), WindowSeconds: 604800, Meta: meta,
+		Value: formatPercent(remaining), ResetAt: parseFlexibleTime(reset), WindowSeconds: 604800,
 	}}
 	if products.IsArray() {
 		index := 0
