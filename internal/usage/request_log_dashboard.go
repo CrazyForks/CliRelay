@@ -3,6 +3,7 @@ package usage
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -132,37 +133,59 @@ func QueryDashboardTrendsForTenant(tenantID string, days int) (DashboardTrends, 
 		byKey[buckets[i].key] = &buckets[i]
 	}
 
-	rows, err := db.Query(`
-		SELECT timestamp, failed, total_tokens
-		FROM request_logs
-		WHERE tenant_id = ? AND timestamp >= ?
-	`, normalizeTenantID(tenantID), CutoffStartUTC(days).Format(time.RFC3339))
+	// Aggregate in SQL instead of streaming every matching request_logs row into Go.
+	// Dashboard polls this path every few seconds; a full-row scan over multi-day
+	// windows was the 2026-07-16 load-incident root cause behind nginx 503 guards.
+	// date()/strftime(..., 'localtime') is rewritten by the postgres compat driver
+	// to a UTC day/hour key; production keeps process TZ aligned with the usage zone.
+	cutoff := CutoffStartUTC(days).Format(time.RFC3339)
+	tenantID = normalizeTenantID(tenantID)
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if days == 1 {
+		// Hourly buckets: key shape is "2006-01-02 15" (no minutes).
+		rows, err = db.Query(`
+			SELECT strftime('%Y-%m-%d %H:00', timestamp, 'localtime') as h,
+			       failed, COUNT(*), COALESCE(SUM(total_tokens), 0)
+			FROM request_logs
+			WHERE tenant_id = ? AND timestamp >= ?
+			GROUP BY h, failed
+		`, tenantID, cutoff)
+	} else {
+		rows, err = db.Query(`
+			SELECT date(timestamp, 'localtime') as d,
+			       failed, COUNT(*), COALESCE(SUM(total_tokens), 0)
+			FROM request_logs
+			WHERE tenant_id = ? AND timestamp >= ?
+			GROUP BY d, failed
+		`, tenantID, cutoff)
+	}
 	if err != nil {
 		return DashboardTrends{}, fmt.Errorf("usage: query dashboard trends: %w", err)
 	}
 	defer rows.Close()
 
 	for rows.Next() {
-		var ts storedTime
+		var bucketKey string
 		var failedInt int
+		var requests int64
 		var totalTokens int64
-		if err := rows.Scan(&ts, &failedInt, &totalTokens); err != nil {
+		if err := rows.Scan(&bucketKey, &failedInt, &requests, &totalTokens); err != nil {
 			return DashboardTrends{}, fmt.Errorf("usage: scan dashboard trend row: %w", err)
 		}
-		if !ts.Valid {
-			continue
-		}
-		key := dashboardBucketKey(ts.Time.In(loc), days)
+		key := normalizeDashboardSQLBucketKey(bucketKey, days)
 		bucket := byKey[key]
 		if bucket == nil {
 			continue
 		}
-		bucket.requests++
+		bucket.requests += requests
 		bucket.totalToken += totalTokens
 		if failedInt != 0 {
-			bucket.failed++
+			bucket.failed += requests
 		} else {
-			bucket.success++
+			bucket.success += requests
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -177,6 +200,25 @@ func QueryDashboardTrendsForTenant(tenantID string, days int) (DashboardTrends, 
 	trends := dashboardTrendsFromBuckets(buckets)
 	trends.ThroughputSeries = throughputSeries
 	return trends, nil
+}
+
+// normalizeDashboardSQLBucketKey maps SQL group keys onto dashboardBucketKey shapes.
+// Hourly SQL uses "YYYY-MM-DD HH:00"; Go keys drop the trailing ":00".
+func normalizeDashboardSQLBucketKey(raw string, days int) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if days == 1 {
+		if strings.HasSuffix(raw, ":00") {
+			return strings.TrimSuffix(raw, ":00")
+		}
+		// Accept already-normalized "YYYY-MM-DD HH".
+		if len(raw) == len("2006-01-02 15") {
+			return raw
+		}
+	}
+	return raw
 }
 
 // QueryDashboardThroughputAcrossTenants returns the recent 7 RPM/TPM points
