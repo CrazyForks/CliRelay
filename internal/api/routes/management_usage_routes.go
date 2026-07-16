@@ -19,4 +19,9 @@ func registerManagementUsageRoutes(group *gin.RouterGroup, h *managementhandlers
 	group.POST("/usage/auth-file-quota-snapshot", h.PostAuthFileQuotaSnapshot)
 	group.GET("/usage/chart-data", usageLogs.GetUsageChartData)
 	group.GET("/usage/entity-stats", usageLogs.GetEntityUsageStats)
+
+	// Backend-owned AI account latest status (replaces browser fan-out).
+	group.GET("/ai-accounts/status", h.GetAIAccountStatus)
+	group.POST("/ai-accounts/status-refresh", h.PostAIAccountStatusRefresh)
+	group.GET("/ai-accounts/status-refresh/:job_id", h.GetAIAccountStatusRefreshJob)
 }

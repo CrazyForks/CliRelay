@@ -28,6 +28,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		return
 	}
 	auths := h.authManager.ListForTenant(effectiveTenantID(c))
+	// auth_subject_id is set once in BuildEntry (canonical server identity).
 	files := managementauthfiles.ListEntries(auths, managementauthfiles.EntryOptions{
 		OnStatError: func(path string, err error) {
 			log.WithError(err).Warnf("failed to stat auth file %s", path)

@@ -49,6 +49,12 @@ func TestListEntriesBuildsAndSortsAuthEntries(t *testing.T) {
 	if got[0]["name"] != "alpha.json" || got[1]["name"] != "zeta.json" {
 		t.Fatalf("sorted names = %#v, want alpha then zeta", []any{got[0]["name"], got[1]["name"]})
 	}
+	if _, ok := got[0]["auth_subject_id"].(string); !ok || got[0]["auth_subject_id"] == "" {
+		t.Fatalf("alpha missing auth_subject_id: %#v", got[0])
+	}
+	if _, ok := got[1]["auth_subject_id"].(string); !ok || got[1]["auth_subject_id"] == "" {
+		t.Fatalf("zeta missing auth_subject_id: %#v", got[1])
+	}
 }
 
 func TestBuildEntryAllowsRuntimeOnlyAuthWithoutPath(t *testing.T) {
@@ -159,6 +165,39 @@ func TestBuildEntryIncludesCodexOAuthAdmissionPayload(t *testing.T) {
 	available, ok := admission["available_allowed_clients"].([]codexadmission.AllowedClientPresetInfo)
 	if !ok || len(available) == 0 || available[0].ID != codexadmission.AllowedClientClaudeCode {
 		t.Fatalf("admission.available_allowed_clients = %#v, want claude_code preset info", admission["available_allowed_clients"])
+	}
+	bridge, ok := entry["codex_image_generation_bridge"].(map[string]any)
+	if !ok {
+		t.Fatalf("codex_image_generation_bridge = %#v, want map", entry["codex_image_generation_bridge"])
+	}
+	if enabled, _ := bridge["enabled"].(bool); enabled {
+		t.Fatalf("bridge.enabled = %#v, want false by default", bridge["enabled"])
+	}
+}
+
+func TestBuildEntryIncludesCodexImageGenerationBridgeEnabled(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID:       "codex-oauth",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"runtime_only": "true",
+		},
+		Metadata: map[string]any{
+			"codex_image_generation_bridge": true,
+			"email":                         "codex@example.com",
+		},
+	}
+
+	entry := BuildEntry(auth, EntryOptions{})
+	if entry == nil {
+		t.Fatal("expected entry")
+	}
+	bridge, ok := entry["codex_image_generation_bridge"].(map[string]any)
+	if !ok {
+		t.Fatalf("codex_image_generation_bridge = %#v, want map", entry["codex_image_generation_bridge"])
+	}
+	if enabled, _ := bridge["enabled"].(bool); !enabled {
+		t.Fatalf("bridge.enabled = %#v, want true", bridge["enabled"])
 	}
 }
 

@@ -20,6 +20,7 @@ func (s *Server) setupRoutes() {
 	s.engine.GET("/healthz", func(c *gin.Context) {
 		c.Status(http.StatusNoContent)
 	})
+	s.engine.GET("/readyz", s.handleReadyz)
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
 	s.engine.GET("/manage", s.serveManagementControlPanel)

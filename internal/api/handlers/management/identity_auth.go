@@ -608,7 +608,10 @@ func isTenantScopedManagementPath(path string) bool {
 		relative == "/usage/auth-file-trend",
 		relative == "/usage/auth-file-quota-snapshot",
 		relative == "/quota/reconcile",
-		relative == "/quota/clear-status":
+		relative == "/quota/clear-status",
+		relative == "/ai-accounts/status",
+		relative == "/ai-accounts/status-refresh",
+		strings.HasPrefix(relative, "/ai-accounts/status-refresh/"):
 		return true
 	default:
 		return false

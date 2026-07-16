@@ -330,3 +330,134 @@ func TestDeleteEntryByIndexDeletesLogsWhenRequested(t *testing.T) {
 		t.Fatalf("DeleteEntry() kept deleted key: %#v", got)
 	}
 }
+
+func TestListEntriesAttachesDailySpendingRuntime(t *testing.T) {
+	setupTestDB(t)
+	svc := NewService(nil)
+	if err := usage.UpsertAPIKey(usage.APIKeyRow{ID: "key-1", Key: "sk-list", DailySpendingLimit: 100}); err != nil {
+		t.Fatalf("UpsertAPIKey: %v", err)
+	}
+	db := usage.RuntimeDB()
+	ts := usage.CutoffStartUTC(1).Add(time.Hour).Format(time.RFC3339)
+	if _, err := db.Exec(
+		`INSERT INTO request_logs
+		 (tenant_id, timestamp, api_key, api_key_id, model, source, failed, latency_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost)
+		 VALUES (?, ?, ?, ?, ?, ?, 0, 1, 0, 0, 0, 0, 0, ?)`,
+		"00000000-0000-0000-0000-000000000001", ts, "sk-list", "key-1", "model", "test", 20.0,
+	); err != nil {
+		t.Fatalf("insert log: %v", err)
+	}
+
+	entries, err := svc.ListEntriesWithDailySpending()
+	if err != nil {
+		t.Fatalf("ListEntriesWithDailySpending: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("len = %d", len(entries))
+	}
+	if entries[0].DailySpendingUsed != 20 {
+		t.Fatalf("used = %v, want 20", entries[0].DailySpendingUsed)
+	}
+	if entries[0].DailySpendingRemaining == nil || *entries[0].DailySpendingRemaining != 80 {
+		t.Fatalf("remaining = %v, want 80", entries[0].DailySpendingRemaining)
+	}
+
+	// unlimited
+	zero := 0.0
+	if err := svc.PatchEntry(&[]string{"key-1"}[0], nil, nil, EntryPatch{DailySpendingLimit: &zero}); err != nil {
+		t.Fatalf("patch unlimited: %v", err)
+	}
+	entries, err = svc.ListEntriesWithDailySpending()
+	if err != nil {
+		t.Fatalf("ListEntriesWithDailySpending unlimited: %v", err)
+	}
+	if entries[0].DailySpendingRemaining != nil {
+		t.Fatalf("unlimited remaining should be nil, got %v", *entries[0].DailySpendingRemaining)
+	}
+}
+
+func TestResetDailySpendingAndRejectsUnlimited(t *testing.T) {
+	setupTestDB(t)
+	svc := NewService(nil)
+	if err := usage.UpsertAPIKey(usage.APIKeyRow{ID: "key-1", Key: "sk-r", DailySpendingLimit: 100}); err != nil {
+		t.Fatalf("UpsertAPIKey: %v", err)
+	}
+	db := usage.RuntimeDB()
+	ts := usage.CutoffStartUTC(1).Add(time.Hour).Format(time.RFC3339)
+	if _, err := db.Exec(
+		`INSERT INTO request_logs
+		 (tenant_id, timestamp, api_key, api_key_id, model, source, failed, latency_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost)
+		 VALUES (?, ?, ?, ?, ?, ?, 0, 1, 0, 0, 0, 0, 0, ?)`,
+		"00000000-0000-0000-0000-000000000001", ts, "sk-r", "key-1", "model", "test", 20.0,
+	); err != nil {
+		t.Fatalf("insert log: %v", err)
+	}
+
+	id := "key-1"
+	result, err := svc.ResetDailySpending(&id, nil)
+	if err != nil {
+		t.Fatalf("ResetDailySpending: %v", err)
+	}
+	if result.DailySpendingUsed != 0 {
+		t.Fatalf("used after reset = %v", result.DailySpendingUsed)
+	}
+	if result.DailySpendingRemaining == nil || *result.DailySpendingRemaining != 100 {
+		t.Fatalf("remaining after reset = %v", result.DailySpendingRemaining)
+	}
+
+	// request logs must remain
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM request_logs WHERE api_key_id = ?`, "key-1").Scan(&count); err != nil {
+		t.Fatalf("count logs: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("logs count = %d, want 1 (reset must not delete logs)", count)
+	}
+
+	got, err := usage.QueryTodayCostByKey("sk-r")
+	if err != nil {
+		t.Fatalf("QueryTodayCostByKey: %v", err)
+	}
+	if got != 0 {
+		t.Fatalf("middleware-facing cost = %v, want 0", got)
+	}
+
+	// unlimited rejects reset
+	zero := 0.0
+	if err := svc.PatchEntry(&id, nil, nil, EntryPatch{DailySpendingLimit: &zero}); err != nil {
+		t.Fatalf("clear limit: %v", err)
+	}
+	if _, err := svc.ResetDailySpending(&id, nil); !errors.Is(err, ErrDailySpendingLimitMissing) {
+		t.Fatalf("err = %v, want ErrDailySpendingLimitMissing", err)
+	}
+}
+
+func TestEffectiveRowKeepsKeyDailySpendingLimitWithProfile(t *testing.T) {
+	setupTestDB(t)
+	if err := usage.ReplaceAllAPIKeyPermissionProfiles([]usage.APIKeyPermissionProfileRow{{
+		ID:         "p1",
+		Name:       "P1",
+		DailyLimit: 5,
+	}}); err != nil {
+		t.Fatalf("profiles: %v", err)
+	}
+	if err := usage.UpsertAPIKey(usage.APIKeyRow{
+		ID:                  "key-1",
+		Key:                 "sk-profile",
+		PermissionProfileID: "p1",
+		DailySpendingLimit:  12.5,
+	}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	svc := NewService(nil)
+	entries := svc.ListEntries()
+	if len(entries) != 1 {
+		t.Fatalf("len = %d", len(entries))
+	}
+	if entries[0].DailySpendingLimit != 12.5 {
+		t.Fatalf("DailySpendingLimit = %v, want 12.5 (key-owned, not cleared by profile)", entries[0].DailySpendingLimit)
+	}
+	if entries[0].DailyLimit != 5 {
+		t.Fatalf("DailyLimit from profile = %v, want 5", entries[0].DailyLimit)
+	}
+}

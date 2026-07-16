@@ -26,7 +26,7 @@ func TestRegisterManagementRouteTable(t *testing.T) {
 		routes[key] = route
 	}
 
-	if got, want := len(routes), 262; got != want {
+	if got, want := len(routes), 266; got != want {
 		t.Fatalf("route count = %d, want %d", got, want)
 	}
 	if got, want := sortedRouteKeys(routes), expectedManagementRoutes(); !slices.Equal(got, want) {
@@ -42,6 +42,7 @@ func TestRegisterManagementRouteTable(t *testing.T) {
 		"PATCH /v0/management/proxy-pool/:id",
 		"GET /v0/management/usage/logs/:id/content",
 		"GET /v0/management/usage/logs/:id/egress",
+		"POST /v0/management/ai-accounts/status-refresh",
 		"POST /v0/management/api-call",
 		"PATCH /v0/management/api-key-entries",
 		"POST /v0/management/opencode-go-api-key/usage",
@@ -124,6 +125,9 @@ func TestManagementRoutePermissionsComplete(t *testing.T) {
 		{http.MethodDelete, "/v0/management/logs", "system.logs.delete"},
 		{http.MethodPost, "/v0/management/usage/import", "system.config.write"},
 		{http.MethodPost, "/v0/management/usage/auth-file-quota-snapshot", "auth_files.write"},
+		{http.MethodGet, "/v0/management/ai-accounts/status", "auth_files.read"},
+		{http.MethodPost, "/v0/management/ai-accounts/status-refresh", "auth_files.write"},
+		{http.MethodGet, "/v0/management/ai-accounts/status-refresh/job-1", "auth_files.read"},
 		{http.MethodGet, "/v0/management/totally-unknown-route", ""},
 	}
 	for _, item := range locked {
@@ -222,6 +226,9 @@ func expectedManagementRoutes() []string {
 		"DELETE /v0/management/proxy-url",
 		"DELETE /v0/management/usage/logs",
 		"DELETE /v0/management/vertex-api-key",
+		"GET /v0/management/ai-accounts/status",
+		"GET /v0/management/ai-accounts/status-refresh/:job_id",
+		"POST /v0/management/ai-accounts/status-refresh",
 		"GET /v0/management/ampcode",
 		"GET /v0/management/ampcode/force-model-mappings",
 		"GET /v0/management/ampcode/model-mappings",
@@ -362,6 +369,7 @@ func expectedManagementRoutes() []string {
 		"PATCH /v0/management/vertex-api-key",
 		"PATCH /v0/management/ws-auth",
 		"POST /v0/management/api-call",
+		"POST /v0/management/api-key-entries/daily-spending/reset",
 		"POST /v0/management/auth-files",
 		"POST /v0/management/iflow-auth-url",
 		"POST /v0/management/image-generation/test",

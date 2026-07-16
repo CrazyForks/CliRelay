@@ -17,10 +17,12 @@ func TestDeployWorkflowOnlyPublishesBackendBinary(t *testing.T) {
 	content := string(data)
 
 	for _, want := range []string{
-		`Upload binary and deploy scripts`,
-		`source: "cli-proxy-api-new,scripts/deploy-blue-green.sh,scripts/cleanup-drained-slot.sh"`,
-		`scripts/deploy-blue-green.sh`,
-		`target: "/opt/clirelay2/"`,
+		`Upload binary to staging`,
+		`/opt/clirelay2/incoming/cli-proxy-api-new`,
+		`User deploy`,
+		`/usr/local/sbin/clirelay-gha-deploy`,
+		`StrictHostKeyChecking yes`,
+		`DEPLOY_SSH_KNOWN_HOSTS`,
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("deploy workflow missing backend binary deployment marker %q", want)
@@ -36,9 +38,13 @@ func TestDeployWorkflowOnlyPublishesBackendBinary(t *testing.T) {
 		`PANEL_DIR=`,
 		`relay-panel`,
 		`/home/web/html`,
+		`appleboy/scp-action`,
+		`appleboy/ssh-action`,
+		`username: root`,
+		`StrictHostKeyChecking accept-new`,
 	} {
 		if strings.Contains(content, forbidden) {
-			t.Fatalf("backend deploy workflow must not publish frontend panel assets, found %q", forbidden)
+			t.Fatalf("backend deploy workflow must not publish frontend panel assets or use insecure deploy markers, found %q", forbidden)
 		}
 	}
 }
@@ -51,13 +57,14 @@ func TestDeployWorkflowUsesBlueGreenDeployment(t *testing.T) {
 	content := string(data)
 
 	for _, want := range []string{
-		`Blue-green deploy`,
-		`SERVICE_CPU_QUOTA="${{ vars.CLIRELAY_SERVICE_CPU_QUOTA || '170%' }}"`,
-		`SERVICE_MEMORY_HIGH="${{ vars.CLIRELAY_SERVICE_MEMORY_HIGH || '1400M' }}"`,
-		`SERVICE_MEMORY_MAX="${{ vars.CLIRELAY_SERVICE_MEMORY_MAX || '1600M' }}"`,
-		`SERVICE_TASKS_MAX="${{ vars.CLIRELAY_SERVICE_TASKS_MAX || '512' }}"`,
-		`COMMIT_SHA="${{ github.sha }}"`,
-		`bash /opt/clirelay2/scripts/deploy-blue-green.sh`,
+		`Blue-green deploy via fixed root entrypoint`,
+		`SERVICE_CPU_QUOTA: ${{ vars.CLIRELAY_SERVICE_CPU_QUOTA || '170%' }}`,
+		`SERVICE_MEMORY_HIGH: ${{ vars.CLIRELAY_SERVICE_MEMORY_HIGH || '1400M' }}`,
+		`SERVICE_MEMORY_MAX: ${{ vars.CLIRELAY_SERVICE_MEMORY_MAX || '1600M' }}`,
+		`SERVICE_TASKS_MAX: ${{ vars.CLIRELAY_SERVICE_TASKS_MAX || '512' }}`,
+		`COMMIT_SHA: ${{ github.sha }}`,
+		`/usr/local/sbin/clirelay-gha-deploy`,
+		`EXPECTED_SCRIPT_VERSION`,
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("deploy workflow missing blue-green marker %q", want)
@@ -79,6 +86,7 @@ func TestBlueGreenDeployScriptSyntaxAndGuards(t *testing.T) {
 	for _, path := range []string{
 		"scripts/deploy-blue-green.sh",
 		"scripts/cleanup-drained-slot.sh",
+		"scripts/reconcile-active-slot.sh",
 	} {
 		cmd := exec.Command("bash", "-n", path)
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -92,10 +100,16 @@ func TestBlueGreenDeployScriptSyntaxAndGuards(t *testing.T) {
 	}
 	content := string(data)
 	for _, want := range []string{
+		`/readyz`,
 		`/healthz`,
 		`CLIRELAY_PORT=`,
 		`.active-port`,
+		`reconcile-active-slot.sh`,
 		`HEALTH_TIMEOUT_SECONDS`,
+		`SMOKE_TIMEOUT_SECONDS`,
+		`PUBLIC_BASE_URL`,
+		`external smoke failed`,
+		`rolling nginx back`,
 		`MIN_AVAILABLE_MB`,
 		`NGINX_CONTAINER`,
 		`EnvironmentFile=`,
@@ -105,6 +119,8 @@ func TestBlueGreenDeployScriptSyntaxAndGuards(t *testing.T) {
 		`systemd-run`,
 		`scripts/cleanup-drained-slot.sh`,
 		`grep -v '\.bak\.'`,
+		`SCRIPT_VERSION`,
+		`TimeoutStopSec=90`,
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("deploy script missing guard %q", want)
@@ -130,13 +146,26 @@ func TestCleanupDrainedSlotStopsOnlyTheExpectedInactiveSlot(t *testing.T) {
 		t.Fatalf("create fake bin dir: %v", err)
 	}
 	logPath := tmp + "/systemctl.log"
-	fakeSystemctl := "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$SYSTEMCTL_LOG\"\n"
+	activeUnitPath := tmp + "/active-unit"
+	fakeSystemctl := `#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
+if [ "$1" = "is-active" ] && [ "$2" = "--quiet" ]; then
+  active="$(cat "$SYSTEMCTL_ACTIVE_UNIT" 2>/dev/null || true)"
+  if [ "${3:-}" = "$active" ]; then
+    exit 0
+  fi
+  exit 3
+fi
+`
 	if err := os.WriteFile(binDir+"/systemctl", []byte(fakeSystemctl), 0o755); err != nil {
 		t.Fatalf("write fake systemctl: %v", err)
 	}
 	activePortFile := tmp + "/.active-port"
 	if err := os.WriteFile(activePortFile, []byte("8319\n"), 0o644); err != nil {
 		t.Fatalf("write active port: %v", err)
+	}
+	if err := os.WriteFile(activeUnitPath, []byte("clirelay2-8319\n"), 0o644); err != nil {
+		t.Fatalf("write active unit: %v", err)
 	}
 
 	runCleanup := func() string {
@@ -145,6 +174,7 @@ func TestCleanupDrainedSlotStopsOnlyTheExpectedInactiveSlot(t *testing.T) {
 		cmd.Env = append(os.Environ(),
 			"PATH="+binDir+":"+os.Getenv("PATH"),
 			"SYSTEMCTL_LOG="+logPath,
+			"SYSTEMCTL_ACTIVE_UNIT="+activeUnitPath,
 			"BASE_DIR="+tmp,
 			"ACTIVE_PORT_FILE="+activePortFile,
 		)
@@ -181,16 +211,72 @@ func TestCleanupDrainedSlotStopsOnlyTheExpectedInactiveSlot(t *testing.T) {
 	}
 }
 
+func TestReconcileActiveSlotRepairsStaleMarker(t *testing.T) {
+	tmp := t.TempDir()
+	binDir := tmp + "/bin"
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("create fake bin dir: %v", err)
+	}
+	statePath := tmp + "/active-unit"
+	activePortFile := tmp + "/.active-port"
+	fakeSystemctl := `#!/usr/bin/env bash
+if [ "$1" = "is-active" ] && [ "$2" = "--quiet" ]; then
+  active="$(cat "$SYSTEMCTL_ACTIVE_UNIT" 2>/dev/null || true)"
+  if [ "${3:-}" = "$active" ]; then
+    exit 0
+  fi
+  exit 3
+fi
+exit 1
+`
+	if err := os.WriteFile(binDir+"/systemctl", []byte(fakeSystemctl), 0o755); err != nil {
+		t.Fatalf("write fake systemctl: %v", err)
+	}
+	if err := os.WriteFile(activePortFile, []byte("8318\n"), 0o644); err != nil {
+		t.Fatalf("write active port: %v", err)
+	}
+	if err := os.WriteFile(statePath, []byte("clirelay2-8319\n"), 0o644); err != nil {
+		t.Fatalf("write active unit: %v", err)
+	}
+
+	cmd := exec.Command("bash", "scripts/reconcile-active-slot.sh")
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"BASE_DIR="+tmp,
+		"ACTIVE_PORT_FILE="+activePortFile,
+		"SYSTEMCTL_ACTIVE_UNIT="+statePath,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("reconcile active slot: %v\n%s", err, out)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	got := strings.TrimSpace(lines[len(lines)-1])
+	if got != "8319" {
+		t.Fatalf("reconciled slot = %q, want 8319", got)
+	}
+	data, err := os.ReadFile(activePortFile)
+	if err != nil {
+		t.Fatalf("read active port file: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "8319" {
+		t.Fatalf("active port file = %q, want 8319", got)
+	}
+}
+
 func TestDeployCompletesBeforeDispatchingDevDockerBuild(t *testing.T) {
 	data, err := os.ReadFile(".github/workflows/deploy.yml")
 	if err != nil {
 		t.Fatalf("read deploy workflow: %v", err)
 	}
 	content := string(data)
-	deployIndex := strings.Index(content, `name: Blue-green deploy`)
+	deployIndex := strings.Index(content, `name: Blue-green deploy via fixed root entrypoint`)
 	dockerIndex := strings.Index(content, `name: Trigger dev Docker image build`)
 	if deployIndex < 0 || dockerIndex < 0 || dockerIndex <= deployIndex {
 		t.Fatalf("dev Docker build must be dispatched only after blue-green deployment")
+	}
+	if !strings.Contains(content, `if: success() && env.SHOULD_DEPLOY == 'true'`) {
+		t.Fatalf("docker publish must only run after a real deploy attempt")
 	}
 	for _, want := range []string{
 		`actions: write`,

@@ -2,7 +2,6 @@ package usage
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 )
@@ -38,51 +37,40 @@ func QueryDailyUsageByAuthSubjectForTenant(tenantID string, matcher AuthSubjectM
 		return []DailyUsagePoint{}, nil
 	}
 
+	// Aggregate in SQL instead of streaming every matching request_logs row into Go.
+	// date(timestamp, 'localtime') is rewritten by the postgres compat driver to a
+	// UTC day key; production keeps process TZ aligned with the configured usage zone.
 	args := make([]interface{}, 0, len(matchArgs)+2)
 	args = append(args, tenantID, CutoffStartUTC(days).Format(time.RFC3339))
 	args = append(args, matchArgs...)
 
 	rows, err := db.Query(fmt.Sprintf(`
-		SELECT timestamp, cost
+		SELECT date(timestamp, 'localtime') as d, COUNT(*), COALESCE(SUM(cost), 0)
 		FROM request_logs
 		WHERE tenant_id = ? AND timestamp >= ? AND (%s)
-		ORDER BY timestamp ASC
+		GROUP BY d
+		ORDER BY d
 	`, matchSQL), args...)
 	if err != nil {
 		return nil, fmt.Errorf("usage: daily usage by auth subject query: %w", err)
 	}
 	defer rows.Close()
 
-	byDate := make(map[string]*DailyUsagePoint, days)
+	result := make([]DailyUsagePoint, 0, days)
 	for rows.Next() {
-		var ts storedTime
-		var cost float64
-		if err := rows.Scan(&ts, &cost); err != nil {
+		var point DailyUsagePoint
+		if err := rows.Scan(&point.Date, &point.Requests, &point.Cost); err != nil {
 			return nil, fmt.Errorf("usage: daily usage by auth subject scan: %w", err)
 		}
-		if !ts.Valid {
+		point.Date = strings.TrimSpace(point.Date)
+		if point.Date == "" {
 			continue
 		}
-		key := localDayKeyAt(ts.Time)
-		point := byDate[key]
-		if point == nil {
-			point = &DailyUsagePoint{Date: key}
-			byDate[key] = point
-		}
-		point.Requests++
-		point.Cost += cost
+		result = append(result, point)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-
-	result := make([]DailyUsagePoint, 0, len(byDate))
-	for _, point := range byDate {
-		result = append(result, *point)
-	}
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].Date < result[j].Date
-	})
 	return result, nil
 }
 
@@ -135,6 +123,10 @@ func QueryHourlyUsageByAuthSubjectForTenant(tenantID string, matcher AuthSubject
 	args = append(args, tenantID, start.UTC().Format(time.RFC3339))
 	args = append(args, matchArgs...)
 
+	// Keep a narrow row scan for hourly (≤24h). SQL strftime('localtime') follows
+	// process TZ, which can diverge from getUsageLocation() in tests and some
+	// deployments; Go-side bucketing preserves the project timezone contract.
+	// Daily aggregation above is the expensive 7d path and stays SQL-side.
 	rows, err := db.Query(fmt.Sprintf(`
 		SELECT timestamp, cost
 		FROM request_logs

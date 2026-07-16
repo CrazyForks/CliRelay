@@ -7,8 +7,40 @@ import (
 
 func TestRuntimeMigrationsCoverCoreTables(t *testing.T) {
 	migrations := RuntimeMigrations()
-	if len(migrations) != 10 {
-		t.Fatalf("RuntimeMigrations len = %d, want 10", len(migrations))
+	if len(migrations) != 13 {
+		t.Fatalf("RuntimeMigrations len = %d, want 13", len(migrations))
+	}
+	// Latest migration: API key daily spending reset baselines.
+	resetSQL := migrations[12].SQL
+	for _, fragment := range []string{
+		"CREATE TABLE IF NOT EXISTS api_key_daily_spending_resets",
+		"cost_baseline",
+		"day_key",
+	} {
+		if !strings.Contains(resetSQL, fragment) {
+			t.Fatalf("daily spending reset migration missing %q", fragment)
+		}
+	}
+	// Prior migration: AI account status read model tables.
+	statusSQL := migrations[11].SQL
+	for _, fragment := range []string{
+		"CREATE TABLE IF NOT EXISTS ai_account_status",
+		"CREATE TABLE IF NOT EXISTS auth_subject_usage_daily",
+		"success_count",
+		"usage_projection_markers",
+	} {
+		if !strings.Contains(statusSQL, fragment) {
+			t.Fatalf("ai account status migration missing %q", fragment)
+		}
+	}
+	authLookupSQL := migrations[10].SQL
+	for _, fragment := range []string{
+		"idx_request_logs_tenant_auth_index_time",
+		"idx_request_logs_tenant_auth_subject_time_cost",
+	} {
+		if !strings.Contains(authLookupSQL, fragment) {
+			t.Fatalf("auth lookup index migration missing %q", fragment)
+		}
 	}
 	sqlText := migrations[0].SQL
 	for _, table := range []string{

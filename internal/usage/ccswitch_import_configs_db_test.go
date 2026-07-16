@@ -29,6 +29,7 @@ func TestReplaceAllCcSwitchImportConfigsPersistsModelMappings(t *testing.T) {
 			ModelMappings: []CcSwitchModelMappingRow{
 				{Role: "main", RequestModel: "kimi-k2.5", TargetModel: "kimi-k2.5"},
 				{Role: "haiku", RequestModel: "claude-3-5-haiku", TargetModel: "kimi-k2.5", ContextWindow: 272000},
+				{Role: "fable", RequestModel: "claude-fable-5", TargetModel: "kimi-k2.5"},
 			},
 		},
 	})
@@ -40,14 +41,19 @@ func TestReplaceAllCcSwitchImportConfigsPersistsModelMappings(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("ListCcSwitchImportConfigs() length = %d, want 1: %#v", len(rows), rows)
 	}
-	if len(rows[0].ModelMappings) != 2 {
-		t.Fatalf("model mappings length = %d, want 2: %#v", len(rows[0].ModelMappings), rows[0].ModelMappings)
+	if len(rows[0].ModelMappings) != 3 {
+		t.Fatalf("model mappings length = %d, want 3: %#v", len(rows[0].ModelMappings), rows[0].ModelMappings)
 	}
 	if rows[0].ModelMappings[1].Role != "haiku" ||
 		rows[0].ModelMappings[1].RequestModel != "claude-3-5-haiku" ||
 		rows[0].ModelMappings[1].TargetModel != "kimi-k2.5" ||
 		rows[0].ModelMappings[1].ContextWindow != 272000 {
 		t.Fatalf("model mapping not preserved: %#v", rows[0].ModelMappings[1])
+	}
+	if rows[0].ModelMappings[2].Role != "fable" ||
+		rows[0].ModelMappings[2].RequestModel != "claude-fable-5" ||
+		rows[0].ModelMappings[2].TargetModel != "kimi-k2.5" {
+		t.Fatalf("fable model mapping not preserved: %#v", rows[0].ModelMappings[2])
 	}
 }
 

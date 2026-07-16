@@ -128,6 +128,14 @@ type APIKeyEntry struct {
 	// unlimited. It resets at the project timezone day boundary.
 	DailySpendingLimit float64 `yaml:"daily-spending-limit,omitempty" json:"daily-spending-limit,omitempty"`
 
+	// DailySpendingUsed is the effective project-day USD cost for this key (management list only).
+	// After a same-day manual reset, only costs after the reset baseline count.
+	DailySpendingUsed float64 `yaml:"-" json:"daily-spending-used"`
+
+	// DailySpendingRemaining is max(limit - used, 0) when DailySpendingLimit > 0; null when unlimited.
+	// Management list only; not persisted.
+	DailySpendingRemaining *float64 `yaml:"-" json:"daily-spending-remaining"`
+
 	// ConcurrencyLimit is the maximum number of concurrent requests. 0 means unlimited.
 	ConcurrencyLimit int `yaml:"concurrency-limit,omitempty" json:"concurrency-limit,omitempty"`
 

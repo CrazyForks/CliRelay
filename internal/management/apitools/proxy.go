@@ -1,17 +1,35 @@
 package apitools
 
 import (
-	"context"
-	"net"
 	"net/http"
-	"net/url"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	log "github.com/sirupsen/logrus"
-	"golang.org/x/net/proxy"
+)
+
+// Management probes must reuse transports by proxy/TLS config. Creating a new
+// proxy transport per /api-call burns keep-alive pools and multiplies fds.
+const maxManagementTransportEntries = 64
+
+type managementTransportKey struct {
+	proxyURL           string
+	preferIPv4         bool
+	insecureSkipVerify bool
+	caCert             string
+}
+
+type managementTransportEntry struct {
+	transport *http.Transport
+	lastUsed  time.Time
+}
+
+var (
+	managementTransportMu    sync.Mutex
+	managementTransportCache = map[managementTransportKey]*managementTransportEntry{}
 )
 
 func (s *Service) AuthByIndex(authIndex string) *coreauth.Auth {
@@ -55,55 +73,52 @@ func (s *Service) APICallTransport(auth *coreauth.Auth) http.RoundTripper {
 		sdkCfg = &s.cfg.SDKConfig
 	}
 	for _, proxyStr := range proxyCandidates {
-		if transport := buildProxyTransport(proxyStr, sdkCfg); transport != nil {
+		if transport := cachedManagementProxyTransport(proxyStr, sdkCfg); transport != nil {
 			return transport
 		}
 	}
 	return nil
 }
 
-func buildProxyTransport(proxyStr string, sdkCfg *config.SDKConfig) *http.Transport {
+func cachedManagementProxyTransport(proxyStr string, sdkCfg *config.SDKConfig) *http.Transport {
 	proxyStr = strings.TrimSpace(proxyStr)
 	if proxyStr == "" {
 		return nil
 	}
+	key := managementTransportKey{proxyURL: proxyStr}
+	if sdkCfg != nil {
+		key.preferIPv4 = sdkCfg.PreferIPv4
+		key.insecureSkipVerify = sdkCfg.InsecureSkipVerify
+		key.caCert = strings.TrimSpace(sdkCfg.CACert)
+	}
 
-	proxyURL, errParse := url.Parse(proxyStr)
-	if errParse != nil {
-		log.WithError(errParse).Debug("parse proxy URL failed")
+	now := time.Now()
+	managementTransportMu.Lock()
+	defer managementTransportMu.Unlock()
+	if entry := managementTransportCache[key]; entry != nil {
+		entry.lastUsed = now
+		return entry.transport
+	}
+
+	transport := util.BuildProxyTransport(proxyStr, key.preferIPv4)
+	if transport == nil {
 		return nil
 	}
-	if proxyURL.Scheme == "" || proxyURL.Host == "" {
-		log.Debug("proxy URL missing scheme/host")
-		return nil
-	}
-
-	if proxyURL.Scheme == "socks5" {
-		var proxyAuth *proxy.Auth
-		if proxyURL.User != nil {
-			username := proxyURL.User.Username()
-			password, _ := proxyURL.User.Password()
-			proxyAuth = &proxy.Auth{User: username, Password: password}
+	util.ApplyTLSConfig(transport, sdkCfg)
+	if len(managementTransportCache) >= maxManagementTransportEntries {
+		var oldestKey managementTransportKey
+		var oldest *managementTransportEntry
+		for k, e := range managementTransportCache {
+			if oldest == nil || e.lastUsed.Before(oldest.lastUsed) {
+				oldestKey = k
+				oldest = e
+			}
 		}
-		dialer, errSOCKS5 := proxy.SOCKS5("tcp", proxyURL.Host, proxyAuth, proxy.Direct)
-		if errSOCKS5 != nil {
-			log.WithError(errSOCKS5).Debug("create SOCKS5 dialer failed")
-			return nil
-		}
-		return &http.Transport{
-			Proxy: nil,
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return dialer.Dial(network, addr)
-			},
+		if oldest != nil {
+			delete(managementTransportCache, oldestKey)
+			oldest.transport.CloseIdleConnections()
 		}
 	}
-
-	if proxyURL.Scheme == "http" || proxyURL.Scheme == "https" {
-		transport := &http.Transport{Proxy: http.ProxyURL(proxyURL)}
-		util.ApplyTLSConfig(transport, sdkCfg)
-		return transport
-	}
-
-	log.Debugf("unsupported proxy scheme: %s", proxyURL.Scheme)
-	return nil
+	managementTransportCache[key] = &managementTransportEntry{transport: transport, lastUsed: now}
+	return transport
 }

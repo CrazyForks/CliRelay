@@ -100,7 +100,8 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		recorder.AppendResponseChunk(b)
 		logWithRequestID(execCtx.Context).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		reporter.publishFailureWithContent(execCtx.Context, string(req.Payload), string(b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b), headers: httpResp.Header.Clone()}
+		// Parse 402 balance-exhausted into weekly quota cooldown metadata.
+		err = newXAIStatusErr(httpResp.StatusCode, b, httpResp.Header)
 		return resp, err
 	}
 	data, err := readUpstreamResponseBody(e.Identifier(), httpResp.Body)
@@ -188,7 +189,8 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		recorder.AppendResponseChunk(data)
 		logWithRequestID(execCtx.Context).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		reporter.publishFailureWithContent(execCtx.Context, string(req.Payload), string(data))
-		err = statusErr{code: httpResp.StatusCode, msg: string(data), headers: httpResp.Header.Clone()}
+		// Parse 402 balance-exhausted into weekly quota cooldown metadata.
+		err = newXAIStatusErr(httpResp.StatusCode, data, httpResp.Header)
 		return nil, err
 	}
 

@@ -11,14 +11,15 @@ import (
 )
 
 var (
-	ErrInvalidProfileID   = errors.New("id is required")
-	ErrInvalidProfileName = errors.New("name is required")
-	ErrMissingValue       = errors.New("missing value")
-	ErrInvalidEntry       = errors.New("invalid api key entry")
-	ErrItemNotFound       = errors.New("item not found")
-	ErrDuplicateKey       = errors.New("api key already exists")
-	ErrMissingKeyOrIndex  = errors.New("missing key or index")
-	ErrKeyRequired        = errors.New("key is required")
+	ErrInvalidProfileID          = errors.New("id is required")
+	ErrInvalidProfileName        = errors.New("name is required")
+	ErrMissingValue              = errors.New("missing value")
+	ErrInvalidEntry              = errors.New("invalid api key entry")
+	ErrItemNotFound              = errors.New("item not found")
+	ErrDuplicateKey              = errors.New("api key already exists")
+	ErrMissingKeyOrIndex         = errors.New("missing key or index")
+	ErrKeyRequired               = errors.New("key is required")
+	ErrDailySpendingLimitMissing = errors.New("daily spending limit is not set")
 )
 
 type ChannelSanitizer func([]string) ([]string, error)
@@ -247,12 +248,107 @@ func (s *Service) RemovePermissionProfileChannelRestrictions(oldNameSet map[stri
 }
 
 func (s *Service) ListEntries() []config.APIKeyEntry {
+	entries, _ := s.ListEntriesWithDailySpending()
+	return entries
+}
+
+// ListEntriesWithDailySpending lists keys and attaches effective daily spending fields.
+// Query failures return an error so management handlers do not silently show $0.
+func (s *Service) ListEntriesWithDailySpending() ([]config.APIKeyEntry, error) {
 	rows := usage.EffectiveAPIKeyRowsForTenant(s.tenantID, usage.ListAPIKeysForTenant(s.tenantID))
 	entries := make([]config.APIKeyEntry, 0, len(rows))
 	for _, row := range rows {
 		entries = append(entries, row.ToConfigEntry())
 	}
-	return entries
+	if err := s.attachDailySpendingRuntime(entries, rows); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+// attachDailySpendingRuntime fills daily-spending-used / daily-spending-remaining via batch queries.
+func (s *Service) attachDailySpendingRuntime(entries []config.APIKeyEntry, rows []usage.APIKeyRow) error {
+	if len(entries) == 0 || len(rows) == 0 {
+		return nil
+	}
+	rawCosts, err := usage.QueryRawTodayCostsByKeysForTenant(s.tenantID, rows)
+	if err != nil {
+		return err
+	}
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if id := strings.TrimSpace(row.ID); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	baselines, err := usage.ListDailySpendingResetBaselines(s.tenantID, ids)
+	if err != nil {
+		return err
+	}
+	for i := range entries {
+		id := strings.TrimSpace(rows[i].ID)
+		key := strings.TrimSpace(rows[i].Key)
+		raw := 0.0
+		if id != "" {
+			if v, ok := rawCosts[id]; ok {
+				raw = v
+			} else if v, ok := rawCosts[key]; ok {
+				raw = v
+			}
+		} else if v, ok := rawCosts[key]; ok {
+			raw = v
+		}
+		baseline := 0.0
+		if id != "" {
+			baseline = baselines[id]
+		}
+		used := raw - baseline
+		if used < 0 {
+			used = 0
+		}
+		entries[i].DailySpendingUsed = used
+		entries[i].DailySpendingRemaining = usage.DailySpendingRemaining(entries[i].DailySpendingLimit, used)
+	}
+	return nil
+}
+
+type DailySpendingResetResult struct {
+	ID                     string   `json:"id"`
+	Key                    string   `json:"key,omitempty"`
+	DailySpendingLimit     float64  `json:"daily-spending-limit"`
+	DailySpendingUsed      float64  `json:"daily-spending-used"`
+	DailySpendingRemaining *float64 `json:"daily-spending-remaining"`
+}
+
+// ResetDailySpending sets today's cost baseline to the current raw today cost so effective used becomes 0.
+func (s *Service) ResetDailySpending(id *string, match *string) (DailySpendingResetResult, error) {
+	row := s.resolvePatchTargetRow(id, nil, match)
+	if row == nil {
+		return DailySpendingResetResult{}, ErrItemNotFound
+	}
+	// Use stored row (not profile-effective) for the key-owned daily spending limit.
+	stored := usage.GetAPIKeyByIDForTenant(s.tenantID, row.ID)
+	if stored == nil {
+		stored = row
+	}
+	if stored.DailySpendingLimit <= 0 {
+		return DailySpendingResetResult{}, ErrDailySpendingLimitMissing
+	}
+	raw, err := usage.QueryRawTodayCostByKeyForTenant(s.tenantID, stored.Key)
+	if err != nil {
+		return DailySpendingResetResult{}, err
+	}
+	if err := usage.UpsertDailySpendingReset(s.tenantID, stored.ID, raw); err != nil {
+		return DailySpendingResetResult{}, err
+	}
+	used := 0.0
+	return DailySpendingResetResult{
+		ID:                     stored.ID,
+		Key:                    stored.Key,
+		DailySpendingLimit:     stored.DailySpendingLimit,
+		DailySpendingUsed:      used,
+		DailySpendingRemaining: usage.DailySpendingRemaining(stored.DailySpendingLimit, used),
+	}, nil
 }
 
 func (s *Service) ReplaceEntries(entries []config.APIKeyEntry) error {
@@ -344,9 +440,11 @@ func (s *Service) DeleteEntry(key string, id *string, index *int, deleteLogs boo
 		return DeleteEntryResult{}, ErrMissingKeyOrIndex
 	}
 	targetKey = row.Key
+	apiKeyID := strings.TrimSpace(row.ID)
 	if err := usage.DeleteAPIKeyByIDForTenant(s.tenantID, row.ID); err != nil {
 		return DeleteEntryResult{}, err
 	}
+	_ = usage.DeleteDailySpendingReset(s.tenantID, apiKeyID)
 
 	result := DeleteEntryResult{}
 	if deleteLogs && s != nil && s.deleteLogs != nil {

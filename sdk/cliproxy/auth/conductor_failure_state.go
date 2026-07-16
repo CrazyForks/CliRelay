@@ -16,6 +16,12 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 	}
 	statusCode := statusCodeFromResult(resultErr)
+	// 402 weekly balance exhausted (xAI Grok Build) is a quota event, not a
+	// short-lived payment_required probe. Keep generic 402/403 on 30m.
+	if statusCode == 402 && isQuotaExhaustionError(resultErr, retryAfter) {
+		applyAuthQuotaFailureState(auth, resultErr, retryAfter, now)
+		return
+	}
 	switch statusCode {
 	case 401:
 		auth.StatusMessage = "unauthorized"
@@ -27,25 +33,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.StatusMessage = "not_found"
 		auth.NextRetryAfter = now.Add(12 * time.Hour)
 	case 429:
-		auth.StatusMessage = "quota exhausted"
-		auth.Quota.Exceeded = true
-		auth.Quota.Reason = "quota"
-		if resultErr != nil {
-			auth.Quota.Window = resultErr.QuotaWindow
-			auth.Quota.WindowMinutes = resultErr.QuotaWindowMinutes
-		}
-		var next time.Time
-		if retryAfter != nil {
-			next = now.Add(*retryAfter)
-		} else {
-			cooldown, nextLevel := nextQuotaCooldown(auth.Quota.BackoffLevel, quotaCooldownDisabledForAuth(auth))
-			if cooldown > 0 {
-				next = now.Add(cooldown)
-			}
-			auth.Quota.BackoffLevel = nextLevel
-		}
-		auth.Quota.NextRecoverAt = next
-		auth.NextRetryAfter = next
+		applyAuthQuotaFailureState(auth, resultErr, retryAfter, now)
 	case 408, 500, 502, 503, 504:
 		auth.StatusMessage = "transient upstream error"
 		if quotaCooldownDisabledForAuth(auth) {
@@ -58,6 +46,36 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.StatusMessage = "request failed"
 		}
 	}
+}
+
+func applyAuthQuotaFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
+	if auth == nil {
+		return
+	}
+	if resultErr != nil && resultErr.Message != "" {
+		auth.StatusMessage = resultErr.Message
+	} else {
+		auth.StatusMessage = "quota exhausted"
+	}
+	auth.Quota.Exceeded = true
+	auth.Quota.Reason = "quota"
+	if resultErr != nil {
+		auth.Quota.Window = resultErr.QuotaWindow
+		auth.Quota.WindowMinutes = resultErr.QuotaWindowMinutes
+	}
+	var next time.Time
+	if retryAfter != nil {
+		next = now.Add(*retryAfter)
+	} else {
+		// WindowMinutes is window length metadata (e.g. week=10080), not remaining cooldown.
+		cooldown, nextLevel := nextQuotaCooldown(auth.Quota.BackoffLevel, quotaCooldownDisabledForAuth(auth))
+		if cooldown > 0 {
+			next = now.Add(cooldown)
+		}
+		auth.Quota.BackoffLevel = nextLevel
+	}
+	auth.Quota.NextRecoverAt = next
+	auth.NextRetryAfter = next
 }
 
 // nextQuotaCooldown returns the next cooldown duration and updated backoff level for repeated quota errors.

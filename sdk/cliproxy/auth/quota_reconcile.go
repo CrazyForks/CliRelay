@@ -486,16 +486,18 @@ func hasQuotaRuntimeState(statusMessage string, lastError *Error, unavailable bo
 		return true
 	}
 	if lastError != nil {
-		if lastError.HTTPStatus == http.StatusTooManyRequests {
+		// 429 and quota-like 402 (xAI weekly balance exhausted) are both local quota runtime.
+		if lastError.HTTPStatus == http.StatusTooManyRequests ||
+			(lastError.HTTPStatus == http.StatusPaymentRequired && (lastError.QuotaWindow != "" || isUsageBalanceExhaustedMessage(lastError.Message))) {
 			return true
 		}
 		text := strings.ToLower(strings.TrimSpace(lastError.Code + " " + lastError.Message))
-		if strings.Contains(text, "quota") || strings.Contains(text, "rate limit") || strings.Contains(text, "429") || strings.Contains(text, "cooldown") {
+		if strings.Contains(text, "quota") || strings.Contains(text, "rate limit") || strings.Contains(text, "429") || strings.Contains(text, "cooldown") || strings.Contains(text, "balance exhausted") {
 			return true
 		}
 	}
 	text := strings.ToLower(strings.TrimSpace(statusMessage))
-	return strings.Contains(text, "quota") || strings.Contains(text, "rate limit") || strings.Contains(text, "429") || strings.Contains(text, "cooldown")
+	return strings.Contains(text, "quota") || strings.Contains(text, "rate limit") || strings.Contains(text, "429") || strings.Contains(text, "cooldown") || strings.Contains(text, "balance exhausted")
 }
 
 func updateQuotaAuthRecoverAt(auth *Auth, next time.Time, now time.Time) bool {

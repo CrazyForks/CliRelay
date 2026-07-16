@@ -86,6 +86,14 @@ func permissionForManagementRequest(method, path string) string {
 	// Exact /usage* stats paths only — /usage-statistics-enabled is config.
 	case relative == "/usage" || strings.HasPrefix(relative, "/usage/"):
 		return "monitor.read"
+	// AI account status read model: same capability surface as auth-files list.
+	case strings.HasPrefix(relative, "/ai-accounts/status-refresh") && write:
+		return "auth_files.write"
+	case strings.HasPrefix(relative, "/ai-accounts/status"):
+		if write {
+			return "auth_files.write"
+		}
+		return "auth_files.read"
 	case strings.HasPrefix(relative, "/auth-files"), relative == "/vertex/import", relative == "/get-auth-status", strings.Contains(relative, "auth-url"), strings.Contains(relative, "oauth"):
 		if relative == "/get-auth-status" || strings.Contains(relative, "auth-url") || strings.Contains(relative, "oauth") {
 			return "auth_files.oauth"

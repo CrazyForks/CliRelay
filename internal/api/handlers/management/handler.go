@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/management/aiaccountstatus"
 	imagegeneration "github.com/router-for-me/CLIProxyAPI/v6/internal/management/imagegeneration"
 	settingsstore "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/store"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -64,6 +65,7 @@ type Handler struct {
 	trendCache           map[string]trendCacheEntry
 	imageGeneration      *imagegeneration.Service
 	identityService      *identity.Service
+	aiAccountStatus      *aiaccountstatus.Service
 }
 
 type trendCacheEntry struct {
@@ -166,11 +168,27 @@ func NewHandlerWithoutConfigFilePath(cfg *config.Config, manager *coreauth.Manag
 }
 
 // SetConfig updates the in-memory config reference when the server hot-reloads.
-func (h *Handler) SetConfig(cfg *config.Config) { h.cfg = cfg }
+func (h *Handler) SetConfig(cfg *config.Config) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.cfg = cfg
+	// Recreate lazily so provider probes use the new proxy/TLS/runtime config.
+	h.aiAccountStatus = nil
+	h.mu.Unlock()
+}
 
 // SetAuthManager updates the auth manager reference used by management endpoints.
 func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
 	h.authManager = manager
+	// Recreate lazily so tenant auth selection never uses the replaced manager.
+	h.aiAccountStatus = nil
+	h.mu.Unlock()
 	h.ensureImageGenerationService()
 }
 

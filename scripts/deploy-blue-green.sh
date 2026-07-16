@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
+# SCRIPT_VERSION must stay in sync with deploy gate expectations.
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.07.16}"
 set -euo pipefail
 
 SERVICE_NAME="${SERVICE_NAME:-clirelay2}"
 BASE_DIR="${BASE_DIR:-/opt/clirelay2}"
 TEMP_BIN="${TEMP_BIN:-${BASE_DIR}/cli-proxy-api-new}"
 DOMAIN="${DOMAIN:-relay.07230805.xyz}"
+PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-https://${DOMAIN}}"
 PORT_A="${PORT_A:-8318}"
 PORT_B="${PORT_B:-8319}"
 DRAIN_SECONDS="${DRAIN_SECONDS:-35}"
 HEALTH_TIMEOUT_SECONDS="${HEALTH_TIMEOUT_SECONDS:-90}"
+SMOKE_TIMEOUT_SECONDS="${SMOKE_TIMEOUT_SECONDS:-30}"
 MIN_AVAILABLE_MB="${MIN_AVAILABLE_MB:-512}"
 NGINX_CONTAINER="${NGINX_CONTAINER:-nginx}"
 SERVICE_CPU_QUOTA="${SERVICE_CPU_QUOTA:-170%}"
@@ -18,6 +22,12 @@ SERVICE_TASKS_MAX="${SERVICE_TASKS_MAX:-512}"
 COMMIT_SHA="${COMMIT_SHA:?COMMIT_SHA is required}"
 ACTIVE_PORT_FILE="${BASE_DIR}/.active-port"
 CLEANUP_SCRIPT="${CLEANUP_SCRIPT:-${BASE_DIR}/scripts/cleanup-drained-slot.sh}"
+RECONCILE_SCRIPT="${RECONCILE_SCRIPT:-${BASE_DIR}/scripts/reconcile-active-slot.sh}"
+EXPECTED_SCRIPT_VERSION="${EXPECTED_SCRIPT_VERSION:-}"
+if [ -n "$EXPECTED_SCRIPT_VERSION" ] && [ "$SCRIPT_VERSION" != "$EXPECTED_SCRIPT_VERSION" ]; then
+	echo "deploy script version mismatch: have ${SCRIPT_VERSION}, want ${EXPECTED_SCRIPT_VERSION}" >&2
+	exit 1
+fi
 
 fail() {
 	echo "$*" >&2
@@ -43,6 +53,7 @@ config_path="${config_path:-${service_dir}/config.yaml}"
 
 [ -f "$TEMP_BIN" ] || fail "uploaded temp binary not found: $TEMP_BIN"
 [ -f "$CLEANUP_SCRIPT" ] || fail "drain cleanup script not found: $CLEANUP_SCRIPT"
+[ -f "$RECONCILE_SCRIPT" ] || fail "active slot reconcile script not found: $RECONCILE_SCRIPT"
 [ -f "$config_path" ] || fail "config file not found: $config_path"
 
 read_config_scalar() {
@@ -86,7 +97,7 @@ case "${redis_enable,,}" in
 esac
 
 config_port="$(awk '/^port:[[:space:]]*[0-9]+/ {print $2; exit}' "$config_path" 2>/dev/null || true)"
-active_port="$(cat "$ACTIVE_PORT_FILE" 2>/dev/null || true)"
+active_port="$("$RECONCILE_SCRIPT")"
 active_port="${active_port:-${config_port:-$PORT_A}}"
 # Alternate between two local ports so nginx can cut over only after the new slot is healthy.
 case "$active_port" in
@@ -112,12 +123,12 @@ if [ -n "$available_mb" ] && [ "$available_mb" -lt "$MIN_AVAILABLE_MB" ]; then
 	fail "not enough free memory for blue-green deploy: ${available_mb}MB available, need ${MIN_AVAILABLE_MB}MB"
 fi
 
-install -m 0755 "$TEMP_BIN" "$next_bin"
-rm -f "$TEMP_BIN"
-
-if ! grep -a -q "$COMMIT_SHA" "$next_bin"; then
+# Validate staged binary before replacing any slot binary (failed deploys must not clobber next_bin).
+if ! grep -a -q "$COMMIT_SHA" "$TEMP_BIN"; then
 	fail "uploaded binary does not contain expected commit SHA"
 fi
+install -m 0755 "$TEMP_BIN" "$next_bin"
+rm -f "$TEMP_BIN"
 
 working_dir="$(read_service_property WorkingDirectory)"
 working_dir="${working_dir:-$service_dir}"
@@ -144,7 +155,7 @@ unit_file="/etc/systemd/system/${next_unit}.service"
 	echo "Restart=always"
 	echo "RestartSec=3"
 	echo "KillSignal=SIGTERM"
-	echo "TimeoutStopSec=45"
+	echo "TimeoutStopSec=90"
 	[ -n "$SERVICE_CPU_QUOTA" ] && echo "CPUQuota=${SERVICE_CPU_QUOTA}"
 	[ -n "$SERVICE_MEMORY_HIGH" ] && echo "MemoryHigh=${SERVICE_MEMORY_HIGH}"
 	[ -n "$SERVICE_MEMORY_MAX" ] && echo "MemoryMax=${SERVICE_MEMORY_MAX}"
@@ -166,17 +177,32 @@ http_ok() {
 	fi
 }
 
+# Prefer readiness; fall back to liveness only if /readyz is absent (old binary during rollout).
+ready_url="http://127.0.0.1:${next_port}/readyz"
 health_url="http://127.0.0.1:${next_port}/healthz"
+probe_url="$ready_url"
 for _ in $(seq 1 "$HEALTH_TIMEOUT_SECONDS"); do
-	if http_ok "$health_url"; then
+	if http_ok "$ready_url"; then
+		probe_url="$ready_url"
+		break
+	fi
+	# 404 means old binary without /readyz; accept /healthz for one release window.
+	if command -v curl >/dev/null 2>&1; then
+		code="$(curl -s -o /dev/null -w '%{http_code}' "$ready_url" || true)"
+		if [ "$code" = "404" ] && http_ok "$health_url"; then
+			probe_url="$health_url"
+			break
+		fi
+	elif http_ok "$health_url"; then
+		probe_url="$health_url"
 		break
 	fi
 	sleep 1
 done
-if ! http_ok "$health_url"; then
+if ! http_ok "$probe_url"; then
 	systemctl status "$next_unit" --no-pager -l >&2 || true
 	journalctl -u "$next_unit" --no-pager -n 80 >&2 || true
-	fail "new slot failed health check after ${HEALTH_TIMEOUT_SECONDS}s: $health_url"
+	fail "new slot failed readiness check after ${HEALTH_TIMEOUT_SECONDS}s: $ready_url (fallback $health_url)"
 fi
 
 ensure_host_body_size_conf() {
@@ -222,41 +248,78 @@ if [ -z "$nginx_conf" ]; then
 fi
 [ -n "$nginx_conf" ] || fail "nginx config for ${DOMAIN} not found on host or docker container ${NGINX_CONTAINER}; set NGINX_CONF/NGINX_CONTAINER"
 
+switch_nginx_port() {
+	from_port="$1"
+	to_port="$2"
+	if [ "$nginx_mode" = "container" ]; then
+		tmp_conf="$(mktemp)"
+		docker cp "${NGINX_CONTAINER}:${nginx_conf}" "$tmp_conf"
+		if ! grep -Eq ":${from_port}\\b" "$tmp_conf"; then
+			rm -f "$tmp_conf"
+			return 1
+		fi
+		perl -0pi -e "s/:${from_port}\\b/:${to_port}/g" "$tmp_conf"
+		ensure_container_body_size_conf
+		docker cp "$tmp_conf" "${NGINX_CONTAINER}:${nginx_conf}"
+		rm -f "$tmp_conf"
+		docker exec "$NGINX_CONTAINER" nginx -t
+		docker exec "$NGINX_CONTAINER" nginx -s reload
+	else
+		[ -f "$nginx_conf" ] || return 1
+		ensure_host_body_size_conf
+		if ! grep -Eq ":${from_port}\\b" "$nginx_conf"; then
+			return 1
+		fi
+		perl -0pi -e "s/:${from_port}\\b/:${to_port}/g" "$nginx_conf"
+		nginx -t
+		nginx -s reload || systemctl reload nginx
+	fi
+}
+
 if [ "$nginx_mode" = "container" ]; then
-	tmp_conf="$(mktemp)"
 	backup="${nginx_conf}.bak.$(date +%Y%m%d_%H%M%S)"
-	docker cp "${NGINX_CONTAINER}:${nginx_conf}" "$tmp_conf"
 	docker exec "$NGINX_CONTAINER" cp "$nginx_conf" "$backup"
-	if ! grep -Eq ":${active_port}\\b" "$tmp_conf"; then
-		fail "nginx config ${NGINX_CONTAINER}:${nginx_conf} does not reference active port ${active_port}"
-	fi
-	# Replace only the active backend port, leaving the existing nginx layout untouched.
-	perl -0pi -e "s/:${active_port}\\b/:${next_port}/g" "$tmp_conf"
-	ensure_container_body_size_conf
-	docker cp "$tmp_conf" "${NGINX_CONTAINER}:${nginx_conf}"
-	rm -f "$tmp_conf"
-	if ! docker exec "$NGINX_CONTAINER" nginx -t; then
-		docker exec "$NGINX_CONTAINER" cp "$backup" "$nginx_conf"
-		docker exec "$NGINX_CONTAINER" nginx -t || true
-		fail "nginx config test failed; reverted ${NGINX_CONTAINER}:${nginx_conf}"
-	fi
-	docker exec "$NGINX_CONTAINER" nginx -s reload
 else
 	[ -f "$nginx_conf" ] || fail "nginx config not found: $nginx_conf"
-	ensure_host_body_size_conf
 	backup="${nginx_conf}.bak.$(date +%Y%m%d_%H%M%S)"
 	cp "$nginx_conf" "$backup"
-	if ! grep -Eq ":${active_port}\\b" "$nginx_conf"; then
-		fail "nginx config $nginx_conf does not reference active port ${active_port}"
-	fi
-	# Replace only the active backend port, leaving the existing nginx layout untouched.
-	perl -0pi -e "s/:${active_port}\\b/:${next_port}/g" "$nginx_conf"
-	if ! nginx -t; then
-		cp "$backup" "$nginx_conf"
+fi
+
+if ! switch_nginx_port "$active_port" "$next_port"; then
+	if [ "$nginx_mode" = "container" ]; then
+		docker exec "$NGINX_CONTAINER" cp "$backup" "$nginx_conf" || true
+		docker exec "$NGINX_CONTAINER" nginx -t || true
+	else
+		cp "$backup" "$nginx_conf" || true
 		nginx -t || true
-		fail "nginx config test failed; reverted $nginx_conf"
 	fi
-	nginx -s reload || systemctl reload nginx
+	fail "nginx cutover failed; restored backup and kept active port ${active_port}"
+fi
+
+# External smoke before abandoning old slot. Failure rolls nginx back to active_port.
+smoke_ok=0
+public_ready="${PUBLIC_BASE_URL%/}/readyz"
+public_health="${PUBLIC_BASE_URL%/}/healthz"
+for _ in $(seq 1 "$SMOKE_TIMEOUT_SECONDS"); do
+	if http_ok "$public_ready" || http_ok "$public_health"; then
+		smoke_ok=1
+		break
+	fi
+	sleep 1
+done
+if [ "$smoke_ok" -ne 1 ]; then
+	echo "external smoke failed after cutover; rolling nginx back to ${active_port}" >&2
+	if ! switch_nginx_port "$next_port" "$active_port"; then
+		if [ "$nginx_mode" = "container" ]; then
+			docker exec "$NGINX_CONTAINER" cp "$backup" "$nginx_conf" || true
+			docker exec "$NGINX_CONTAINER" nginx -s reload || true
+		else
+			cp "$backup" "$nginx_conf" || true
+			nginx -s reload || systemctl reload nginx || true
+		fi
+	fi
+	systemctl disable --now "$next_unit" >/dev/null 2>&1 || true
+	fail "external HTTPS smoke failed for ${PUBLIC_BASE_URL}; traffic restored to ${active_port}"
 fi
 
 echo "$next_port" > "$ACTIVE_PORT_FILE"

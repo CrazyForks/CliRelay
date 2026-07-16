@@ -297,6 +297,47 @@ func TestApplyFieldPatchRejectsCodexOAuthAdmissionForAPIKeyAuth(t *testing.T) {
 	}
 }
 
+func TestApplyFieldPatchUpdatesCodexImageGenerationBridge(t *testing.T) {
+	now := time.Date(2026, 6, 24, 10, 0, 0, 0, time.UTC)
+	enabled := true
+	auth := &coreauth.Auth{
+		ID:       "codex-oauth",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"email": "codex@example.com",
+		},
+	}
+
+	_, err := ApplyFieldPatch(auth, FieldPatch{
+		CodexImageGenerationBridge: &enabled,
+	}, FieldPatchOptions{Now: now})
+	if err != nil {
+		t.Fatalf("ApplyFieldPatch() error = %v", err)
+	}
+	if got, _ := auth.Metadata["codex_image_generation_bridge"].(bool); !got {
+		t.Fatalf("codex_image_generation_bridge = %#v, want true", auth.Metadata["codex_image_generation_bridge"])
+	}
+	if !auth.UpdatedAt.Equal(now) {
+		t.Fatalf("UpdatedAt = %v, want %v", auth.UpdatedAt, now)
+	}
+}
+
+func TestApplyFieldPatchRejectsCodexImageGenerationBridgeForAPIKeyAuth(t *testing.T) {
+	enabled := true
+	auth := &coreauth.Auth{
+		ID:       "codex-api-key",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key": "sk-test",
+		},
+	}
+
+	_, err := ApplyFieldPatch(auth, FieldPatch{CodexImageGenerationBridge: &enabled}, FieldPatchOptions{})
+	if err == nil || !strings.Contains(err.Error(), "only supported for Codex OAuth") {
+		t.Fatalf("ApplyFieldPatch() error = %v, want Codex OAuth restriction", err)
+	}
+}
+
 func TestApplyFieldPatchRejectsUnknownCodexAllowedClientPreset(t *testing.T) {
 	allowedClients := []string{"unknown_client"}
 	auth := &coreauth.Auth{

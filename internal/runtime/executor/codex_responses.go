@@ -28,6 +28,8 @@ func sanitizeCodexResponsesRequest(body []byte) []byte {
 		body, _ = sjson.DeleteBytes(body, field)
 	}
 	body = stripCodexResponsesImageGenerationSize(body)
+	// History hygiene: never forward multi-MB data:image blobs from Desktop session replay.
+	body = stripCodexHistoryDataURLImages(body)
 	return body
 }
 

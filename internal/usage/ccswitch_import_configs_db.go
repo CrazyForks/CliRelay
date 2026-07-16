@@ -389,7 +389,7 @@ func normalizeCcSwitchContextWindowForModels(value int, modelIDs ...string) int 
 
 func normalizeCcSwitchModelRole(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "main", "haiku", "sonnet", "opus":
+	case "main", "haiku", "sonnet", "opus", "fable":
 		return strings.ToLower(strings.TrimSpace(value))
 	default:
 		return ""

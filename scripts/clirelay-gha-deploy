@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Root-only GitHub Actions deploy entrypoint installed at /usr/local/sbin/clirelay-gha-deploy.
+# deploy stages ONLY the binary into /opt/clirelay2/incoming/cli-proxy-api-new, then sudo this path.
+# Scripts under /opt/clirelay2/scripts are root-managed and never overwritten by GHA.
+set -euo pipefail
+
+BASE=/opt/clirelay2
+IN="${BASE}/incoming"
+SCRIPTS="${BASE}/scripts"
+TEMP_BIN="${BASE}/cli-proxy-api-new"
+STAGED="${IN}/cli-proxy-api-new"
+
+[ -f "$STAGED" ] || { echo "missing staged binary: $STAGED" >&2; exit 1; }
+[ -x "${SCRIPTS}/deploy-blue-green.sh" ] || { echo "root-managed deploy-blue-green.sh missing" >&2; exit 1; }
+[ -x "${SCRIPTS}/cleanup-drained-slot.sh" ] || { echo "root-managed cleanup-drained-slot.sh missing" >&2; exit 1; }
+[ -x "${SCRIPTS}/reconcile-active-slot.sh" ] || { echo "root-managed reconcile-active-slot.sh missing" >&2; exit 1; }
+
+# Validate commit marker on the staged file BEFORE touching slot binaries.
+COMMIT_SHA="${COMMIT_SHA:?COMMIT_SHA is required}"
+if ! grep -a -q "$COMMIT_SHA" "$STAGED"; then
+	echo "staged binary does not contain expected commit SHA; refusing install" >&2
+	rm -f "$STAGED"
+	exit 1
+fi
+
+install -m 0755 -o root -g root "$STAGED" "$TEMP_BIN"
+rm -f "$STAGED"
+
+exec /bin/bash "${SCRIPTS}/deploy-blue-green.sh"

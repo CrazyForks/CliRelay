@@ -17,6 +17,7 @@ import (
 	managementhandlers "github.com/router-for-me/CLIProxyAPI/v6/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	postgresstore "github.com/router-for-me/CLIProxyAPI/v6/internal/storage/postgres"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/testutil/postgrestest"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 )
 
@@ -146,6 +147,7 @@ func setupPostgresManagementClient(t *testing.T) postgresManagementClient {
 	if strings.TrimSpace(dsn) == "" {
 		t.Skip("CLIRELAY_POSTGRES_TEST_DSN is not set")
 	}
+	postgrestest.LockSharedRuntimeDB(t, dsn)
 
 	usage.CloseDB()
 	t.Cleanup(usage.CloseDB)
@@ -297,8 +299,11 @@ func postgresSmokeBody(method, routePath string) string {
 
 func postgresSmokeAllowsStatus(routePath string, status int, body string) bool {
 	if status == http.StatusNotFound {
+		// The generic smoke sends an empty JSON object. This body-targeted route
+		// therefore has no key to resolve; dedicated handler tests cover its success path.
+		bodyTargetedLookup := routePath == "/v0/management/api-key-entries/daily-spending/reset"
 		return strings.Contains(body, "not found") &&
-			(strings.Contains(routePath, ":") || strings.Contains(routePath, "*"))
+			(strings.Contains(routePath, ":") || strings.Contains(routePath, "*") || bodyTargetedLookup)
 	}
 	if status == http.StatusBadGateway {
 		return routePath == "/v0/management/update/progress" && strings.Contains(body, "update_progress_failed") ||

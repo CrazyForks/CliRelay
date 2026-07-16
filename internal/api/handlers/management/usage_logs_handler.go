@@ -15,6 +15,15 @@ import (
 
 const authFileGroupTrendCacheTTL = 30 * time.Second
 
+// Short TTL for per-account card trend payloads. Cards re-fetch on page/view
+// changes; without this, concurrent auth-file-trend queries can stampede
+// request_logs aggregation on every AI Accounts visit.
+const authFileTrendCacheTTL = 20 * time.Second
+
+// Entity-stats is requested on every AI Accounts list load (30-day GROUP BY over
+// request_logs). A short shared cache absorbs remounts and multi-tab reloads.
+const entityUsageStatsCacheTTL = 20 * time.Second
+
 type UsageLogsHandler struct {
 	*Handler
 }
@@ -225,17 +234,29 @@ func (h *UsageLogsHandler) GetUsageChartData(c *gin.Context) {
 
 // GetEntityUsageStats returns aggregated statistics grouped by source or auth_index
 func (h *UsageLogsHandler) GetEntityUsageStats(c *gin.Context) {
-	payload, err := h.service(c).EntityUsageStats(
-		strings.TrimSpace(c.Query("api_key")),
-		intQueryDefault(c, "days", 7),
-		queryStringList(c, "auth_index"),
-		queryStringList(c, "source"),
-	)
+	apiKey := strings.TrimSpace(c.Query("api_key"))
+	days := intQueryDefault(c, "days", 7)
+	authIndexes := queryStringList(c, "auth_index")
+	sources := queryStringList(c, "source")
+
+	tenantID := identity.SystemTenantID
+	if principal, ok := principalFromContext(c); ok && strings.TrimSpace(principal.EffectiveTenant.ID) != "" {
+		tenantID = principal.EffectiveTenant.ID
+	}
+	cacheKey := "entity-stats:" + tenantID + ":" + apiKey + ":" + strconv.Itoa(days) + ":" +
+		strings.Join(authIndexes, ",") + ":" + strings.Join(sources, ",")
+	if cached, ok := h.getAuthFileTrendCache(cacheKey); ok {
+		c.JSON(http.StatusOK, cached)
+		return
+	}
+
+	payload, err := h.service(c).EntityUsageStats(apiKey, days, authIndexes, sources)
 	if err != nil {
 		log.Warnf("management usage logs: entity usage stats failed: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	h.setTrendCacheWithTTL(cacheKey, payload, entityUsageStatsCacheTTL)
 	c.JSON(http.StatusOK, payload)
 }
 
@@ -331,6 +352,25 @@ func (h *UsageLogsHandler) GetAuthFileTrend(c *gin.Context) {
 	if hours > 24 {
 		hours = 24
 	}
+
+	tenantID := identity.SystemTenantID
+	if principal, ok := principalFromContext(c); ok && strings.TrimSpace(principal.EffectiveTenant.ID) != "" {
+		tenantID = principal.EffectiveTenant.ID
+	}
+	if authIndex != "" {
+		cacheKey := "auth-file-trend:" + tenantID + ":" + authIndex + ":" + strconv.Itoa(days) + ":" + strconv.Itoa(hours)
+		if cached, ok := h.getAuthFileTrendCache(cacheKey); ok {
+			c.JSON(http.StatusOK, cached)
+			return
+		}
+		status, payload := h.service(c).AuthFileTrend(authIndex, days, hours)
+		if status == http.StatusOK {
+			h.setAuthFileTrendCache(cacheKey, payload)
+		}
+		c.JSON(status, payload)
+		return
+	}
+
 	status, payload := h.service(c).AuthFileTrend(authIndex, days, hours)
 	c.JSON(status, payload)
 }
@@ -411,6 +451,56 @@ func (h *UsageLogsHandler) setTrendCache(key string, payload managementusagelogs
 		}
 	}
 	h.trendCache[key] = trendCacheEntry{expiresAt: now.Add(authFileGroupTrendCacheTTL), payload: payload}
+}
+
+func (h *UsageLogsHandler) getAuthFileTrendCache(key string) (any, bool) {
+	if h == nil {
+		return nil, false
+	}
+	h.trendCacheMu.Lock()
+	defer h.trendCacheMu.Unlock()
+	entry, ok := h.trendCache[key]
+	if !ok || time.Now().After(entry.expiresAt) {
+		if ok {
+			delete(h.trendCache, key)
+		}
+		return nil, false
+	}
+	return entry.payload, true
+}
+
+func (h *UsageLogsHandler) setAuthFileTrendCache(key string, payload any) {
+	h.setTrendCacheWithTTL(key, payload, authFileTrendCacheTTL)
+}
+
+func (h *UsageLogsHandler) setTrendCacheWithTTL(key string, payload any, ttl time.Duration) {
+	if h == nil || payload == nil {
+		return
+	}
+	if ttl <= 0 {
+		ttl = authFileTrendCacheTTL
+	}
+	h.trendCacheMu.Lock()
+	defer h.trendCacheMu.Unlock()
+	if h.trendCache == nil {
+		h.trendCache = make(map[string]trendCacheEntry)
+	}
+	now := time.Now()
+	// Bound memory: drop expired entries and cap total cached keys.
+	const maxTrendCacheEntries = 256
+	for k, entry := range h.trendCache {
+		if now.After(entry.expiresAt) {
+			delete(h.trendCache, k)
+		}
+	}
+	if len(h.trendCache) >= maxTrendCacheEntries {
+		// Best-effort: drop an arbitrary entry when full (map iteration order).
+		for k := range h.trendCache {
+			delete(h.trendCache, k)
+			break
+		}
+	}
+	h.trendCache[key] = trendCacheEntry{expiresAt: now.Add(ttl), payload: payload}
 }
 
 func (h *UsageLogsHandler) clearTrendCache() {

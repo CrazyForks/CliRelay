@@ -4,7 +4,20 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
+)
+
+const (
+	// Minimum gap between identical quota history points for the same key.
+	quotaSnapshotHeartbeatInterval = 15 * time.Minute
+	// Retention DELETE is expensive; never run it on every account refresh.
+	quotaSnapshotPruneInterval = 30 * time.Minute
+)
+
+var (
+	quotaPruneMu     sync.Mutex
+	lastQuotaPruneAt = map[string]time.Time{}
 )
 
 type AuthSubjectQuotaCycle struct {
@@ -86,14 +99,10 @@ func RecordDailyQuotaSnapshotIdentityForTenant(tenantID, authIndex, authSubjectI
 		}
 	}
 
-	retentionCutoff := cutoffDayKey(7)
-	if _, err = tx.Exec(`DELETE FROM auth_file_quota_snapshots WHERE tenant_id = ? AND date_key < ?`, tenantID, retentionCutoff); err != nil {
-		return fmt.Errorf("usage: quota snapshot prune: %w", err)
-	}
-
 	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("usage: quota snapshot commit: %w", err)
 	}
+	maybePruneQuotaSnapshots(tenantID)
 	return nil
 }
 
@@ -153,10 +162,8 @@ func RecordQuotaSnapshotPointsIdentityForTenant(tenantID, authIndex, authSubject
 		if pointProvider == "" {
 			pointProvider = provider
 		}
-		var value any
-		if point.Percent == nil {
-			value = nil
-		} else {
+		// Clamp before compare/store so dedupe is stable across float noise.
+		if point.Percent != nil {
 			percent := *point.Percent
 			if percent < 0 {
 				percent = 0
@@ -164,7 +171,18 @@ func RecordQuotaSnapshotPointsIdentityForTenant(tenantID, authIndex, authSubject
 			if percent > 100 {
 				percent = 100
 			}
-			value = percent
+			point.Percent = &percent
+		}
+		// Suppress duplicate history when quota/reset are unchanged and within heartbeat interval.
+		if shouldSkipQuotaPoint(tx, tenantID, authIndex, authSubjectID, quotaKey, point, recordedAt) {
+			if err = upsertAuthSubjectQuotaCycleTx(tx, tenantID, authSubjectID, authIndex, pointProvider, quotaKey, point.ResetAt, point.WindowSeconds, recordedAt); err != nil {
+				return err
+			}
+			continue
+		}
+		var value any
+		if point.Percent != nil {
+			value = *point.Percent
 		}
 		var resetValue any
 		if point.ResetAt != nil && !point.ResetAt.IsZero() {
@@ -189,15 +207,87 @@ func RecordQuotaSnapshotPointsIdentityForTenant(tenantID, authIndex, authSubject
 		}
 	}
 
-	retentionCutoff := now.AddDate(0, 0, -8).UTC().Format(time.RFC3339Nano)
-	if _, err = tx.Exec(`DELETE FROM auth_file_quota_snapshot_points WHERE tenant_id = ? AND recorded_at < ?`, tenantID, retentionCutoff); err != nil {
-		return fmt.Errorf("usage: quota snapshot points prune: %w", err)
-	}
-
 	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("usage: quota snapshot points commit: %w", err)
 	}
+	maybePruneQuotaSnapshots(tenantID)
 	return nil
+}
+
+func shouldSkipQuotaPoint(tx *sql.Tx, tenantID, authIndex, authSubjectID, quotaKey string, point QuotaSnapshotPoint, recordedAt time.Time) bool {
+	if tx == nil {
+		return false
+	}
+	var lastRecorded sql.NullString
+	var lastPercent sql.NullFloat64
+	var lastReset sql.NullString
+	var lastWindow sql.NullInt64
+	row := tx.QueryRow(`
+		SELECT recorded_at, percent, reset_at, window_seconds
+		FROM auth_file_quota_snapshot_points
+		WHERE tenant_id = ?
+		  AND quota_key = ?
+		  AND (
+			(trim(coalesce(auth_subject_id, '')) <> '' AND auth_subject_id = ?)
+			OR (trim(coalesce(auth_subject_id, '')) = '' AND auth_index = ?)
+		  )
+		ORDER BY recorded_at DESC
+		LIMIT 1
+	`, tenantID, quotaKey, strings.TrimSpace(authSubjectID), strings.TrimSpace(authIndex))
+	if err := row.Scan(&lastRecorded, &lastPercent, &lastReset, &lastWindow); err != nil {
+		return false
+	}
+	prevAt, ok := parseStoredTimeString(lastRecorded.String)
+	if !ok || recordedAt.Sub(prevAt) >= quotaSnapshotHeartbeatInterval {
+		return false
+	}
+	if lastWindow.Valid && lastWindow.Int64 != point.WindowSeconds {
+		return false
+	}
+	if point.Percent == nil {
+		if lastPercent.Valid {
+			return false
+		}
+	} else if !lastPercent.Valid || lastPercent.Float64 != *point.Percent {
+		return false
+	}
+	var prevReset, nextReset string
+	if lastReset.Valid {
+		prevReset = strings.TrimSpace(lastReset.String)
+	}
+	if point.ResetAt != nil && !point.ResetAt.IsZero() {
+		nextReset = point.ResetAt.UTC().Format(time.RFC3339Nano)
+	}
+	if prevReset == "" && nextReset == "" {
+		return true
+	}
+	if prevT, ok1 := parseStoredTimeString(prevReset); ok1 {
+		if nextT, ok2 := parseStoredTimeString(nextReset); ok2 {
+			return prevT.Equal(nextT)
+		}
+	}
+	return prevReset == nextReset
+}
+
+func maybePruneQuotaSnapshots(tenantID string) {
+	tenantID = normalizeTenantID(tenantID)
+	quotaPruneMu.Lock()
+	if last, ok := lastQuotaPruneAt[tenantID]; ok && time.Since(last) < quotaSnapshotPruneInterval {
+		quotaPruneMu.Unlock()
+		return
+	}
+	lastQuotaPruneAt[tenantID] = time.Now()
+	quotaPruneMu.Unlock()
+
+	db := getDB()
+	if db == nil {
+		return
+	}
+	// Best-effort retention; never on the critical path of every account.
+	dayCutoff := cutoffDayKey(7)
+	pointCutoff := time.Now().AddDate(0, 0, -8).UTC().Format(time.RFC3339Nano)
+	_, _ = db.Exec(`DELETE FROM auth_file_quota_snapshots WHERE tenant_id = ? AND date_key < ?`, tenantID, dayCutoff)
+	_, _ = db.Exec(`DELETE FROM auth_file_quota_snapshot_points WHERE tenant_id = ? AND recorded_at < ?`, tenantID, pointCutoff)
 }
 
 func QueryQuotaSnapshotSeriesByAuthSubject(matcher AuthSubjectMatcher, start, end time.Time) ([]QuotaSnapshotSeries, error) {

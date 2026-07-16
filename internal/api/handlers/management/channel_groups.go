@@ -155,10 +155,20 @@ func includeAuthInChannelGroups(auth *coreauth.Auth) bool {
 	return true
 }
 
+func routingConfigFrom(cfg *config.Config) config.RoutingConfig {
+	// Callers (GetChannelGroups / PutRoutingConfig) already put the correct
+	// tenant-scoped Routing on cfg. Do not re-read System tenant store here —
+	// that leaked other tenants' channel groups into business-tenant UIs.
+	if cfg == nil {
+		return config.RoutingConfig{IncludeDefaultGroup: true}
+	}
+	return cfg.Routing
+}
+
 func buildChannelGroupItems(cfg *config.Config, auths []*coreauth.Auth) []channelGroupItem {
 	items := collectChannelDescriptors(cfg, auths)
 	knownPaths := make(map[string][]string)
-	routingCfg := currentRoutingConfig(cfg)
+	routingCfg := routingConfigFrom(cfg)
 	if known, err := collectKnownChannels(cfg, auths, ""); err == nil {
 		routingCfg = canonicalizeRoutingConfigChannels(routingCfg, known)
 	}
@@ -398,7 +408,7 @@ func validateRoutingAndAPIKeyRestrictions(cfg *config.Config, auths []*coreauth.
 		return nil
 	}
 
-	routingCfg := currentRoutingConfig(cfg)
+	routingCfg := routingConfigFrom(cfg)
 	known, err := collectKnownChannels(cfg, auths, "")
 	if err != nil {
 		return err

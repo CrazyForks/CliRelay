@@ -7,10 +7,20 @@ on:
       - '**/*.md'
       - 'docs/**'
   workflow_dispatch:
+    inputs:
+      force:
+        description: 'Bypass required-check gate (emergency only)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 permissions:
   actions: write
   contents: read
+  checks: read
 
 concurrency:
   group: deploy-relay-backend
@@ -19,16 +29,33 @@ concurrency:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
       SHOULD_DEPLOY: ${{ github.event_name == 'workflow_dispatch' || vars.CLIRELAY_DEV_AUTO_DEPLOY == 'true' }}
+      EXPECTED_SCRIPT_VERSION: '2026.07.16'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Reject vendored panel assets
         run: ./scripts/ensure-no-vendored-panel-assets.sh
 
-      - uses: actions/setup-go@v5
+      # Branch protection on dev requires green PR checks before merge.
+      # Merge commits themselves do not re-run pr-test-build, so we do not re-query
+      # check-runs on github.sha here (that would always fail-closed incorrectly).
+      - name: Record deploy mode
+        if: env.SHOULD_DEPLOY == 'true'
+        env:
+          FORCE_DEPLOY: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force || 'false' }}
+        run: |
+          set -euo pipefail
+          if [ "${FORCE_DEPLOY}" = "true" ]; then
+            echo "::warning::Forced deploy via workflow_dispatch"
+            echo "DEPLOY_MODE=forced" >> "$GITHUB_ENV"
+          else
+            echo "DEPLOY_MODE=deployed" >> "$GITHUB_ENV"
+          fi
+
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version: '1.26.1'
           cache: true
@@ -49,6 +76,7 @@ jobs:
           VERSION="${{ github.ref_name }}-${SHORT_SHA}"
           echo "Build date: $BUILD_DATE"
           echo "Version: $VERSION"
+          echo "APP_VERSION=${VERSION}" >> "$GITHUB_ENV"
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
             -ldflags="-s -w \
               -X 'github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo.Version=${VERSION}' \
@@ -61,37 +89,86 @@ jobs:
         run: |
           echo "Built dev binary, but server deploy is disabled."
           echo "Run this workflow manually or set repository variable CLIRELAY_DEV_AUTO_DEPLOY=true after the target server data stack is ready."
+          echo "DEPLOY_MODE=built-only" >> "$GITHUB_ENV"
 
-      - name: Upload binary and deploy scripts
+      # Native ssh/scp only. Remote user is deploy (not root).
+      # Staging path is /opt/clirelay2/incoming; root-owned entrypoint installs + deploys.
+      - name: Configure SSH
         if: env.SHOULD_DEPLOY == 'true'
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          port: ${{ secrets.SERVER_PORT }}
-          username: root
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: "cli-proxy-api-new,scripts/deploy-blue-green.sh,scripts/cleanup-drained-slot.sh"
-          target: "/opt/clirelay2/"
-          overwrite: true
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_PORT: ${{ secrets.SERVER_PORT }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "${SERVER_HOST:-}"
+          test -n "${SSH_PRIVATE_KEY:-}"
+          test -n "${DEPLOY_SSH_KNOWN_HOSTS:-}"
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${SSH_PRIVATE_KEY}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "${DEPLOY_SSH_KNOWN_HOSTS}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          port="${SERVER_PORT:-22}"
+          {
+            echo "Host deploy-target"
+            echo "  HostName ${SERVER_HOST}"
+            echo "  Port ${port}"
+            echo "  User deploy"
+            echo "  IdentityFile ~/.ssh/deploy_key"
+            echo "  IdentitiesOnly yes"
+            echo "  UserKnownHostsFile ~/.ssh/known_hosts"
+            echo "  StrictHostKeyChecking yes"
+          } > ~/.ssh/config
+          chmod 600 ~/.ssh/config
 
-      - name: Blue-green deploy
+      - name: Upload binary to staging
         if: env.SHOULD_DEPLOY == 'true'
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          port: ${{ secrets.SERVER_PORT }}
-          username: root
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script: |
-            SERVICE_CPU_QUOTA="${{ vars.CLIRELAY_SERVICE_CPU_QUOTA || '170%' }}" \
-            SERVICE_MEMORY_HIGH="${{ vars.CLIRELAY_SERVICE_MEMORY_HIGH || '1400M' }}" \
-            SERVICE_MEMORY_MAX="${{ vars.CLIRELAY_SERVICE_MEMORY_MAX || '1600M' }}" \
-            SERVICE_TASKS_MAX="${{ vars.CLIRELAY_SERVICE_TASKS_MAX || '512' }}" \
-            COMMIT_SHA="${{ github.sha }}" \
-            bash /opt/clirelay2/scripts/deploy-blue-green.sh
+        run: |
+          set -euo pipefail
+          # deploy may only write the binary into incoming/.
+          # Root-managed /opt/clirelay2/scripts/* are never overwritten by GHA (prevents sudo script injection).
+          ssh deploy-target 'mkdir -p /opt/clirelay2/incoming && rm -f /opt/clirelay2/incoming/cli-proxy-api-new'
+          scp cli-proxy-api-new deploy-target:/opt/clirelay2/incoming/cli-proxy-api-new
+
+      - name: Blue-green deploy via fixed root entrypoint
+        if: env.SHOULD_DEPLOY == 'true'
+        env:
+          SERVICE_CPU_QUOTA: ${{ vars.CLIRELAY_SERVICE_CPU_QUOTA || '170%' }}
+          SERVICE_MEMORY_HIGH: ${{ vars.CLIRELAY_SERVICE_MEMORY_HIGH || '1400M' }}
+          SERVICE_MEMORY_MAX: ${{ vars.CLIRELAY_SERVICE_MEMORY_MAX || '1600M' }}
+          SERVICE_TASKS_MAX: ${{ vars.CLIRELAY_SERVICE_TASKS_MAX || '512' }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Only /usr/local/sbin/clirelay-gha-deploy is sudo-allowed for deploy.
+          # It validates COMMIT_SHA in the staged binary, then runs root-managed deploy-blue-green.sh.
+          ssh deploy-target \
+            "sudo -n \
+             SERVICE_CPU_QUOTA=$(printf %q "${SERVICE_CPU_QUOTA}") \
+             SERVICE_MEMORY_HIGH=$(printf %q "${SERVICE_MEMORY_HIGH}") \
+             SERVICE_MEMORY_MAX=$(printf %q "${SERVICE_MEMORY_MAX}") \
+             SERVICE_TASKS_MAX=$(printf %q "${SERVICE_TASKS_MAX}") \
+             COMMIT_SHA=$(printf %q "${COMMIT_SHA}") \
+             EXPECTED_SCRIPT_VERSION=$(printf %q "${EXPECTED_SCRIPT_VERSION}") \
+             /usr/local/sbin/clirelay-gha-deploy"
+          echo "DEPLOY_MODE=${DEPLOY_MODE:-deployed}" >> "$GITHUB_ENV"
+
+      - name: Write job summary
+        if: always()
+        run: |
+          {
+            echo "## CliRelay deploy"
+            echo "- mode: \`${DEPLOY_MODE:-unknown}\`"
+            echo "- sha: \`${{ github.sha }}\`"
+            echo "- version: \`${APP_VERSION:-n/a}\`"
+            echo "- should_deploy: \`${SHOULD_DEPLOY}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Trigger dev Docker image build
-        if: success()
+        if: success() && env.SHOULD_DEPLOY == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

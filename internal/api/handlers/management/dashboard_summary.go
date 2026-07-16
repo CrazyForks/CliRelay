@@ -3,6 +3,7 @@ package management
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -12,6 +13,17 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	log "github.com/sirupsen/logrus"
 )
+
+// dashboardSummaryCacheTTL absorbs multi-tab and 5–20s frontend poll storms so
+// request_logs aggregation is not re-run on every refresh. Counts (API keys /
+// auth files) stay live; only KPI + trends payloads are cached.
+const dashboardSummaryCacheTTL = 15 * time.Second
+
+type dashboardSummaryUsageCache struct {
+	kpi             usage.DashboardKPI
+	trends          usage.DashboardTrends
+	throughputScope string
+}
 
 // GetDashboardSummary is a lightweight endpoint that returns only the
 // counts and KPIs needed by the frontend dashboard page, avoiding
@@ -65,14 +77,41 @@ func (h *Handler) GetDashboardSummary(c *gin.Context) {
 		days = v
 	}
 
-	kpi, _ := usage.QueryDashboardKPIForTenant(tenantID, days)
-	trends, _ := usage.QueryDashboardTrendsForTenant(tenantID, days)
-	throughputScope := "tenant"
+	scopeKey := "tenant"
 	if allTenantThroughput {
-		if series, err := usage.QueryDashboardThroughputAcrossTenants(); err == nil {
-			trends.ThroughputSeries = series
-			throughputScope = "all_tenants"
+		scopeKey = "all_tenants"
+	}
+	cacheKey := "dashboard-summary:" + tenantID + ":" + strconv.Itoa(days) + ":" + scopeKey
+
+	var (
+		kpi             usage.DashboardKPI
+		trends          usage.DashboardTrends
+		throughputScope string
+		fromCache       bool
+	)
+	if cached, ok := h.getDashboardSummaryCache(cacheKey); ok {
+		if payload, ok := cached.(dashboardSummaryUsageCache); ok {
+			kpi = payload.kpi
+			trends = payload.trends
+			throughputScope = payload.throughputScope
+			fromCache = true
 		}
+	}
+	if !fromCache {
+		kpi, _ = usage.QueryDashboardKPIForTenant(tenantID, days)
+		trends, _ = usage.QueryDashboardTrendsForTenant(tenantID, days)
+		throughputScope = "tenant"
+		if allTenantThroughput {
+			if series, err := usage.QueryDashboardThroughputAcrossTenants(); err == nil {
+				trends.ThroughputSeries = series
+				throughputScope = "all_tenants"
+			}
+		}
+		h.setDashboardSummaryCache(cacheKey, dashboardSummaryUsageCache{
+			kpi:             kpi,
+			trends:          trends,
+			throughputScope: throughputScope,
+		})
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -106,6 +145,47 @@ func (h *Handler) GetDashboardSummary(c *gin.Context) {
 		},
 		"days": days,
 	})
+}
+
+func (h *Handler) getDashboardSummaryCache(key string) (any, bool) {
+	if h == nil {
+		return nil, false
+	}
+	h.trendCacheMu.Lock()
+	defer h.trendCacheMu.Unlock()
+	entry, ok := h.trendCache[key]
+	if !ok || time.Now().After(entry.expiresAt) {
+		if ok {
+			delete(h.trendCache, key)
+		}
+		return nil, false
+	}
+	return entry.payload, true
+}
+
+func (h *Handler) setDashboardSummaryCache(key string, payload any) {
+	if h == nil || payload == nil {
+		return
+	}
+	h.trendCacheMu.Lock()
+	defer h.trendCacheMu.Unlock()
+	if h.trendCache == nil {
+		h.trendCache = make(map[string]trendCacheEntry)
+	}
+	now := time.Now()
+	const maxEntries = 256
+	for k, entry := range h.trendCache {
+		if now.After(entry.expiresAt) {
+			delete(h.trendCache, k)
+		}
+	}
+	if len(h.trendCache) >= maxEntries {
+		for k := range h.trendCache {
+			delete(h.trendCache, k)
+			break
+		}
+	}
+	h.trendCache[key] = trendCacheEntry{expiresAt: now.Add(dashboardSummaryCacheTTL), payload: payload}
 }
 
 func parsePositiveInt(s string) (int, error) {

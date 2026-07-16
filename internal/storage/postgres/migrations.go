@@ -12,8 +12,87 @@ func RuntimeMigrations() []Migration {
 		{Version: "202607120001_dynamic_menus", SQL: dynamicMenusSQL},
 		{Version: "202607120002_menu_management_v2", SQL: menuManagementV2SQL},
 		{Version: "202607130001_model_config_openrouter_metadata", SQL: modelConfigOpenRouterMetadataSQL},
+		// AI Accounts page fans out entity-stats + per-card auth-file-trend over
+		// request_logs; composite indexes avoid sequential scans under concurrent load.
+		{Version: "202607160001_request_logs_auth_lookup_indexes", SQL: requestLogsAuthLookupIndexesSQL},
+		// Latest AI-account status + daily usage projection so cards stop scanning request_logs.
+		{Version: "202607160002_ai_account_status_read_model", SQL: aiAccountStatusReadModelSQL},
+		// Manual same-day daily spending reset baseline per API key (does not delete request_logs).
+		{Version: "202607160003_api_key_daily_spending_resets", SQL: apiKeyDailySpendingResetsSQL},
 	}
 }
+
+// TIMESTAMPTZ matches other PG runtime tables; SQLite bootstrap uses TIMESTAMP (see usage package).
+const apiKeyDailySpendingResetsSQL = `
+CREATE TABLE IF NOT EXISTS api_key_daily_spending_resets (
+  tenant_id     UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
+  api_key_id    TEXT NOT NULL,
+  day_key       TEXT NOT NULL DEFAULT '',
+  cost_baseline DOUBLE PRECISION NOT NULL DEFAULT 0,
+  reset_at      TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (tenant_id, api_key_id)
+);
+CREATE INDEX IF NOT EXISTS idx_api_key_daily_spending_resets_day
+  ON api_key_daily_spending_resets(tenant_id, day_key);
+`
+
+const requestLogsAuthLookupIndexesSQL = `
+CREATE INDEX IF NOT EXISTS idx_request_logs_tenant_auth_index_time
+  ON request_logs(tenant_id, auth_index, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_request_logs_tenant_auth_subject_time_cost
+  ON request_logs(tenant_id, auth_subject_id, timestamp DESC)
+  INCLUDE (cost);
+`
+
+// Schema only: historical backfill uses usageLoc at process init (not UTC-hardcoded SQL).
+const aiAccountStatusReadModelSQL = `
+CREATE TABLE IF NOT EXISTS ai_account_status (
+  tenant_id                 UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
+  auth_subject_id           TEXT NOT NULL,
+  auth_index                TEXT NOT NULL DEFAULT '',
+  provider                  TEXT NOT NULL DEFAULT '',
+  refresh_state             TEXT NOT NULL DEFAULT 'idle',
+  health_status             TEXT NOT NULL DEFAULT '',
+  plan_type                 TEXT NOT NULL DEFAULT '',
+  restriction_summary       TEXT NOT NULL DEFAULT '',
+  error_summary             TEXT NOT NULL DEFAULT '',
+  error_code                TEXT NOT NULL DEFAULT '',
+  error_message             TEXT NOT NULL DEFAULT '',
+  quota_json                TEXT NOT NULL DEFAULT '[]',
+  reset_credit_count        BIGINT,
+  reset_credit_expirations  TEXT NOT NULL DEFAULT '[]',
+  upstream_checked_at       TIMESTAMPTZ,
+  usage_updated_at          TIMESTAMPTZ,
+  expires_at                TIMESTAMPTZ,
+  version                   BIGINT NOT NULL DEFAULT 0,
+  updated_at                TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (tenant_id, auth_subject_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ai_account_status_tenant_auth_index
+  ON ai_account_status(tenant_id, auth_index);
+CREATE INDEX IF NOT EXISTS idx_ai_account_status_tenant_refresh
+  ON ai_account_status(tenant_id, refresh_state, updated_at);
+
+CREATE TABLE IF NOT EXISTS auth_subject_usage_daily (
+  tenant_id       UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
+  auth_subject_id TEXT NOT NULL,
+  day_key         TEXT NOT NULL,
+  request_count   BIGINT NOT NULL DEFAULT 0,
+  success_count   BIGINT NOT NULL DEFAULT 0,
+  failure_count   BIGINT NOT NULL DEFAULT 0,
+  cost_total      DOUBLE PRECISION NOT NULL DEFAULT 0,
+  updated_at      TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (tenant_id, auth_subject_id, day_key)
+);
+CREATE INDEX IF NOT EXISTS idx_auth_subject_usage_daily_tenant_day
+  ON auth_subject_usage_daily(tenant_id, day_key);
+
+CREATE TABLE IF NOT EXISTS usage_projection_markers (
+  marker_key   TEXT PRIMARY KEY,
+  marker_value TEXT NOT NULL DEFAULT '',
+  updated_at   TIMESTAMPTZ NOT NULL
+);
+`
 
 const runtimeSchemaSQL = `
 CREATE TABLE IF NOT EXISTS request_logs (

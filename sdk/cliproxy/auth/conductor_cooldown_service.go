@@ -235,54 +235,39 @@ func (s cooldownService) applyModelFailureLocked(auth *Auth, result Result, now 
 	}
 
 	statusCode := statusCodeFromResult(result.Error)
-	switch statusCode {
-	case 401:
-		next := now.Add(30 * time.Minute)
-		state.NextRetryAfter = next
-		effects.suspendReason = "unauthorized"
-		effects.shouldSuspendModel = true
-	case 402, 403:
-		next := now.Add(30 * time.Minute)
-		state.NextRetryAfter = next
-		effects.suspendReason = "payment_required"
-		effects.shouldSuspendModel = true
-	case 404:
-		next := now.Add(12 * time.Hour)
-		state.NextRetryAfter = next
-		effects.suspendReason = "not_found"
-		effects.shouldSuspendModel = true
-	case 429:
-		var next time.Time
-		backoffLevel := state.Quota.BackoffLevel
-		if result.RetryAfter != nil {
-			next = now.Add(*result.RetryAfter)
-		} else {
-			cooldown, nextLevel := nextQuotaCooldown(backoffLevel, quotaCooldownDisabledForAuth(auth))
-			if cooldown > 0 {
-				next = now.Add(cooldown)
+	// xAI Grok Build returns HTTP 402 for weekly usage balance exhaustion.
+	// Route those as quota cooldowns (window/retry metadata from executor),
+	// not the generic 30m payment_required probe loop.
+	if statusCode == 402 && isQuotaExhaustionError(result.Error, result.RetryAfter) {
+		applyModelQuotaFailureLocked(auth, state, result, now, effects)
+	} else {
+		switch statusCode {
+		case 401:
+			next := now.Add(30 * time.Minute)
+			state.NextRetryAfter = next
+			effects.suspendReason = "unauthorized"
+			effects.shouldSuspendModel = true
+		case 402, 403:
+			next := now.Add(30 * time.Minute)
+			state.NextRetryAfter = next
+			effects.suspendReason = "payment_required"
+			effects.shouldSuspendModel = true
+		case 404:
+			next := now.Add(12 * time.Hour)
+			state.NextRetryAfter = next
+			effects.suspendReason = "not_found"
+			effects.shouldSuspendModel = true
+		case 429:
+			applyModelQuotaFailureLocked(auth, state, result, now, effects)
+		case 408, 500, 502, 503, 504:
+			if quotaCooldownDisabledForAuth(auth) {
+				state.NextRetryAfter = time.Time{}
+			} else {
+				state.NextRetryAfter = now.Add(1 * time.Minute)
 			}
-			backoffLevel = nextLevel
-		}
-		state.NextRetryAfter = next
-		state.Quota = QuotaState{
-			Exceeded:      true,
-			Reason:        "quota",
-			Window:        result.Error.QuotaWindow,
-			WindowMinutes: result.Error.QuotaWindowMinutes,
-			NextRecoverAt: next,
-			BackoffLevel:  backoffLevel,
-		}
-		effects.suspendReason = "quota"
-		effects.shouldSuspendModel = true
-		effects.setModelQuota = true
-	case 408, 500, 502, 503, 504:
-		if quotaCooldownDisabledForAuth(auth) {
+		default:
 			state.NextRetryAfter = time.Time{}
-		} else {
-			state.NextRetryAfter = now.Add(1 * time.Minute)
 		}
-	default:
-		state.NextRetryAfter = time.Time{}
 	}
 
 	auth.Status = StatusError
@@ -292,6 +277,73 @@ func (s cooldownService) applyModelFailureLocked(auth *Auth, result Result, now 
 
 func isResponseStreamIncompleteError(err *Error) bool {
 	return err != nil && strings.TrimSpace(err.Code) == "response_stream_incomplete"
+}
+
+// applyModelQuotaFailureLocked records a provider quota exhaustion against a model.
+// Used for classic 429s and for quota-like 402s (e.g. xAI weekly balance exhausted).
+func applyModelQuotaFailureLocked(auth *Auth, state *ModelState, result Result, now time.Time, effects *resultStateEffects) {
+	if state == nil {
+		return
+	}
+	var next time.Time
+	backoffLevel := state.Quota.BackoffLevel
+	if result.RetryAfter != nil {
+		next = now.Add(*result.RetryAfter)
+	} else {
+		// WindowMinutes is window length metadata (e.g. week=10080), not remaining cooldown.
+		cooldown, nextLevel := nextQuotaCooldown(backoffLevel, quotaCooldownDisabledForAuth(auth))
+		if cooldown > 0 {
+			next = now.Add(cooldown)
+		}
+		backoffLevel = nextLevel
+	}
+	var window string
+	var windowMinutes int
+	if result.Error != nil {
+		window = result.Error.QuotaWindow
+		windowMinutes = result.Error.QuotaWindowMinutes
+	}
+	state.NextRetryAfter = next
+	state.Quota = QuotaState{
+		Exceeded:      true,
+		Reason:        "quota",
+		Window:        window,
+		WindowMinutes: windowMinutes,
+		NextRecoverAt: next,
+		BackoffLevel:  backoffLevel,
+	}
+	if result.Error != nil && result.Error.Message != "" {
+		state.StatusMessage = result.Error.Message
+	} else {
+		state.StatusMessage = "quota exhausted"
+	}
+	effects.suspendReason = "quota"
+	effects.shouldSuspendModel = true
+	effects.setModelQuota = true
+}
+
+// isQuotaExhaustionError reports whether a non-429 failure should still be treated
+// as quota exhaustion (window metadata and/or balance-exhausted body).
+func isQuotaExhaustionError(err *Error, retryAfter *time.Duration) bool {
+	if err == nil {
+		return false
+	}
+	if err.QuotaWindow != "" || err.QuotaWindowMinutes > 0 {
+		return true
+	}
+	if retryAfter != nil && *retryAfter > 0 && isUsageBalanceExhaustedMessage(err.Message) {
+		return true
+	}
+	return isUsageBalanceExhaustedMessage(err.Message)
+}
+
+func isUsageBalanceExhaustedMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	return strings.Contains(lower, "usage balance exhausted") ||
+		strings.Contains(lower, "balance exhausted")
 }
 
 func (s cooldownService) applyRegistryEffects(result Result, effects resultStateEffects) {

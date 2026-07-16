@@ -117,6 +117,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	if !gjson.GetBytes(body, "instructions").Exists() {
 		body, _ = sjson.SetBytes(body, "instructions", "")
 	}
+	body = maybeEnsureCodexImageGenerationTool(body, auth, execCtx.BaseModel, codexAdmissionHeadersFromContext(execCtx.Context))
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
@@ -312,6 +313,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 
 	body = execCtx.ApplyPayloadConfig(body, body)
+	body = maybeEnsureCodexImageGenerationTool(body, auth, execCtx.BaseModel, codexAdmissionHeadersFromContext(execCtx.Context))
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
@@ -451,6 +453,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		}
 
 		var param any
+		imageStream := newCodexImageStreamNormalizer()
 		for {
 			if execCtx.Context != nil && execCtx.Context.Err() != nil {
 				terminateReason = "context_done"
@@ -508,24 +511,30 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 
 			payload = normalizeCodexWebsocketCompletion(payload)
-			eventType := gjson.GetBytes(payload, "type").String()
-			if eventType == "response.completed" || eventType == "response.done" {
-				if detail, ok := parseCodexUsage(payload); ok {
-					reporter.publish(execCtx.Context, detail)
-				}
+			normalizedEvents := normalizeCodexImageGenerationOutboundEventWithState(imageStream, payload)
+			if len(normalizedEvents) == 0 {
+				normalizedEvents = [][]byte{payload}
 			}
+			for _, eventPayload := range normalizedEvents {
+				eventType := gjson.GetBytes(eventPayload, "type").String()
+				if eventType == "response.completed" || eventType == "response.done" {
+					if detail, ok := parseCodexUsage(eventPayload); ok {
+						reporter.publish(execCtx.Context, detail)
+					}
+				}
 
-			line := encodeCodexWebsocketAsSSE(payload)
-			chunks := sdktranslator.TranslateStream(execCtx.Context, to, execCtx.SourceFormat, req.Model, body, body, line, &param)
-			for i := range chunks {
-				if !send(cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}) {
-					terminateReason = "context_done"
-					terminateErr = execCtx.Context.Err()
+				line := encodeCodexWebsocketAsSSE(eventPayload)
+				chunks := sdktranslator.TranslateStream(execCtx.Context, to, execCtx.SourceFormat, req.Model, body, body, line, &param)
+				for i := range chunks {
+					if !send(cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}) {
+						terminateReason = "context_done"
+						terminateErr = execCtx.Context.Err()
+						return
+					}
+				}
+				if eventType == "response.completed" || eventType == "response.done" {
 					return
 				}
-			}
-			if eventType == "response.completed" || eventType == "response.done" {
-				return
 			}
 		}
 	}()

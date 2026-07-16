@@ -448,9 +448,14 @@ func sessionDetailString(value gjson.Result) string {
 func sessionDetailKeyRank(key string) int {
 	normalized := strings.NewReplacer("-", "_", " ", "_").Replace(strings.ToLower(strings.TrimSpace(key)))
 	switch normalized {
-	case "session_id", "sessionid", "x_session_id", "x_sessionid":
+	// Rank 0: stable client session ids. Grok/xAI clients send X-Grok-Session-Id
+	// rather than generic Session-Id; without it request_log_content.session_id
+	// stays empty for the bulk of Grok traffic and session-level analytics break.
+	case "session_id", "sessionid", "x_session_id", "x_sessionid",
+		"x_grok_session_id", "x_grok_sessionid":
 		return 0
-	case "conversation_id", "conversationid", "x_conversation_id", "x_conversationid", "openai_conversation_id":
+	case "conversation_id", "conversationid", "x_conversation_id", "x_conversationid",
+		"openai_conversation_id", "x_grok_conv_id", "x_grok_convid":
 		return 1
 	default:
 		return 99

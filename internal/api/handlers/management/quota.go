@@ -201,7 +201,8 @@ func (h *Handler) PostAuthFileQuotaSnapshot(c *gin.Context) {
 			return
 		}
 	}
-	h.clearTrendCache()
+	// Targeted invalidation only: never wipe dashboard/entity-stats caches.
+	h.invalidateAIAccountCaches(effectiveTenantID(c), authIndex, authSubjectID)
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 

@@ -165,7 +165,46 @@ func (h *Handler) PutAPIKeyPermissionProfiles(c *gin.Context) {
 
 // api-key-entries: backed by SQLite api_keys table
 func (h *Handler) GetAPIKeyEntries(c *gin.Context) {
-	c.JSON(200, gin.H{"api-key-entries": h.apiKeySettings(c).ListEntries()})
+	entries, err := h.apiKeySettings(c).ListEntriesWithDailySpending()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, gin.H{"api-key-entries": entries})
+}
+
+// ResetAPIKeyDailySpending sets today's spending baseline so effective used becomes 0.
+// POST /v0/management/api-key-entries/daily-spending/reset
+func (h *Handler) ResetAPIKeyDailySpending(c *gin.Context) {
+	var body struct {
+		ID  *string `json:"id"`
+		Key *string `json:"key"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	result, err := h.apiKeySettings(c).ResetDailySpending(body.ID, body.Key)
+	if err != nil {
+		switch {
+		case errors.Is(err, apikeysettings.ErrItemNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "item not found"})
+			return
+		case errors.Is(err, apikeysettings.ErrDailySpendingLimitMissing):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "daily spending limit is not set"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"status":                   "ok",
+		"id":                       result.ID,
+		"key":                      result.Key,
+		"daily-spending-limit":     result.DailySpendingLimit,
+		"daily-spending-used":      result.DailySpendingUsed,
+		"daily-spending-remaining": result.DailySpendingRemaining,
+	})
 }
 
 func (h *Handler) PutAPIKeyEntries(c *gin.Context) {

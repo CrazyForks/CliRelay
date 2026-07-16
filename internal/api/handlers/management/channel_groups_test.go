@@ -9,9 +9,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -245,6 +248,74 @@ func TestGetChannelGroupsReturnsGroupMetadata(t *testing.T) {
 	}
 	if len(body.Items) < 3 {
 		t.Fatalf("expected at least 3 group items, got %d", len(body.Items))
+	}
+}
+
+func TestGetChannelGroupsUsesEffectiveTenantRouting(t *testing.T) {
+	// Regression: business tenants must not see System channel groups
+	// (buildChannelGroupItems used to re-read System store via currentRoutingConfig).
+	gin.SetMode(gin.TestMode)
+	usage.CloseDB()
+	if err := usage.InitDB(filepath.Join(t.TempDir(), "usage.db"), config.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	t.Cleanup(usage.CloseDB)
+
+	systemRouting := config.RoutingConfig{
+		IncludeDefaultGroup: true,
+		ChannelGroups: []config.RoutingChannelGroup{
+			{Name: "全部渠道支持", Match: config.ChannelGroupMatch{Tags: []string{"codex"}}},
+			{Name: "group1", Description: "plus 号池", Match: config.ChannelGroupMatch{Tags: []string{"codex"}}},
+			{Name: "group2", Description: "anyrouter", Match: config.ChannelGroupMatch{Channels: []string{"anyrouter"}}},
+		},
+		PathRoutes: []config.RoutingPathRoute{
+			{Path: "/codexmix", Group: "全部渠道支持", StripPrefix: true},
+			{Path: "/group1", Group: "group1", StripPrefix: true},
+		},
+	}
+	tenantRouting := config.RoutingConfig{
+		IncludeDefaultGroup: true,
+		ChannelGroups: []config.RoutingChannelGroup{
+			{Name: "group", Description: "group", Match: config.ChannelGroupMatch{Tags: []string{"xai"}}},
+		},
+		PathRoutes: []config.RoutingPathRoute{
+			{Path: "/group", Group: "group", StripPrefix: true},
+		},
+	}
+	if err := usage.UpsertRoutingConfigForTenant(identity.SystemTenantID, systemRouting); err != nil {
+		t.Fatalf("seed system routing: %v", err)
+	}
+	const tenantID = "11f9ab9c-9fa6-4875-a76a-c39f113c57eb"
+	if err := usage.UpsertRoutingConfigForTenant(tenantID, tenantRouting); err != nil {
+		t.Fatalf("seed tenant routing: %v", err)
+	}
+
+	h := NewHandler(&config.Config{Routing: systemRouting}, "", nil)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Set(managementPrincipalKey, identity.Principal{EffectiveTenant: identity.Tenant{ID: tenantID}})
+	c.Request = httptest.NewRequest(http.MethodGet, "/channel-groups", nil)
+	h.GetChannelGroups(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Items []channelGroupItem `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	names := make([]string, 0, len(body.Items))
+	for _, item := range body.Items {
+		names = append(names, item.Name)
+		switch item.Name {
+		case "全部渠道支持", "group1", "group2":
+			t.Fatalf("tenant channel-groups leaked system group %q; items=%v", item.Name, names)
+		}
+	}
+	if !containsString(names, "group") {
+		t.Fatalf("items=%v, want tenant group %q", names, "group")
 	}
 }
 
@@ -913,7 +984,7 @@ func TestCanonicalizeRoutingConfigChannelsRenamedOAuthChannel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("collectKnownChannels() error = %v", err)
 	}
-	got := canonicalizeRoutingConfigChannels(currentRoutingConfig(cfg), known)
+	got := canonicalizeRoutingConfigChannels(routingConfigFrom(cfg), known)
 	if !containsString(got.ChannelGroups[0].Match.Channels, "chatgpt-pro1") {
 		t.Fatalf("match.channels = %v, want canonical renamed channel", got.ChannelGroups[0].Match.Channels)
 	}
