@@ -175,6 +175,75 @@ func TestBuildEntryIncludesCodexOAuthAdmissionPayload(t *testing.T) {
 	}
 }
 
+func TestBuildEntryIncludesXAIUsingAPI(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID:       "xai-oauth",
+		Provider: "xai",
+		Attributes: map[string]string{
+			"runtime_only": "true",
+			"auth_kind":    "oauth",
+			"using_api":    "true",
+		},
+		Metadata: map[string]any{
+			"email":     "grok@example.com",
+			"auth_kind": "oauth",
+			"using_api": true,
+		},
+	}
+
+	entry := BuildEntry(auth, EntryOptions{})
+	if entry == nil {
+		t.Fatal("expected entry")
+	}
+	if got, _ := entry["using_api"].(bool); !got {
+		t.Fatalf("using_api = %#v, want true", entry["using_api"])
+	}
+}
+
+func TestBuildEntryDefaultsXAIUsingAPIToBuild(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID:       "xai-oauth",
+		Provider: "xai",
+		Attributes: map[string]string{
+			"runtime_only": "true",
+			"auth_kind":    "oauth",
+		},
+		Metadata: map[string]any{
+			"email":     "grok@example.com",
+			"auth_kind": "oauth",
+		},
+	}
+
+	entry := BuildEntry(auth, EntryOptions{})
+	if entry == nil {
+		t.Fatal("expected entry")
+	}
+	if got, ok := entry["using_api"].(bool); !ok || got {
+		t.Fatalf("using_api = %#v, want false", entry["using_api"])
+	}
+}
+
+func TestBuildEntryOmitsUsingAPIForNonXAI(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID:       "codex-oauth",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"runtime_only": "true",
+		},
+		Metadata: map[string]any{
+			"email": "codex@example.com",
+		},
+	}
+
+	entry := BuildEntry(auth, EntryOptions{})
+	if entry == nil {
+		t.Fatal("expected entry")
+	}
+	if _, ok := entry["using_api"]; ok {
+		t.Fatalf("using_api should be omitted for non-xAI: %#v", entry["using_api"])
+	}
+}
+
 func TestBuildEntryIncludesCodexImageGenerationBridgeEnabled(t *testing.T) {
 	auth := &coreauth.Auth{
 		ID:       "codex-oauth",

@@ -145,5 +145,8 @@ func BuildEntry(auth *coreauth.Auth, opts EntryOptions) map[string]any {
 	if bridge := CodexImageGenerationBridgePayload(auth); len(bridge) > 0 {
 		entry["codex_image_generation_bridge"] = bridge
 	}
+	if xaiEndpoint := XAIEndpointPayload(auth); len(xaiEndpoint) > 0 {
+		entry["using_api"] = xaiEndpoint["using_api"]
+	}
 	return entry
 }

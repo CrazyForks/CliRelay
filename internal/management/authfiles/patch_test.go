@@ -356,6 +356,69 @@ func TestApplyFieldPatchRejectsUnknownCodexAllowedClientPreset(t *testing.T) {
 	}
 }
 
+func TestApplyFieldPatchUpdatesXAIUsingAPI(t *testing.T) {
+	now := time.Date(2026, 6, 24, 10, 0, 0, 0, time.UTC)
+	usingAPI := true
+	auth := &coreauth.Auth{
+		ID:       "xai-oauth",
+		Provider: "xai",
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+			"using_api": "false",
+		},
+		Metadata: map[string]any{
+			"email":     "grok@example.com",
+			"auth_kind": "oauth",
+			"using_api": false,
+		},
+	}
+
+	_, err := ApplyFieldPatch(auth, FieldPatch{UsingAPI: &usingAPI}, FieldPatchOptions{Now: now})
+	if err != nil {
+		t.Fatalf("ApplyFieldPatch() error = %v", err)
+	}
+	if got, _ := auth.Metadata["using_api"].(bool); !got {
+		t.Fatalf("metadata using_api = %#v, want true", auth.Metadata["using_api"])
+	}
+	if auth.Attributes["using_api"] != "true" {
+		t.Fatalf("attributes using_api = %q, want true", auth.Attributes["using_api"])
+	}
+	if !auth.UpdatedAt.Equal(now) {
+		t.Fatalf("UpdatedAt = %v, want %v", auth.UpdatedAt, now)
+	}
+}
+
+func TestApplyFieldPatchRejectsUsingAPIForNonXAI(t *testing.T) {
+	usingAPI := true
+	auth := &coreauth.Auth{
+		ID:       "codex-oauth",
+		Provider: "codex",
+		Metadata: map[string]any{"email": "codex@example.com"},
+	}
+
+	_, err := ApplyFieldPatch(auth, FieldPatch{UsingAPI: &usingAPI}, FieldPatchOptions{})
+	if err == nil || !strings.Contains(err.Error(), "only supported for xAI OAuth") {
+		t.Fatalf("ApplyFieldPatch() error = %v, want xAI OAuth restriction", err)
+	}
+}
+
+func TestApplyFieldPatchRejectsUsingAPIForXAIAPIKey(t *testing.T) {
+	usingAPI := false
+	auth := &coreauth.Auth{
+		ID:       "xai-api-key",
+		Provider: "xai",
+		Attributes: map[string]string{
+			"api_key":   "xai-key",
+			"auth_kind": "api_key",
+		},
+	}
+
+	_, err := ApplyFieldPatch(auth, FieldPatch{UsingAPI: &usingAPI}, FieldPatchOptions{})
+	if err == nil || !strings.Contains(err.Error(), "only supported for xAI OAuth") {
+		t.Fatalf("ApplyFieldPatch() error = %v, want xAI OAuth restriction", err)
+	}
+}
+
 func TestApplyFieldPatchRejectsNoFields(t *testing.T) {
 	auth := &coreauth.Auth{ID: "empty", Provider: "codex"}
 
