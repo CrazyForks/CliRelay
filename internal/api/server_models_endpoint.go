@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/management/modelcatalog"
 	modelconfigsettings "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/modelconfig"
 	internalrouting "github.com/router-for-me/CLIProxyAPI/v6/internal/routing"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -25,6 +26,8 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 	return func(c *gin.Context) {
 		var allowedModels map[string]struct{}
 		var allowedChannels map[string]struct{}
+		var allowedChannelsRaw string
+		var allowedChannelGroupsRaw string
 		allowedChannelGroups := allowedChannelGroupsFromAccessMetadata(c)
 		routeCtx := pathRouteContextFromGin(c)
 		routeGroup := ""
@@ -33,6 +36,8 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 		}
 		if metadataVal, exists := c.Get("accessMetadata"); exists {
 			if metadata, ok := metadataVal.(map[string]string); ok {
+				allowedChannelsRaw = strings.TrimSpace(metadata["allowed-channels"])
+				allowedChannelGroupsRaw = strings.TrimSpace(metadata["allowed-channel-groups"])
 				if allowedStr, exists := metadata["allowed-models"]; exists && allowedStr != "" {
 					allowedModels = make(map[string]struct{})
 					for _, m := range strings.Split(allowedStr, ",") {
@@ -45,7 +50,7 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 						allowedModels = nil
 					}
 				}
-				if allowedStr, exists := metadata["allowed-channels"]; exists && allowedStr != "" {
+				if allowedStr := allowedChannelsRaw; allowedStr != "" {
 					allowedChannels = make(map[string]struct{})
 					for _, channel := range strings.Split(allowedStr, ",") {
 						trimmed := strings.ToLower(strings.TrimSpace(channel))
@@ -62,6 +67,11 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 
 		tenantID := requestTenantID(c)
 		tenantScoped := tenantID != identity.SystemTenantID
+		var portalVisibleModelIDs map[string]struct{}
+		if tenantScoped && s.handlers != nil {
+			portalVisibleModelIDs = modelcatalog.NewForTenant(tenantID, s.cfg, s.handlers.AuthManager).
+				PortalVisibleModelIDs(allowedChannelsRaw, allowedChannelGroupsRaw)
+		}
 		scopedRoutingRestricted := s.hasScopedRoutingModelRestrictionForTenant(tenantID, routeGroup, allowedChannelGroups)
 		needsScopeFilter := tenantScoped || allowedModels != nil || allowedChannels != nil || allowedChannelGroups != nil || routeGroup != "" || scopedRoutingRestricted
 
@@ -93,6 +103,11 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 			filtered := make([]map[string]interface{}, 0, len(resp.Data))
 			for _, model := range resp.Data {
 				if id, ok := model["id"].(string); ok {
+					if portalVisibleModelIDs != nil {
+						if _, visible := portalVisibleModelIDs[strings.ToLower(strings.TrimSpace(id))]; !visible {
+							continue
+						}
+					}
 					if allowedModels != nil {
 						if !modelInSet(id, allowedModels) && !ccSwitchRequestModelAllowedForTarget(id, routeCtx, allowedModels) {
 							continue

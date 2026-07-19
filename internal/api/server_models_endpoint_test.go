@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
+	managementauthfiles "github.com/router-for-me/CLIProxyAPI/v6/internal/management/authfiles"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	internalrouting "github.com/router-for-me/CLIProxyAPI/v6/internal/routing"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
@@ -18,40 +19,43 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
-func TestUnifiedModelsHandlerScopesBusinessTenantAndAllowedModels(t *testing.T) {
+func TestUnifiedModelsHandlerScopesBusinessTenantToPortalPlazaAndAllowedModels(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	const businessTenant = "cccccccc-dddd-eeee-ffff-000000000001"
+	const (
+		businessTenant = "cccccccc-dddd-eeee-ffff-000000000001"
+		businessAuthID = "models-business-tenant-codex-auth"
+		visibleModelA  = "gpt-business-visible-a"
+		visibleModelB  = "gpt-business-visible-b"
+		extraModel     = "gpt-business-static-extra"
+		discoveryOnly  = "gpt-business-discovery-only"
+	)
+
+	managementauthfiles.ResetDiscoveryCacheForTest()
+	t.Cleanup(managementauthfiles.ResetDiscoveryCacheForTest)
 
 	modelRegistry := registry.GetGlobalRegistry()
-	businessAuthID := "models-business-tenant-auth"
-	systemAuthID := "models-system-tenant-auth"
-	modelRegistry.RegisterClient(businessAuthID, "openai", []*registry.ModelInfo{
-		{ID: "gpt-business-only"},
-		{ID: "codex-business-only"},
-		{ID: "grok-business-only"},
+	modelRegistry.UnregisterClient(businessAuthID)
+	t.Cleanup(func() { modelRegistry.UnregisterClient(businessAuthID) })
+	modelRegistry.RegisterClient(businessAuthID, "codex", []*registry.ModelInfo{
+		{ID: visibleModelA, Object: "model", OwnedBy: "openai"},
+		{ID: visibleModelB, Object: "model", OwnedBy: "openai"},
+		{ID: extraModel, Object: "model", OwnedBy: "openai"},
 	})
-	modelRegistry.RegisterClient(systemAuthID, "openai", []*registry.ModelInfo{
-		{ID: "gpt-system-only"},
-		{ID: "codex-system-only"},
-		{ID: "grok-system-only"},
-	})
-	t.Cleanup(func() {
-		modelRegistry.UnregisterClient(businessAuthID)
-		modelRegistry.UnregisterClient(systemAuthID)
+	// Management plaza replaces the Codex static registry catalog with this
+	// tenant-scoped live discovery set. discoveryOnly is intentionally absent
+	// from the runtime registry, while extraModel is intentionally absent here.
+	managementauthfiles.StoreDiscoveryCacheForTest(businessTenant, "codex", []*registry.ModelInfo{
+		{ID: visibleModelA, Object: "model", OwnedBy: "openai"},
+		{ID: visibleModelB, Object: "model", OwnedBy: "openai"},
+		{ID: discoveryOnly, Object: "model", OwnedBy: "openai"},
 	})
 
 	authManager := coreauth.NewManager(nil, nil, nil)
 	authManager.SetConfigForTenant(businessTenant, &config.Config{})
-	authManager.SetConfigForTenant(identity.SystemTenantID, &config.Config{})
 	if _, err := authManager.Register(context.Background(), &coreauth.Auth{
-		ID: businessAuthID, TenantID: businessTenant, Provider: "openai", Status: coreauth.StatusActive,
+		ID: businessAuthID, TenantID: businessTenant, Provider: "codex", Status: coreauth.StatusActive,
 	}); err != nil {
 		t.Fatalf("register business auth: %v", err)
-	}
-	if _, err := authManager.Register(context.Background(), &coreauth.Auth{
-		ID: systemAuthID, TenantID: identity.SystemTenantID, Provider: "openai", Status: coreauth.StatusActive,
-	}); err != nil {
-		t.Fatalf("register system auth: %v", err)
 	}
 
 	cfg := &config.Config{}
@@ -63,9 +67,89 @@ func TestUnifiedModelsHandlerScopesBusinessTenantAndAllowedModels(t *testing.T) 
 	router.GET("/v1/models", func(c *gin.Context) {
 		c.Set("tenantID", businessTenant)
 		if c.Query("restricted") == "1" {
-			c.Set("accessMetadata", map[string]string{"allowed-models": "gpt-business-only,grok-business-only"})
+			// Include extraModel to prove allowed-models cannot re-introduce an ID
+			// removed by the plaza truth source.
+			c.Set("accessMetadata", map[string]string{"allowed-models": visibleModelA + "," + extraModel})
 		}
 		server.unifiedModelsHandler(openaiHandler, claudeHandler)(c)
+	})
+
+	responseIDs := func(target, userAgent string) []string {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		if userAgent != "" {
+			req.Header.Set("User-Agent", userAgent)
+		}
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, body=%s", target, rec.Code, rec.Body.String())
+		}
+		var response struct {
+			Data []map[string]interface{} `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatalf("unmarshal GET %s response: %v", target, err)
+		}
+		return modelIDs(response.Data)
+	}
+
+	ids := responseIDs("/v1/models", "")
+	if !sameStringSet(ids, []string{visibleModelA, visibleModelB}) {
+		t.Fatalf("business tenant OpenAI models = %#v, want configured∩root-path registry models", ids)
+	}
+
+	ids = responseIDs("/v1/models", "claude-cli/1.0")
+	if !sameStringSet(ids, []string{visibleModelA, visibleModelB}) {
+		t.Fatalf("business tenant Claude models = %#v, want configured∩root-path registry models", ids)
+	}
+
+	ids = responseIDs("/v1/models?restricted=1", "")
+	if !sameStringSet(ids, []string{visibleModelA}) {
+		t.Fatalf("restricted business tenant models = %#v, want only %q", ids, visibleModelA)
+	}
+}
+
+func TestUnifiedModelsHandlerKeepsSystemTenantRegistryBehavior(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const (
+		systemAuthID = "models-system-tenant-codex-auth"
+		visibleModel = "gpt-system-live"
+		staticOnly   = "gpt-system-static-only"
+	)
+
+	managementauthfiles.ResetDiscoveryCacheForTest()
+	t.Cleanup(managementauthfiles.ResetDiscoveryCacheForTest)
+
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(systemAuthID)
+	t.Cleanup(func() { modelRegistry.UnregisterClient(systemAuthID) })
+	modelRegistry.RegisterClient(systemAuthID, "codex", []*registry.ModelInfo{
+		{ID: visibleModel, Object: "model", OwnedBy: "openai"},
+		{ID: staticOnly, Object: "model", OwnedBy: "openai"},
+	})
+	managementauthfiles.StoreDiscoveryCacheForTest(identity.SystemTenantID, "codex", []*registry.ModelInfo{
+		{ID: visibleModel, Object: "model", OwnedBy: "openai"},
+	})
+
+	authManager := coreauth.NewManager(nil, nil, nil)
+	authManager.SetConfigForTenant(identity.SystemTenantID, &config.Config{})
+	if _, err := authManager.Register(context.Background(), &coreauth.Auth{
+		ID: systemAuthID, TenantID: identity.SystemTenantID, Provider: "codex", Status: coreauth.StatusActive,
+	}); err != nil {
+		t.Fatalf("register system auth: %v", err)
+	}
+
+	cfg := &config.Config{}
+	base := handlers.NewBaseAPIHandlers(&cfg.SDKConfig, authManager)
+	server := &Server{handlers: base, cfg: cfg}
+	router := gin.New()
+	router.GET("/v1/models", func(c *gin.Context) {
+		c.Set("tenantID", identity.SystemTenantID)
+		server.unifiedModelsHandler(
+			openai.NewOpenAIAPIHandler(base),
+			claude.NewClaudeCodeAPIHandler(base),
+		)(c)
 	})
 
 	rec := httptest.NewRecorder()
@@ -80,43 +164,8 @@ func TestUnifiedModelsHandlerScopesBusinessTenantAndAllowedModels(t *testing.T) 
 		t.Fatalf("unmarshal response: %v", err)
 	}
 	ids := modelIDs(response.Data)
-	for _, want := range []string{"gpt-business-only", "codex-business-only", "grok-business-only"} {
-		found := false
-		for _, id := range ids {
-			found = found || id == want
-		}
-		if !found {
-			t.Fatalf("business tenant models = %#v, missing %q", ids, want)
-		}
-	}
-	for _, forbidden := range []string{"gpt-system-only", "codex-system-only", "grok-system-only"} {
-		for _, id := range ids {
-			if id == forbidden {
-				t.Fatalf("business tenant response leaked system model %q: %#v", forbidden, ids)
-			}
-		}
-	}
-
-	restrictedRec := httptest.NewRecorder()
-	router.ServeHTTP(restrictedRec, httptest.NewRequest(http.MethodGet, "/v1/models?restricted=1", nil))
-	if restrictedRec.Code != http.StatusOK {
-		t.Fatalf("restricted status = %d, body=%s", restrictedRec.Code, restrictedRec.Body.String())
-	}
-	response.Data = nil
-	if err := json.Unmarshal(restrictedRec.Body.Bytes(), &response); err != nil {
-		t.Fatalf("unmarshal restricted response: %v", err)
-	}
-	ids = modelIDs(response.Data)
-	if !sameStrings(ids, []string{"gpt-business-only", "grok-business-only"}) &&
-		!sameStrings(ids, []string{"grok-business-only", "gpt-business-only"}) {
-		t.Fatalf("business tenant models = %#v, want allowed business GPT+Grok only", ids)
-	}
-	for _, forbidden := range []string{"gpt-system-only", "codex-system-only", "grok-system-only", "codex-business-only"} {
-		for _, id := range ids {
-			if id == forbidden {
-				t.Fatalf("business tenant response leaked forbidden model %q: %#v", forbidden, ids)
-			}
-		}
+	if !containsString(ids, visibleModel) || !containsString(ids, staticOnly) {
+		t.Fatalf("system tenant models = %#v, want both registry models", ids)
 	}
 }
 
@@ -186,6 +235,27 @@ func modelIDs(models []map[string]interface{}) []string {
 		}
 	}
 	return ids
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func sameStringSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for _, value := range a {
+		if !containsString(b, value) {
+			return false
+		}
+	}
+	return true
 }
 
 func sameStrings(a, b []string) bool {
