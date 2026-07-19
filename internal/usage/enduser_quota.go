@@ -10,9 +10,9 @@ import (
 
 // EndUserQuota is the account-level limit/permission snapshot used by auth + quota.
 type EndUserQuota struct {
-	ID                   string
-	TenantID             string
-	DisplayName          string
+	ID          string
+	TenantID    string
+	DisplayName string
 	// Status is end_users.status (active/disabled/locked). Auth must refuse non-active accounts.
 	Status               string
 	PermissionProfileID  string
