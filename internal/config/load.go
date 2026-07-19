@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -71,6 +72,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.RequestBody.DiskThresholdMB = DefaultRequestBodyDiskThresholdMB
 	cfg.UsageStatisticsEnabled = false
 	cfg.SystemStatsCacheSeconds = 60
+	cfg.SystemStatsWebSocketMaxAgeSeconds = int(DefaultSystemStatsWebSocketMaxAge / time.Second)
 	cfg.RequestLogStorage.StoreContent = false
 	cfg.RequestLogStorage.ContentRetentionDays = 30
 	cfg.RequestLogStorage.CleanupIntervalMinutes = 1440
@@ -188,6 +190,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if cfg.SystemStatsCacheSeconds <= 0 {
 		cfg.SystemStatsCacheSeconds = 60
 	}
+	cfg.SystemStatsWebSocketMaxAgeSeconds = int(cfg.SystemStatsWebSocketMaxAge() / time.Second)
 	if cfg.Streaming.KeepAliveSeconds == 0 {
 		cfg.Streaming.KeepAliveSeconds = 15
 	}

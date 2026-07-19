@@ -6,6 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 )
@@ -14,9 +15,10 @@ var statsUpgrader = websocket.Upgrader{
 	CheckOrigin: util.WebsocketOriginAllowed,
 }
 
-// SystemStatsWebSocket handles GET /v0/management/system-stats/ws
-// It pushes SystemStats JSON at a configurable interval (default 3s).
-// The client may send {"interval": <seconds>} to adjust the push interval.
+// SystemStatsWebSocket handles GET /v0/management/system-stats/ws.
+// It pushes SystemStats JSON at a configurable interval and periodically rotates
+// only this management connection so nginx reloads can retire old workers.
+// Public model streaming endpoints are not affected.
 func (h *Handler) SystemStatsWebSocket(c *gin.Context) {
 	conn, err := statsUpgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
@@ -28,6 +30,8 @@ func (h *Handler) SystemStatsWebSocket(c *gin.Context) {
 	interval := 3 * time.Second
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	maxAgeTimer := time.NewTimer(h.systemStatsWebSocketMaxAge())
+	defer maxAgeTimer.Stop()
 
 	// Background reader: listen for client messages to adjust interval
 	clientMsg := make(chan json.RawMessage, 4)
@@ -57,6 +61,14 @@ func (h *Handler) SystemStatsWebSocket(c *gin.Context) {
 		select {
 		case <-done:
 			return
+		case <-maxAgeTimer.C:
+			deadline := time.Now().Add(2 * time.Second)
+			_ = conn.WriteControl(
+				websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseNormalClosure, "connection rotation"),
+				deadline,
+			)
+			return
 		case msg := <-clientMsg:
 			// Parse interval change request
 			var req struct {
@@ -66,7 +78,7 @@ func (h *Handler) SystemStatsWebSocket(c *gin.Context) {
 				ticker.Stop()
 				interval = time.Duration(req.Interval) * time.Second
 				ticker = time.NewTicker(interval)
-				log.Infof("system-stats ws: interval changed to %ds", req.Interval)
+				log.Debugf("system-stats ws: interval changed to %ds", req.Interval)
 			}
 		case <-ticker.C:
 			stats := h.collectSystemStats()
@@ -79,4 +91,13 @@ func (h *Handler) SystemStatsWebSocket(c *gin.Context) {
 			}
 		}
 	}
+}
+
+func (h *Handler) systemStatsWebSocketMaxAge() time.Duration {
+	if h == nil {
+		return config.DefaultSystemStatsWebSocketMaxAge
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.cfg.SystemStatsWebSocketMaxAge()
 }

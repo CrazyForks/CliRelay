@@ -147,6 +147,10 @@ usage-statistics-enabled: false
 # and channel latency) for this many seconds. CPU, memory, network, and concurrency stay live.
 system-stats-cache-seconds: 60
 
+# Rotate only the management system-monitor WebSocket after this many seconds so
+# nginx reloads can retire old workers. Public LLM streaming is not affected.
+system-stats-websocket-max-age-seconds: 300
+
 # Detailed request/response body retention settings for PostgreSQL request-log storage.
 request-log-storage:
   # When true, persist full request and response bodies in PostgreSQL.

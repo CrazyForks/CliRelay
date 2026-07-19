@@ -442,3 +442,34 @@ func TestLoadConfigDefaultsSystemStatsCacheToSixtySeconds(t *testing.T) {
 		t.Fatalf("SystemStatsCacheSeconds = %d, want 60", cfg.SystemStatsCacheSeconds)
 	}
 }
+
+func TestLoadConfigSanitizesSystemStatsWebSocketMaxAge(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		yaml string
+		want int
+	}{
+		{name: "default", yaml: "port: 8317\n", want: 300},
+		{name: "minimum", yaml: "system-stats-websocket-max-age-seconds: 1\n", want: 60},
+		{name: "custom", yaml: "system-stats-websocket-max-age-seconds: 600\n", want: 600},
+		{name: "maximum", yaml: "system-stats-websocket-max-age-seconds: 7200\n", want: 3600},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(configPath, []byte(tt.yaml), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			cfg, err := LoadConfig(configPath)
+			if err != nil {
+				t.Fatalf("LoadConfig returned error: %v", err)
+			}
+			if cfg.SystemStatsWebSocketMaxAgeSeconds != tt.want {
+				t.Fatalf("SystemStatsWebSocketMaxAgeSeconds = %d, want %d", cfg.SystemStatsWebSocketMaxAgeSeconds, tt.want)
+			}
+		})
+	}
+}

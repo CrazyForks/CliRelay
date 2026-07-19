@@ -9,7 +9,12 @@ import (
 	"time"
 )
 
-const DefaultMainAPIReadTimeout = 2 * time.Minute
+const (
+	DefaultMainAPIReadTimeout         = 2 * time.Minute
+	DefaultSystemStatsWebSocketMaxAge = 5 * time.Minute
+	MinSystemStatsWebSocketMaxAge     = time.Minute
+	MaxSystemStatsWebSocketMaxAge     = time.Hour
+)
 
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
@@ -96,6 +101,11 @@ type Config struct {
 	// fields (database sizes, log directory walk, latency aggregation) are cached.
 	// Lightweight CPU, memory, network and concurrency values remain live.
 	SystemStatsCacheSeconds int `yaml:"system-stats-cache-seconds" json:"system-stats-cache-seconds"`
+
+	// SystemStatsWebSocketMaxAgeSeconds rotates management monitoring WebSockets
+	// so old nginx workers are not pinned indefinitely across reloads. It does not
+	// apply to public model streaming endpoints.
+	SystemStatsWebSocketMaxAgeSeconds int `yaml:"system-stats-websocket-max-age-seconds" json:"system-stats-websocket-max-age-seconds"`
 
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
@@ -189,6 +199,20 @@ func (cfg *Config) MainAPIReadTimeout() time.Duration {
 		return DefaultMainAPIReadTimeout
 	}
 	return time.Duration(cfg.MainAPIReadTimeoutSeconds) * time.Second
+}
+
+func (cfg *Config) SystemStatsWebSocketMaxAge() time.Duration {
+	if cfg == nil || cfg.SystemStatsWebSocketMaxAgeSeconds <= 0 {
+		return DefaultSystemStatsWebSocketMaxAge
+	}
+	age := time.Duration(cfg.SystemStatsWebSocketMaxAgeSeconds) * time.Second
+	if age < MinSystemStatsWebSocketMaxAge {
+		return MinSystemStatsWebSocketMaxAge
+	}
+	if age > MaxSystemStatsWebSocketMaxAge {
+		return MaxSystemStatsWebSocketMaxAge
+	}
+	return age
 }
 
 // RequestBodyConfig controls public model API request-body handling.

@@ -392,6 +392,9 @@ func resolveDeferredUsageContent(inline, path string) string {
 		log.Errorf("usage: read deferred request log content: %v", err)
 		return inline
 	}
+	if err = os.Remove(path); err != nil && !os.IsNotExist(err) {
+		log.Warnf("usage: remove consumed deferred request log content: %v", err)
+	}
 	if inline == "" {
 		return string(data)
 	}

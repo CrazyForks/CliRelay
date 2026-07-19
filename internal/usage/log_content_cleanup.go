@@ -1,6 +1,7 @@
 package usage
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -155,7 +156,7 @@ func compactLogContentStorage(db *sql.DB) {
 	if db == nil {
 		return
 	}
-	compactLogContentStorageInternal(db, true)
+	compactLogContentStorageInternal(context.Background(), db, true)
 }
 
 type sqliteSpaceStats struct {
@@ -245,12 +246,12 @@ func walBytesOnDisk() int64 {
 	return info.Size()
 }
 
-func compactLogContentStorageInternal(db *sql.DB, allowOptimize bool) {
+func compactLogContentStorageInternal(ctx context.Context, db *sql.DB, allowOptimize bool) {
 	if db == nil {
 		return
 	}
 	if usageDriver == "postgres" {
-		if err := compactPostgresLogStorage(db); err != nil {
+		if err := compactPostgresLogStorage(ctx, db); err != nil {
 			log.Warnf("usage: postgres log storage compact skipped: %v", err)
 		}
 		return
@@ -292,11 +293,4 @@ func compactLogContentStorageInternal(db *sql.DB, allowOptimize bool) {
 	if walBytes := walBytesOnDisk(); walBytes > 0 && walBytes >= (64<<20) {
 		log.Warnf("usage: sqlite WAL remains large after checkpoint (%d bytes at %s); consider lowering cleanup-interval-minutes or checking long-lived transactions", walBytes, usageWALPath())
 	}
-}
-
-func compactPostgresLogStorage(db *sql.DB) error {
-	if db == nil {
-		return nil
-	}
-	return nil
 }

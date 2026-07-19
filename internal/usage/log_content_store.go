@@ -176,6 +176,7 @@ func startRequestLogMaintenance(db *sql.DB, driver string) {
 	requestLogMaintenanceCancel = cancel
 	wakeup := make(chan struct{}, 1)
 	requestLogMaintenanceWakeup.Store(wakeup)
+	postgresRequestLogHygieneDone.Store(false)
 	requestLogMaintenanceWG.Add(1)
 	// 请求日志维护协程属于 usage 存储子系统：
 	// - owner: startRequestLogMaintenance / stopRequestLogMaintenance
@@ -184,7 +185,7 @@ func startRequestLogMaintenance(db *sql.DB, driver string) {
 	// - 清理方式: cancel 后等待 requestLogMaintenanceWG，确保协程退出
 	go func() {
 		defer requestLogMaintenanceWG.Done()
-		runRequestLogMaintenancePass(db, driver)
+		runRequestLogMaintenancePass(ctx, db, driver)
 
 		for {
 			interval := time.Duration(currentRequestLogStorageConfig().CleanupIntervalMinutes) * time.Minute
@@ -207,9 +208,9 @@ func startRequestLogMaintenance(db *sql.DB, driver string) {
 				}
 				// Compaction/config wakeups should remain lightweight. The next
 				// timer is rebuilt from the latest runtime policy.
-				compactLogContentStorageInternal(db, false)
+				compactLogContentStorageInternal(ctx, db, false)
 			case <-timer.C:
-				runRequestLogMaintenancePass(db, driver)
+				runRequestLogMaintenancePass(ctx, db, driver)
 			}
 		}
 	}()
@@ -224,7 +225,7 @@ func stopRequestLogMaintenance() {
 	requestLogMaintenanceWakeup.Store((chan struct{})(nil))
 }
 
-func runRequestLogMaintenancePass(db *sql.DB, driver string) {
+func runRequestLogMaintenancePass(ctx context.Context, db *sql.DB, driver string) {
 	if db == nil {
 		return
 	}
@@ -283,7 +284,7 @@ func runRequestLogMaintenancePass(db *sql.DB, driver string) {
 	// Always run checkpoint + conditional vacuum. This ensures:
 	// - WAL is periodically truncated (usage.db-wal doesn't grow unbounded)
 	// - Large amounts of free pages can be reclaimed even if no rows were changed in this pass
-	compactLogContentStorageInternal(db, true)
+	compactLogContentStorageInternal(ctx, db, true)
 }
 
 func refreshRequestLogContentBytes(q logContentQuerier) {

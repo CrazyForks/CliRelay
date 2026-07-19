@@ -38,3 +38,25 @@ func TestCachedExpensiveSystemStatsAvoidsRepeatedLogDirectoryWalks(t *testing.T)
 		t.Fatalf("refreshed log size = %d, want 8", refreshed.LogDirSizeBytes)
 	}
 }
+
+func TestSystemStatsWebSocketMaxAgeUsesSafeBounds(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *config.Config
+		want time.Duration
+	}{
+		{name: "default", cfg: &config.Config{}, want: 5 * time.Minute},
+		{name: "minimum", cfg: &config.Config{SystemStatsWebSocketMaxAgeSeconds: 1}, want: time.Minute},
+		{name: "custom", cfg: &config.Config{SystemStatsWebSocketMaxAgeSeconds: 600}, want: 10 * time.Minute},
+		{name: "maximum", cfg: &config.Config{SystemStatsWebSocketMaxAgeSeconds: 7200}, want: time.Hour},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := NewHandler(tt.cfg, filepath.Join(t.TempDir(), "config.yaml"), nil)
+			t.Cleanup(h.Close)
+			if got := h.systemStatsWebSocketMaxAge(); got != tt.want {
+				t.Fatalf("systemStatsWebSocketMaxAge() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}

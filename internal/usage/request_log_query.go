@@ -533,8 +533,10 @@ func clearRequestLogs(db *sql.DB, options ClearRequestLogsOptions) (ClearRequest
 		if err != nil {
 			log.Warnf("usage: vacuum after request log cleanup failed: %v", err)
 		}
-	} else if err := compactPostgresLogStorage(db); err != nil {
-		log.Warnf("usage: compact request log storage after cleanup failed: %v", err)
+	} else {
+		// PostgreSQL maintenance is asynchronous and online; never make this
+		// management request wait for DDL or database maintenance.
+		triggerRequestLogCompaction()
 	}
 
 	if result.DeletedLogs > 0 || result.DeletedContents > 0 || result.ClearedBodyRows > 0 || result.ClearedDetailRows > 0 || result.ClearedLegacyRows > 0 {

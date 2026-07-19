@@ -114,6 +114,11 @@ func initializeRuntimeDataStack(cfg *config.Config, configPath string, loc *time
 	if cfg == nil {
 		return errors.New("config is nil")
 	}
+	if removed, err := usage.CleanupStaleDeferredUsageContentFiles(); err != nil {
+		log.WithError(err).Warn("usage: stale deferred content cleanup completed with errors")
+	} else if removed > 0 {
+		log.Infof("usage: removed %d stale deferred content file(s)", removed)
+	}
 	if err := usage.InitPostgres(cfg.Postgres, cfg.RequestLogStorage, loc); err != nil {
 		return err
 	}

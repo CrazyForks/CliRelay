@@ -17,6 +17,7 @@ func TestLoggerPluginPersistsDeferredContentFiles(t *testing.T) {
 		CleanupIntervalMinutes: 1440,
 	})
 
+	var deferredPaths []string
 	writeTemp := func(pattern, content string) string {
 		t.Helper()
 		file, err := os.CreateTemp("", pattern)
@@ -30,6 +31,7 @@ func TestLoggerPluginPersistsDeferredContentFiles(t *testing.T) {
 			t.Fatalf("close temp content: %v", err)
 		}
 		t.Cleanup(func() { _ = os.Remove(file.Name()) })
+		deferredPaths = append(deferredPaths, file.Name())
 		return file.Name()
 	}
 
@@ -46,6 +48,12 @@ func TestLoggerPluginPersistsDeferredContentFiles(t *testing.T) {
 		OutputContentPath: writeTemp("usage-output-*", output),
 		DetailContentPath: writeTemp("usage-detail-*", detail),
 	})
+
+	for _, path := range deferredPaths {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("consumed deferred content file still exists at %s: %v", path, err)
+		}
+	}
 
 	logs, err := QueryLogs(LogQueryParams{Page: 1, Size: 10, Days: 1, APIKeys: []string{"sk-deferred"}})
 	if err != nil {

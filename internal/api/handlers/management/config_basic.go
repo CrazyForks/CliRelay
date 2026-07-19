@@ -83,6 +83,8 @@ func copyProcessGlobalRuntimeToggles(src, dst *config.Config) {
 	dst.LogsMaxTotalSizeMB = src.LogsMaxTotalSizeMB
 	dst.ErrorLogsMaxFiles = src.ErrorLogsMaxFiles
 	dst.UsageStatisticsEnabled = src.UsageStatisticsEnabled
+	dst.SystemStatsCacheSeconds = src.SystemStatsCacheSeconds
+	dst.SystemStatsWebSocketMaxAgeSeconds = src.SystemStatsWebSocketMaxAgeSeconds
 	dst.WebsocketAuth = src.WebsocketAuth
 	dst.RequestRetry = src.RequestRetry
 	dst.MaxRetryInterval = src.MaxRetryInterval
