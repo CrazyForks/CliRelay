@@ -44,6 +44,24 @@ type PublicChartData struct {
 
 // QueryPublicChartData aggregates the public API-key lookup charts in one indexed pass.
 func QueryPublicChartData(apiKey string, days int) (PublicChartData, error) {
+	row := GetAPIKey(apiKey)
+	if row != nil && strings.TrimSpace(row.EndUserID) != "" {
+		return QueryPublicChartDataForEndUser(row.TenantID, row.EndUserID, days)
+	}
+	return queryPublicChartData(LogQueryParams{
+		TenantID: ResolveAPIKeyTenant(apiKey),
+		APIKeys:  ExpandPublicLookupAPIKeys(apiKey),
+	}, days)
+}
+
+func QueryPublicChartDataForEndUser(tenantID, endUserID string, days int) (PublicChartData, error) {
+	return queryPublicChartData(LogQueryParams{
+		TenantID:  tenantID,
+		EndUserID: endUserID,
+	}, days)
+}
+
+func queryPublicChartData(params LogQueryParams, days int) (PublicChartData, error) {
 	db := getReadDB()
 	if db == nil {
 		return PublicChartData{
@@ -65,12 +83,7 @@ func QueryPublicChartData(apiKey string, days int) (PublicChartData, error) {
 	statsCutoff := CutoffStartUTC(days).Format(time.RFC3339)
 	heatmapCutoff := CutoffStartUTC(heatmapDays).Format(time.RFC3339)
 
-	// Expand end-user-owned keys so portal multi-key accounts see full account usage.
-	params := LogQueryParams{
-		TenantID: ResolveAPIKeyTenant(apiKey),
-		APIKeys:  ExpandPublicLookupAPIKeys(apiKey),
-		Days:     scanDays,
-	}
+	params.Days = scanDays
 	where, args := buildWhereClause(params)
 	queryArgs := make([]interface{}, 0, len(args)+2)
 	queryArgs = append(queryArgs, statsCutoff, heatmapCutoff)

@@ -54,9 +54,8 @@ func (h *Handler) GetPublicUsageByAPIKey(c *gin.Context) {
 		return
 	}
 
-	apiKey := req.APIKey
-	if apiKey == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "api_key parameter is required"})
+	subject, ok := h.resolvePublicUsageSubject(c, req.APIKey)
+	if !ok {
 		return
 	}
 
@@ -65,9 +64,21 @@ func (h *Handler) GetPublicUsageByAPIKey(c *gin.Context) {
 		snapshot = h.usageStats.Snapshot()
 	}
 
-	// Find the matching API key entry
-	apiData, found := snapshot.APIs[apiKey]
-	maskedAPIKey := maskKey(apiKey)
+	keys := []string{subject.APIKey}
+	if subject.EndUserID != "" {
+		keys = usage.ListAPIKeySecretsForEndUserForTenant(subject.TenantID, subject.EndUserID)
+	}
+	apiData, hasUsage := aggregatePublicAPISnapshots(snapshot.APIs, keys)
+	found := hasUsage
+	if subject.EndUserID != "" && subject.APIKey == "" {
+		found = true
+	} else if subject.APIKeyRow != nil {
+		// A persisted disabled key must not be revived merely because the in-memory
+		// snapshot still contains older usage. Unknown legacy keys remain supported
+		// when the snapshot itself proves that the presented secret has usage.
+		found = !subject.APIKeyRow.Disabled
+	}
+	maskedAPIKey := maskKey(subject.APIKey)
 	if !found {
 		c.JSON(http.StatusOK, gin.H{
 			"usage": usage.StatisticsSnapshot{
@@ -78,6 +89,9 @@ func (h *Handler) GetPublicUsageByAPIKey(c *gin.Context) {
 			"found":          false,
 		})
 		return
+	}
+	if !hasUsage {
+		apiData.Models = map[string]usage.ModelSnapshot{}
 	}
 
 	// Return only the matched API key's data. Use the masked key as the public
@@ -98,6 +112,27 @@ func (h *Handler) GetPublicUsageByAPIKey(c *gin.Context) {
 		"api_key_masked": maskedAPIKey,
 		"found":          true,
 	})
+}
+
+func aggregatePublicAPISnapshots(items map[string]usage.APISnapshot, keys []string) (usage.APISnapshot, bool) {
+	result := usage.APISnapshot{Models: make(map[string]usage.ModelSnapshot)}
+	found := false
+	for _, key := range keys {
+		item, ok := items[key]
+		if !ok {
+			continue
+		}
+		found = true
+		result.TotalRequests += item.TotalRequests
+		result.TotalTokens += item.TotalTokens
+		for model, stats := range item.Models {
+			merged := result.Models[model]
+			merged.TotalRequests += stats.TotalRequests
+			merged.TotalTokens += stats.TotalTokens
+			result.Models[model] = merged
+		}
+	}
+	return result, found
 }
 
 // ImportUsageStatistics merges a previously exported usage snapshot into memory.

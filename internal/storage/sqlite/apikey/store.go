@@ -266,6 +266,31 @@ func (s Store) Get(key string) *APIKeyRow {
 	return entry
 }
 
+// GetAnyTenant resolves a globally unique API key secret without assuming the
+// system tenant. Public authentication starts from the presented secret, so
+// tenant scope can only be applied after this lookup succeeds.
+func (s Store) GetAnyTenant(key string) *APIKeyRow {
+	if s.db == nil {
+		return nil
+	}
+
+	trimmed := strings.TrimSpace(key)
+	if trimmed == "" {
+		return nil
+	}
+
+	row := s.db.QueryRow(`SELECT tenant_id, key, name, disabled, id, daily_limit, total_quota,
+		permission_profile_id, spending_limit, daily_spending_limit, concurrency_limit, rpm_limit, tpm_limit,
+		allowed_models, allowed_channels, allowed_channel_groups, system_prompt, created_at, updated_at,
+		end_user_id, is_default
+		FROM api_keys WHERE key = ?`, trimmed)
+	entry, ok := scanAPIKeyRowWithTenant(row)
+	if !ok {
+		return nil
+	}
+	return entry
+}
+
 func (s Store) GetByID(id string) *APIKeyRow {
 	if s.db == nil {
 		return nil
@@ -286,6 +311,30 @@ func (s Store) GetByID(id string) *APIKeyRow {
 		return nil
 	}
 	entry.TenantID = s.tenantID
+	return entry
+}
+
+// GetByIDAnyTenant resolves a globally unique stable key id without assuming
+// the system tenant.
+func (s Store) GetByIDAnyTenant(id string) *APIKeyRow {
+	if s.db == nil {
+		return nil
+	}
+
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
+		return nil
+	}
+
+	row := s.db.QueryRow(`SELECT tenant_id, key, name, disabled, id, daily_limit, total_quota,
+		permission_profile_id, spending_limit, daily_spending_limit, concurrency_limit, rpm_limit, tpm_limit,
+		allowed_models, allowed_channels, allowed_channel_groups, system_prompt, created_at, updated_at,
+		end_user_id, is_default
+		FROM api_keys WHERE id = ?`, trimmed)
+	entry, ok := scanAPIKeyRowWithTenant(row)
+	if !ok {
+		return nil
+	}
 	return entry
 }
 

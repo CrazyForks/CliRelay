@@ -17,6 +17,21 @@ func (s *Service) PublicChartData(apiKey string, days int) (map[string]any, erro
 	}, nil
 }
 
+func (s *Service) PublicChartDataForEndUser(endUserID string, days int) (map[string]any, error) {
+	chartData, err := usage.QueryPublicChartDataForEndUser(s.tenantID, endUserID, days)
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]any{
+		"daily_series":       chartData.DailySeries,
+		"heatmap_series":     chartData.HeatmapSeries,
+		"model_distribution": chartData.ModelDistribution,
+		"stats":              chartData.Stats,
+		"api_key_name":       usage.DisplayNameForEndUser(endUserID),
+	}, nil
+}
+
 func (s *Service) UsageChartData(apiKey string, days int) (map[string]any, error) {
 	daily, err := usage.QueryDailySeriesForTenant(s.tenantID, apiKey, days)
 	if err != nil {

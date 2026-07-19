@@ -18,6 +18,8 @@ type User struct {
 	Version            int64      `json:"version"`
 	// APIKeyCount is filled on list; 0 means unknown/none.
 	APIKeyCount int `json:"api_key_count,omitempty"`
+	// DailySpendingUsed is the account-level effective spend for the current project day.
+	DailySpendingUsed float64 `json:"daily-spending-used"`
 
 	// Account-level quota/permissions: shared by every API key under this user.
 	PermissionProfileID  string   `json:"permission-profile-id,omitempty"`

@@ -10,9 +10,11 @@ import (
 
 // EndUserQuota is the account-level limit/permission snapshot used by auth + quota.
 type EndUserQuota struct {
-	ID                   string
-	TenantID             string
-	DisplayName          string
+	ID          string
+	TenantID    string
+	DisplayName string
+	// Status is end_users.status (active/disabled/locked). Auth must refuse non-active accounts.
+	Status               string
 	PermissionProfileID  string
 	DailyLimit           int
 	TotalQuota           int
@@ -52,7 +54,7 @@ func GetEndUserQuota(endUserID string) *EndUserQuota {
 	var q EndUserQuota
 	var modelsJSON, channelsJSON, groupsJSON string
 	err := db.QueryRow(`
-		SELECT id, tenant_id, display_name,
+		SELECT id, tenant_id, display_name, COALESCE(status, 'active'),
 			COALESCE(permission_profile_id, ''), COALESCE(daily_limit, 0), COALESCE(total_quota, 0),
 			COALESCE(spending_limit, 0), COALESCE(daily_spending_limit, 0),
 			COALESCE(concurrency_limit, 0), COALESCE(rpm_limit, 0), COALESCE(tpm_limit, 0),
@@ -60,7 +62,7 @@ func GetEndUserQuota(endUserID string) *EndUserQuota {
 			COALESCE(system_prompt, '')
 		FROM end_users WHERE id = ?
 	`, endUserID).Scan(
-		&q.ID, &q.TenantID, &q.DisplayName,
+		&q.ID, &q.TenantID, &q.DisplayName, &q.Status,
 		&q.PermissionProfileID, &q.DailyLimit, &q.TotalQuota,
 		&q.SpendingLimit, &q.DailySpendingLimit,
 		&q.ConcurrencyLimit, &q.RPMLimit, &q.TPMLimit,
@@ -105,6 +107,14 @@ func EffectiveEndUserQuota(q EndUserQuota) EndUserQuota {
 
 // ListAPIKeyIDsForEndUser returns stable key ids owned by the end user.
 func ListAPIKeyIDsForEndUser(endUserID string) []string {
+	return listAPIKeyValuesForEndUser("", endUserID, "id")
+}
+
+func ListAPIKeyIDsForEndUserForTenant(tenantID, endUserID string) []string {
+	return listAPIKeyValuesForEndUser(tenantID, endUserID, "id")
+}
+
+func listAPIKeyValuesForEndUser(tenantID, endUserID, column string) []string {
 	db := getReadDB()
 	if db == nil {
 		return nil
@@ -113,7 +123,13 @@ func ListAPIKeyIDsForEndUser(endUserID string) []string {
 	if endUserID == "" {
 		return nil
 	}
-	rows, err := db.Query(`SELECT id FROM api_keys WHERE end_user_id = ? AND id != ''`, endUserID)
+	query := `SELECT ` + column + ` FROM api_keys WHERE end_user_id = ? AND ` + column + ` != ''`
+	args := []interface{}{endUserID}
+	if strings.TrimSpace(tenantID) != "" {
+		query += ` AND tenant_id = ?`
+		args = append(args, normalizeTenantID(tenantID))
+	}
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil
 	}
@@ -134,31 +150,11 @@ func ListAPIKeyIDsForEndUser(endUserID string) []string {
 
 // ListAPIKeySecretsForEndUser returns raw key secrets owned by the end user (legacy log rows).
 func ListAPIKeySecretsForEndUser(endUserID string) []string {
-	db := getReadDB()
-	if db == nil {
-		return nil
-	}
-	endUserID = strings.TrimSpace(endUserID)
-	if endUserID == "" {
-		return nil
-	}
-	rows, err := db.Query(`SELECT key FROM api_keys WHERE end_user_id = ? AND key != ''`, endUserID)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	out := make([]string, 0)
-	for rows.Next() {
-		var key string
-		if err := rows.Scan(&key); err != nil {
-			return out
-		}
-		key = strings.TrimSpace(key)
-		if key != "" {
-			out = append(out, key)
-		}
-	}
-	return out
+	return listAPIKeyValuesForEndUser("", endUserID, "key")
+}
+
+func ListAPIKeySecretsForEndUserForTenant(tenantID, endUserID string) []string {
+	return listAPIKeyValuesForEndUser(tenantID, endUserID, "key")
 }
 
 // ExpandPublicLookupAPIKeys expands a presented API key into the full account key pool
@@ -180,7 +176,7 @@ func ExpandPublicLookupAPIKeys(apiKey string) []string {
 		}
 		return []string{trimmed}
 	}
-	secrets := ListAPIKeySecretsForEndUser(endUserID)
+	secrets := ListAPIKeySecretsForEndUserForTenant(row.TenantID, endUserID)
 	if len(secrets) == 0 {
 		if k := strings.TrimSpace(row.Key); k != "" {
 			return []string{k}
@@ -225,12 +221,12 @@ func ResolveAPIKeyDisplayName(row *APIKeyRow, fallback string) string {
 	return strings.TrimSpace(fallback)
 }
 
-func buildEndUserAPIKeySelectorClause(endUserID string) (string, []interface{}) {
-	ids := ListAPIKeyIDsForEndUser(endUserID)
-	secrets := ListAPIKeySecretsForEndUser(endUserID)
+func buildEndUserAPIKeySelectorPredicate(tenantID, endUserID string) (string, []interface{}) {
+	ids := ListAPIKeyIDsForEndUserForTenant(tenantID, endUserID)
+	secrets := ListAPIKeySecretsForEndUserForTenant(tenantID, endUserID)
 	if len(ids) == 0 && len(secrets) == 0 {
 		// No keys yet: match nothing.
-		return " WHERE 1 = 0", nil
+		return "1 = 0", nil
 	}
 	parts := make([]string, 0, 2)
 	args := make([]interface{}, 0, len(ids)+len(secrets))
@@ -249,9 +245,19 @@ func buildEndUserAPIKeySelectorClause(endUserID string) (string, []interface{}) 
 			args = append(args, key)
 		}
 		// Include legacy rows that only stored the raw secret.
-		parts = append(parts, `(api_key_id = '' AND api_key IN (`+strings.Join(ph, ",")+`))`)
+		parts = append(parts, `(trim(coalesce(api_key_id, '')) = '' AND api_key IN (`+strings.Join(ph, ",")+`))`)
 	}
-	return " WHERE (" + strings.Join(parts, " OR ") + ")", args
+	return "(" + strings.Join(parts, " OR ") + ")", args
+}
+
+func buildEndUserAPIKeySelectorClause(endUserID string) (string, []interface{}) {
+	quota := GetEndUserQuota(endUserID)
+	tenantID := ""
+	if quota != nil {
+		tenantID = quota.TenantID
+	}
+	predicate, args := buildEndUserAPIKeySelectorPredicate(tenantID, endUserID)
+	return " WHERE " + predicate, args
 }
 
 // CountTodayByEndUser counts requests across all keys of the end user today.
@@ -315,28 +321,13 @@ func QueryTotalCostByEndUser(endUserID string) (float64, error) {
 	return total, nil
 }
 
-// QueryTodayCostByEndUser sums project-day cost across all keys of the end user.
-// Daily spending reset remains per-key for now; account pool uses raw day sum.
-// ponytail: no end-user-level daily spending reset yet; add when product needs account-wide reset.
+// QueryTodayCostByEndUser returns account-level project-day spend after the latest same-day reset baseline.
 func QueryTodayCostByEndUser(endUserID string) (float64, error) {
-	db := getDB()
-	if db == nil {
+	quota := GetEndUserQuota(endUserID)
+	if quota == nil {
 		return 0, nil
 	}
-	clause, args := buildEndUserAPIKeySelectorClause(endUserID)
-	if clause == "" {
-		return 0, nil
-	}
-	queryArgs := append(args, CutoffStartUTC(1).Format(time.RFC3339))
-	var total float64
-	err := db.QueryRow(
-		"SELECT COALESCE(SUM(cost), 0) FROM request_logs"+clause+" AND timestamp >= ?",
-		queryArgs...,
-	).Scan(&total)
-	if err != nil {
-		return 0, fmt.Errorf("usage: query today cost by end user: %w", err)
-	}
-	return total, nil
+	return QueryTodayEffectiveCostByEndUserForTenant(quota.TenantID, endUserID)
 }
 
 // EnsureEndUserQuotaColumns adds account quota columns on SQLite bootstraps / tests.

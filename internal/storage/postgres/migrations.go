@@ -27,8 +27,23 @@ func RuntimeMigrations() []Migration {
 		{Version: "202607170003_end_users_and_tokens", SQL: endUsersAndTokensSQL},
 		// Account-level quota/permissions: shared across all API keys of an end user.
 		{Version: "202607190001_end_user_account_quota", SQL: endUserAccountQuotaSQL},
+		// Account-level same-day spending reset baseline for end-user quota pools.
+		{Version: "202607190002_end_user_daily_spending_resets", SQL: endUserDailySpendingResetsSQL},
 	}
 }
+
+const endUserDailySpendingResetsSQL = `
+CREATE TABLE IF NOT EXISTS end_user_daily_spending_resets (
+  tenant_id     UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
+  end_user_id   UUID NOT NULL,
+  day_key       TEXT NOT NULL DEFAULT '',
+  cost_baseline DOUBLE PRECISION NOT NULL DEFAULT 0,
+  reset_at      TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (tenant_id, end_user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_end_user_daily_spending_resets_day
+  ON end_user_daily_spending_resets(tenant_id, day_key);
+`
 
 // Quota + permission template live on end_users so multiple keys share one pool.
 // Backfill from each user's default key (or earliest key) then zero owned key limits

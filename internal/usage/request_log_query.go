@@ -50,7 +50,7 @@ func QueryLogs(params LogQueryParams) (LogQueryResult, error) {
 
 	// Fetch page
 	offset := (params.Page - 1) * params.Size
-	querySQL := "SELECT id, timestamp, api_key, api_key_name, model, upstream_model, vision_fallback_model, source, channel_name, auth_index, auth_subject_id, " +
+	querySQL := "SELECT id, timestamp, api_key, api_key_id, api_key_name, model, upstream_model, vision_fallback_model, source, channel_name, auth_index, auth_subject_id, " +
 		"failed, streaming, latency_ms, first_token_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, " +
 		"cost, " +
 		"(CASE WHEN EXISTS (SELECT 1 FROM request_log_content content WHERE content.tenant_id = request_logs.tenant_id AND content.log_id = request_logs.id) " +
@@ -72,7 +72,7 @@ func QueryLogs(params LogQueryParams) (LogQueryResult, error) {
 		var ts storedTime
 		var failedInt, streamingInt, hasContentInt int
 		if err := rows.Scan(
-			&row.ID, &ts, &row.APIKey, &row.APIKeyName, &row.Model, &row.UpstreamModel, &row.VisionFallbackModel, &row.Source, &row.ChannelName,
+			&row.ID, &ts, &row.APIKey, &row.APIKeyID, &row.APIKeyName, &row.Model, &row.UpstreamModel, &row.VisionFallbackModel, &row.Source, &row.ChannelName,
 			&row.AuthIndex, &row.AuthSubjectID, &failedInt, &streamingInt, &row.LatencyMs, &row.FirstTokenMs,
 			&row.InputTokens, &row.OutputTokens, &row.ReasoningTokens,
 			&row.CachedTokens, &row.TotalTokens, &row.Cost, &hasContentInt,
@@ -99,7 +99,7 @@ func QueryLogs(params LogQueryParams) (LogQueryResult, error) {
 	}, nil
 }
 
-// hydrateAPIKeyDisplayNames prefers live end-user account names for owned keys.
+// hydrateAPIKeyDisplayNames keeps account and credential identity separate.
 func hydrateAPIKeyDisplayNames(tenantID string, items []LogRow) {
 	if len(items) == 0 {
 		return
@@ -108,7 +108,10 @@ func hydrateAPIKeyDisplayNames(tenantID string, items []LogRow) {
 	byKey := currentAPIKeyRowsByKeyForTenant(tenantID)
 	for i := range items {
 		var row *APIKeyRow
-		if r, ok := byKey[strings.TrimSpace(items[i].APIKey)]; ok {
+		if r, ok := byID[strings.TrimSpace(items[i].APIKeyID)]; ok {
+			copy := r
+			row = &copy
+		} else if r, ok := byKey[strings.TrimSpace(items[i].APIKey)]; ok {
 			copy := r
 			row = &copy
 		} else {
@@ -117,17 +120,19 @@ func hydrateAPIKeyDisplayNames(tenantID string, items []LogRow) {
 				row = live
 			}
 		}
-		// Prefer id map when we can match key to id via byKey first.
 		if row != nil {
-			if id := strings.TrimSpace(row.ID); id != "" {
-				if r, ok := byID[id]; ok {
-					copy := r
-					row = &copy
-				}
+			items[i].APIKeyID = strings.TrimSpace(row.ID)
+			items[i].APIKeyOwnName = strings.TrimSpace(row.Name)
+			items[i].EndUserDisplayName = DisplayNameForEndUser(row.EndUserID)
+			if items[i].EndUserDisplayName != "" {
+				items[i].APIKeyName = items[i].EndUserDisplayName
+			} else if items[i].APIKeyOwnName != "" {
+				items[i].APIKeyName = items[i].APIKeyOwnName
 			}
-			if label := ResolveAPIKeyDisplayName(row, items[i].APIKeyName); label != "" {
-				items[i].APIKeyName = label
-			}
+		} else {
+			// Legacy rows have only one snapshot label. Preserve it as the key name;
+			// no account identity is inferred without a trusted ownership row.
+			items[i].APIKeyOwnName = strings.TrimSpace(items[i].APIKeyName)
 		}
 	}
 }
@@ -560,6 +565,7 @@ func ClearAllRequestLogsForTenant(tenantID string) (ClearRequestLogsResult, erro
 // multi-value counterparts. It trims spaces, deduplicates, and removes empties.
 func normalizeLogQueryParams(params LogQueryParams) LogQueryParams {
 	params.TenantID = normalizeTenantID(params.TenantID)
+	params.EndUserID = strings.TrimSpace(params.EndUserID)
 	if params.APIKey != "" {
 		params.APIKeys = append(params.APIKeys, params.APIKey)
 		params.APIKey = ""
@@ -612,6 +618,12 @@ func buildWhereClause(params LogQueryParams) (string, []interface{}) {
 	// Time range: days=1 means "today", days=7 means "last 7 days", etc.
 	conditions = append(conditions, "timestamp >= ?")
 	args = append(args, CutoffStartUTC(params.Days).Format(time.RFC3339))
+
+	if params.EndUserID != "" {
+		predicate, selectorArgs := buildEndUserAPIKeySelectorPredicate(params.TenantID, params.EndUserID)
+		conditions = append(conditions, predicate)
+		args = append(args, selectorArgs...)
+	}
 
 	// API Key multi-value filter
 	if len(params.APIKeys) > 0 {

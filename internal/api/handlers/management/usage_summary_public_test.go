@@ -337,12 +337,13 @@ func TestGetPublicUsageSummary_ResolvesBusinessTenant(t *testing.T) {
 		"", "",
 	)
 
-	// Sanity: system-tenant lookup must not see this key (precondition of the bug).
-	if row := usage.GetAPIKey(apiKey); row != nil {
-		t.Fatalf("precondition failed: GetAPIKey (system tenant) unexpectedly found business key")
+	// Regression guard: public secret lookup discovers the owning tenant globally,
+	// while the explicit tenant-scoped lookup still resolves the same row.
+	if row := usage.GetAPIKey(apiKey); row == nil || row.TenantID != tenantID {
+		t.Fatalf("GetAPIKey = %#v, want business tenant key", row)
 	}
 	if row := usage.GetAPIKeyForTenant(tenantID, apiKey); row == nil {
-		t.Fatalf("precondition failed: business tenant key missing")
+		t.Fatalf("business tenant key missing")
 	}
 
 	body := []byte(`{"api_key":"` + apiKey + `"}`)
@@ -374,5 +375,50 @@ func TestGetPublicUsageSummary_ResolvesBusinessTenant(t *testing.T) {
 	}
 	if got.Stats.TotalCalls != 2 {
 		t.Errorf("total_calls = %d, want 2", got.Stats.TotalCalls)
+	}
+}
+
+func TestGetPublicUsageSummary_AggregatesOwnedBusinessTenantKeys(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupUsageSummaryTestDB(t)
+
+	tenantID := "00000000-0000-0000-0000-0000000000ab"
+	endUserID := "00000000-0000-0000-0000-0000000000bc"
+	keyA := "sk-business-owned-a"
+	keyB := "sk-business-owned-b"
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, row := range []usage.APIKeyRow{
+		{ID: "00000000-0000-0000-0000-0000000000a1", Key: keyA, Name: "Laptop", EndUserID: endUserID, CreatedAt: now, UpdatedAt: now},
+		{ID: "00000000-0000-0000-0000-0000000000b1", Key: keyB, Name: "Automation", EndUserID: endUserID, CreatedAt: now, UpdatedAt: now},
+	} {
+		if err := usage.UpsertAPIKeyForTenant(tenantID, row); err != nil {
+			t.Fatalf("UpsertAPIKeyForTenant(%s): %v", row.Key, err)
+		}
+		insertTestLog(t, row.Key)
+	}
+
+	body := []byte(`{"api_key":"` + keyB + `"}`)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/public/usage/summary", bytes.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	h := NewHandler(&config.Config{}, "", nil)
+	h.GetPublicUsageSummary(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got struct {
+		Found bool `json:"found"`
+		Stats struct {
+			TotalCalls int64 `json:"total_calls"`
+		} `json:"stats"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !got.Found || got.Stats.TotalCalls != 2 {
+		t.Fatalf("summary = %+v, want found and two account calls", got)
 	}
 }

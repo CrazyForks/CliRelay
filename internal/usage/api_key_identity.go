@@ -19,11 +19,10 @@ func ResolveAPIKeyIdentity(key string) *APIKeyIdentity {
 	if row == nil || strings.TrimSpace(row.ID) == "" {
 		return nil
 	}
-	name := ResolveAPIKeyDisplayName(row, row.Name)
 	return &APIKeyIdentity{
 		ID:   strings.TrimSpace(row.ID),
 		Key:  strings.TrimSpace(row.Key),
-		Name: name,
+		Name: strings.TrimSpace(row.Name),
 	}
 }
 

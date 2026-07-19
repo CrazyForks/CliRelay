@@ -166,6 +166,26 @@ func QueryLogContentForKey(id int64, apiKey string) (LogContentResult, error) {
 	return fallback, nil
 }
 
+// QueryLogContentForEndUser retrieves one log only when it belongs to the
+// authenticated end-user account's stable key-id / legacy-secret pool.
+func QueryLogContentForEndUser(tenantID, endUserID string, id int64) (LogContentResult, error) {
+	tenantID = normalizeTenantID(tenantID)
+	db := getReadDB()
+	if db == nil {
+		return LogContentResult{}, fmt.Errorf("usage: database not initialised")
+	}
+	predicate, args := buildEndUserAPIKeySelectorPredicate(tenantID, endUserID)
+	queryArgs := append([]interface{}{tenantID, id}, args...)
+	var matched int
+	if err := db.QueryRow(
+		"SELECT 1 FROM request_logs WHERE tenant_id = ? AND id = ? AND "+predicate,
+		queryArgs...,
+	).Scan(&matched); err != nil {
+		return LogContentResult{}, fmt.Errorf("usage: query log content: %w", err)
+	}
+	return QueryLogContentForTenant(tenantID, id)
+}
+
 // QueryLogContentPartForKey retrieves only one side (input/output) of the stored request/response content
 // for a single entry, but only if it belongs to the given API key.
 func QueryLogContentPartForKey(id int64, apiKey string, part string) (LogContentPartResult, error) {
@@ -226,4 +246,22 @@ func QueryLogContentPartForKey(id int64, apiKey string, part string) (LogContent
 		return LogContentPartResult{}, fmt.Errorf("usage: query log content part: %w", err)
 	}
 	return fallback, nil
+}
+
+func QueryLogContentPartForEndUser(tenantID, endUserID string, id int64, part string) (LogContentPartResult, error) {
+	tenantID = normalizeTenantID(tenantID)
+	db := getReadDB()
+	if db == nil {
+		return LogContentPartResult{}, fmt.Errorf("usage: database not initialised")
+	}
+	predicate, args := buildEndUserAPIKeySelectorPredicate(tenantID, endUserID)
+	queryArgs := append([]interface{}{tenantID, id}, args...)
+	var matched int
+	if err := db.QueryRow(
+		"SELECT 1 FROM request_logs WHERE tenant_id = ? AND id = ? AND "+predicate,
+		queryArgs...,
+	).Scan(&matched); err != nil {
+		return LogContentPartResult{}, fmt.Errorf("usage: query log content part: %w", err)
+	}
+	return QueryLogContentPartForTenant(tenantID, id, part)
 }

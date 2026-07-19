@@ -158,12 +158,13 @@ func (h *UsageLogsHandler) GetPublicUsageLogs(c *gin.Context) {
 		c.JSON(status, gin.H{"error": message})
 		return
 	}
-	if req.APIKey == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "api_key parameter is required"})
+	subject, ok := h.resolvePublicUsageSubject(c, req.APIKey)
+	if !ok {
 		return
 	}
-	payload, err := h.serviceForTenant(usage.ResolveAPIKeyTenant(req.APIKey)).PublicUsageLogs(managementusagelogs.PublicLogQueryInput{
-		APIKey:          req.APIKey,
+	payload, err := h.serviceForTenant(subject.TenantID).PublicUsageLogs(managementusagelogs.PublicLogQueryInput{
+		APIKey:          subject.APIKey,
+		EndUserID:       subject.EndUserID,
 		Models:          req.Models,
 		Channels:        req.Channels,
 		Statuses:        req.Statuses,
@@ -189,11 +190,18 @@ func (h *UsageLogsHandler) GetPublicUsageChartData(c *gin.Context) {
 		c.JSON(status, gin.H{"error": message})
 		return
 	}
-	if req.APIKey == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "api_key parameter is required"})
+	subject, ok := h.resolvePublicUsageSubject(c, req.APIKey)
+	if !ok {
 		return
 	}
-	payload, err := h.serviceForTenant(usage.ResolveAPIKeyTenant(req.APIKey)).PublicChartData(req.APIKey, req.Days)
+	service := h.serviceForTenant(subject.TenantID)
+	var payload map[string]any
+	var err error
+	if subject.EndUserID != "" {
+		payload, err = service.PublicChartDataForEndUser(subject.EndUserID, req.Days)
+	} else {
+		payload, err = service.PublicChartData(subject.APIKey, req.Days)
+	}
 	if err != nil {
 		log.Warnf("management usage logs: public chart data failed: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -210,15 +218,20 @@ func (h *UsageLogsHandler) GetPublicLogContent(c *gin.Context) {
 		c.JSON(status, gin.H{"error": message})
 		return
 	}
-	if req.APIKey == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "api_key parameter is required"})
+	subject, ok := h.resolvePublicUsageSubject(c, req.APIKey)
+	if !ok {
 		return
 	}
 	id, ok := parseLogID(c)
 	if !ok {
 		return
 	}
-	renderLogContentResponse(c, h.serviceForTenant(usage.ResolveAPIKeyTenant(req.APIKey)).PublicLogContent(id, req.APIKey, req.Part, req.Format))
+	service := h.serviceForTenant(subject.TenantID)
+	if subject.EndUserID != "" {
+		renderLogContentResponse(c, service.PublicLogContentForEndUser(id, subject.EndUserID, req.Part, req.Format))
+		return
+	}
+	renderLogContentResponse(c, service.PublicLogContent(id, subject.APIKey, req.Part, req.Format))
 }
 
 // GetUsageChartData returns pre-aggregated chart data for the management portal.

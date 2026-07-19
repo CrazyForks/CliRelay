@@ -737,6 +737,11 @@ func initOpenedDBLocked(db, readDB *sql.DB, dbPath, driver string, storageCfg co
 		usageDB, usageReadDB = nil, nil
 		return err
 	}
+	if err := bootstrapEndUserDailySpendingResets(db); err != nil {
+		_ = db.Close()
+		usageDB, usageReadDB = nil, nil
+		return err
+	}
 	log.Debugf("usage: initializing pricing table")
 	initPricingTable(db)
 	log.Debugf("usage: initializing model config tables")
@@ -851,7 +856,8 @@ func insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstr
 		if apiKeyID == "" {
 			apiKeyID = identity.ID
 		}
-		// Always prefer live identity label (end-user display name when owned).
+		// Always prefer the live key's own name. End-user display name is hydrated
+		// independently on reads so account and credential identity are not conflated.
 		if name := strings.TrimSpace(identity.Name); name != "" {
 			apiKeyName = name
 		} else if apiKeyName == "" {

@@ -45,6 +45,13 @@ func buildKeyConfigMap(cfg *sdkconfig.SDKConfig) map[string]keyConfig {
 		if trimmed == "" || entry.Disabled {
 			continue
 		}
+		// Frozen/locked accounts stay out of the auth map even if individual keys are enabled.
+		if endUserID := strings.TrimSpace(entry.EndUserID); endUserID != "" {
+			q := usage.GetEndUserQuota(endUserID)
+			if q == nil || strings.TrimSpace(q.Status) != "active" {
+				continue
+			}
+		}
 		if _, exists := result[trimmed]; exists {
 			continue
 		}

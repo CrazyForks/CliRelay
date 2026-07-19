@@ -120,3 +120,46 @@ func (s *Service) PublicLogContent(id int64, apiKey, part, format string) LogCon
 
 	return LogContentResponse{Status: http.StatusOK, Payload: result}
 }
+
+func (s *Service) PublicLogContentForEndUser(id int64, endUserID, part, format string) LogContentResponse {
+	if part == "details" {
+		return LogContentResponse{Status: http.StatusForbidden, Payload: map[string]any{"error": "request details are only available in the management API"}}
+	}
+	if format == "text" && part == "both" {
+		return LogContentResponse{Status: http.StatusBadRequest, Payload: map[string]any{"error": "format=text requires part=input or part=output"}}
+	}
+	if part == "both" {
+		result, err := usage.QueryLogContentForEndUser(s.tenantID, endUserID, id)
+		if err != nil {
+			if strings.Contains(err.Error(), "no rows") {
+				return LogContentResponse{Status: http.StatusNotFound, Payload: map[string]any{"error": "log entry not found"}}
+			}
+			return LogContentResponse{Status: http.StatusInternalServerError, Payload: map[string]any{"error": err.Error()}}
+		}
+		return LogContentResponse{Status: http.StatusOK, Payload: result}
+	}
+
+	result, err := usage.QueryLogContentPartForEndUser(s.tenantID, endUserID, id, part)
+	if err != nil {
+		if strings.Contains(err.Error(), "no rows") {
+			return LogContentResponse{Status: http.StatusNotFound, Payload: map[string]any{"error": "log entry not found"}}
+		}
+		return LogContentResponse{Status: http.StatusInternalServerError, Payload: map[string]any{"error": err.Error()}}
+	}
+	if format == "text" {
+		headers := map[string]string{
+			"X-Log-Id":   strconv.FormatInt(result.ID, 10),
+			"X-Log-Part": result.Part,
+		}
+		if strings.TrimSpace(result.Model) != "" {
+			headers["X-Model"] = result.Model
+		}
+		return LogContentResponse{
+			Status:      http.StatusOK,
+			ContentType: "text/plain; charset=utf-8",
+			Headers:     headers,
+			Text:        result.Content,
+		}
+	}
+	return LogContentResponse{Status: http.StatusOK, Payload: result}
+}

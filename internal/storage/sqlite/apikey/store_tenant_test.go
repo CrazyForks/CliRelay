@@ -39,6 +39,34 @@ func TestStoreTenantIsolation(t *testing.T) {
 	}
 }
 
+func TestStoreAnyTenantLookupFindsGloballyUniqueKeyAndID(t *testing.T) {
+	t.Parallel()
+
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	InitTable(db)
+
+	const tenantID = "00000000-0000-0000-0000-00000000000a"
+	business := NewTenantStore(db, tenantID)
+	if err := business.Upsert(APIKeyRow{ID: "business-id", Key: "sk-business", Name: "Business"}); err != nil {
+		t.Fatalf("business upsert: %v", err)
+	}
+
+	system := NewStore(db)
+	if got := system.Get("sk-business"); got != nil {
+		t.Fatalf("tenant-scoped system lookup leaked business key: %#v", got)
+	}
+	if got := system.GetAnyTenant("sk-business"); got == nil || got.TenantID != tenantID || got.ID != "business-id" {
+		t.Fatalf("GetAnyTenant = %#v, want business tenant row", got)
+	}
+	if got := system.GetByIDAnyTenant("business-id"); got == nil || got.TenantID != tenantID || got.Key != "sk-business" {
+		t.Fatalf("GetByIDAnyTenant = %#v, want business tenant row", got)
+	}
+}
+
 func TestReplaceAllPreservesOwnershipAndRejectsLastKeyDrop(t *testing.T) {
 	t.Parallel()
 

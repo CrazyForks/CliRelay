@@ -1967,3 +1967,70 @@ func TestGetUsageLogsFiltersByOrphanAuthIndexWithoutLiveMeta(t *testing.T) {
 		t.Fatalf("orphan filter missing alias rows: %#v", filtered.Items)
 	}
 }
+
+func TestGetPublicUsageLogs_AggregatesOwnedBusinessTenantKeys(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "usage.db")
+	if err := usage.InitDB(dbPath, config.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	t.Cleanup(func() {
+		usage.CloseDB()
+		_ = os.Remove(dbPath)
+		_ = os.Remove(dbPath + "-wal")
+		_ = os.Remove(dbPath + "-shm")
+	})
+
+	tenantID := "00000000-0000-0000-0000-0000000000ac"
+	endUserID := "00000000-0000-0000-0000-0000000000bd"
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, row := range []usage.APIKeyRow{
+		{ID: "00000000-0000-0000-0000-0000000000a2", Key: "sk-owned-log-a", Name: "Laptop", EndUserID: endUserID, CreatedAt: now, UpdatedAt: now},
+		{ID: "00000000-0000-0000-0000-0000000000b2", Key: "sk-owned-log-b", Name: "Automation", EndUserID: endUserID, CreatedAt: now, UpdatedAt: now},
+	} {
+		if err := usage.UpsertAPIKeyForTenant(tenantID, row); err != nil {
+			t.Fatalf("UpsertAPIKeyForTenant(%s): %v", row.Key, err)
+		}
+		usage.InsertLog(row.Key, row.Name, "gpt-test", "test", "channel", "auth", false, time.Now().UTC(), 1, 0, usage.TokenStats{TotalTokens: 1}, "", "")
+	}
+
+	h := &Handler{cfg: &config.Config{}}
+	body := []byte(`{"api_key":"sk-owned-log-b","days":7,"page":1,"size":50}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/public/usage/logs", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.UsageLogs().GetPublicUsageLogs(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var payload struct {
+		Total int64 `json:"total"`
+		Items []struct {
+			APIKey        string `json:"api_key"`
+			APIKeyID      string `json:"api_key_id"`
+			APIKeyMasked  string `json:"api_key_masked"`
+			APIKeyOwnName string `json:"api_key_own_name"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if payload.Total != 2 || len(payload.Items) != 2 {
+		t.Fatalf("public logs total/items = %d/%d, want 2/2", payload.Total, len(payload.Items))
+	}
+	for _, item := range payload.Items {
+		if item.APIKey != "" || item.APIKeyID != "" {
+			t.Fatalf("public item leaked raw key identity: %+v", item)
+		}
+		if item.APIKeyMasked == "" {
+			t.Fatalf("public item missing masked key fallback: %+v", item)
+		}
+		if item.APIKeyOwnName != "Laptop" && item.APIKeyOwnName != "Automation" {
+			t.Fatalf("api_key_own_name = %q, want concrete key name", item.APIKeyOwnName)
+		}
+	}
+}

@@ -153,14 +153,12 @@ func (s *Service) PublicUsageLogs(input PublicLogQueryInput) (map[string]any, er
 		maps.authIndexesBySubject,
 		maps.authMetaBySubject,
 	)
-	// Portal multi-key accounts share one quota pool; public lookup aggregates all owned keys.
-	lookupKeys := usage.ExpandPublicLookupAPIKeys(input.APIKey)
 	params := usage.LogQueryParams{
-		TenantID:              usage.ResolveAPIKeyTenant(input.APIKey),
+		TenantID:              s.tenantID,
+		EndUserID:             strings.TrimSpace(input.EndUserID),
 		Page:                  input.Page,
 		Size:                  input.Size,
 		Days:                  input.Days,
-		APIKeys:               lookupKeys,
 		Models:                input.Models,
 		Statuses:              input.Statuses,
 		MatchNoModels:         input.MatchNoModels,
@@ -170,6 +168,10 @@ func (s *Service) PublicUsageLogs(input PublicLogQueryInput) (map[string]any, er
 		AuthIndexes:           authIndexes,
 		ChannelNames:          channelNames,
 		AuthIndexChannelNames: authIndexChannelNames,
+	}
+	if params.EndUserID == "" {
+		params.TenantID = usage.ResolveAPIKeyTenant(input.APIKey)
+		params.APIKeys = usage.ExpandPublicLookupAPIKeys(input.APIKey)
 	}
 
 	result, err := usage.QueryLogs(params)
@@ -186,22 +188,38 @@ func (s *Service) PublicUsageLogs(input PublicLogQueryInput) (map[string]any, er
 	}
 
 	apiKeyName := s.publicAPIKeyName(input.APIKey)
+	if params.EndUserID != "" {
+		apiKeyName = usage.DisplayNameForEndUser(params.EndUserID)
+	}
 	for i := range result.Items {
-		// Prefer the key's own name so multi-key accounts can tell rows apart.
-		keyOwnName := usage.ResolveAPIKeyOwnName(result.Items[i].APIKey)
+		keyOwnName := strings.TrimSpace(result.Items[i].APIKeyOwnName)
+		if keyOwnName == "" {
+			keyOwnName = usage.ResolveAPIKeyOwnName(result.Items[i].APIKey)
+		}
 		if keyOwnName == "" {
 			keyOwnName = strings.TrimSpace(result.Items[i].APIKeyName)
 		}
+		userName := strings.TrimSpace(result.Items[i].EndUserDisplayName)
+		if userName == "" && params.EndUserID != "" {
+			userName = apiKeyName
+		}
+		if userName == "" {
+			userName = keyOwnName
+		}
 		if apiKeyName == "" {
-			apiKeyName = keyOwnName
+			apiKeyName = userName
 		}
 		channelName := displayChannelNameForLog(result.Items[i], maps.channelNameMap, maps.authIndexChannelMap, maps.ambiguousAuthIndexChannelMap)
+		result.Items[i].APIKeyMasked = maskPublicAPIKey(result.Items[i].APIKey)
 		result.Items[i].Source = ""
 		result.Items[i].AuthIndex = ""
 		result.Items[i].AuthSubjectID = ""
 		result.Items[i].ChannelName = channelName
 		result.Items[i].APIKey = ""
-		result.Items[i].APIKeyName = keyOwnName
+		result.Items[i].APIKeyID = ""
+		result.Items[i].APIKeyName = userName
+		result.Items[i].EndUserDisplayName = userName
+		result.Items[i].APIKeyOwnName = keyOwnName
 		// Keep provider/auth_type for public UI badges, but strip identity keys above.
 		enrichLogRowChannelMeta(&result.Items[i], maps.authMetaByIndex, maps.authMetaBySubject)
 		result.Items[i].AuthIndex = ""
@@ -254,6 +272,20 @@ func (s *Service) PublicUsageLogs(input PublicLogQueryInput) (map[string]any, er
 			"statuses":        filters.Statuses,
 		},
 	}, nil
+}
+
+func maskPublicAPIKey(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if len(value) <= 10 {
+		if len(value) <= 4 {
+			return "***"
+		}
+		return value[:2] + "***" + value[len(value)-2:]
+	}
+	return value[:6] + "***" + value[len(value)-4:]
 }
 
 type authChannelMeta struct {

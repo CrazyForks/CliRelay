@@ -171,14 +171,16 @@ func ListAllAPIKeys() []APIKeyRow {
 	return apiKeyStore().ListAll()
 }
 
-// GetAPIKey retrieves a single API key entry by key string.
+// GetAPIKey retrieves a single API key entry by globally unique key string.
+// The secret is the input used to discover tenant scope, so this lookup must
+// not be pinned to the system tenant.
 func GetAPIKey(key string) *APIKeyRow {
-	return apiKeyStore().Get(key)
+	return apiKeyStore().GetAnyTenant(key)
 }
 
-// GetAPIKeyByID retrieves a single API key entry by stable id.
+// GetAPIKeyByID retrieves a single API key entry by globally unique stable id.
 func GetAPIKeyByID(id string) *APIKeyRow {
-	return apiKeyStore().GetByID(id)
+	return apiKeyStore().GetByIDAnyTenant(id)
 }
 
 // UpsertAPIKey inserts or updates an API key entry.

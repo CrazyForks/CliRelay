@@ -7,7 +7,11 @@ type LogRow struct {
 	ID                  int64     `json:"id"`
 	Timestamp           time.Time `json:"timestamp"`
 	APIKey              string    `json:"api_key"`
+	APIKeyID            string    `json:"api_key_id,omitempty"`
+	APIKeyMasked        string    `json:"api_key_masked,omitempty"`
 	APIKeyName          string    `json:"api_key_name"`
+	APIKeyOwnName       string    `json:"api_key_own_name,omitempty"`
+	EndUserDisplayName  string    `json:"end_user_display_name,omitempty"`
 	Model               string    `json:"model"`
 	UpstreamModel       string    `json:"upstream_model,omitempty"`
 	VisionFallbackModel string    `json:"vision_fallback_model,omitempty"`
@@ -33,6 +37,7 @@ type LogRow struct {
 // LogQueryParams holds filter/pagination parameters for QueryLogs.
 type LogQueryParams struct {
 	TenantID        string
+	EndUserID       string   // stable account owner; matches all current key ids plus legacy raw-secret rows
 	Page            int      // 1-based
 	Size            int      // rows per page
 	Days            int      // time range in days

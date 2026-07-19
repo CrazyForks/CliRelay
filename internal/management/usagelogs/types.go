@@ -18,6 +18,7 @@ type ManagementLogQueryInput struct {
 
 type PublicLogQueryInput struct {
 	APIKey          string
+	EndUserID       string
 	Models          []string
 	Channels        []string
 	Statuses        []string
