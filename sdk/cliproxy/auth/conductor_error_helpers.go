@@ -188,7 +188,21 @@ func isInvalidRequestSignal(raw string) bool {
 		// Upstream vision APIs reject undersized images with a stable message.
 		// This is request content, not auth/quota, so failover cannot help.
 		strings.Contains(signal, "below the minimum of") && strings.Contains(signal, "pixels"),
-		strings.Contains(signal, "total pixels") && strings.Contains(signal, "minimum"):
+		strings.Contains(signal, "total pixels") && strings.Contains(signal, "minimum"),
+		// Prompt/context length is a property of the request body. Retrying on
+		// another auth only re-runs multi-MB translation without fixing the body.
+		strings.Contains(signal, "context_length_exceeded"),
+		strings.Contains(signal, "prompt_too_long"),
+		strings.Contains(signal, "maximum context length"),
+		strings.Contains(signal, "maximum prompt length"),
+		strings.Contains(signal, "prompt is too long"),
+		strings.Contains(signal, "prompt too long"),
+		strings.Contains(signal, "too many tokens"),
+		strings.Contains(signal, "tokens > max"),
+		strings.Contains(signal, "tokens exceeds"),
+		// Observed Grok: "maximum prompt length is 500000 but the request contains 816381 tokens"
+		strings.Contains(signal, "maximum prompt") && strings.Contains(signal, "tokens"),
+		strings.Contains(signal, "prompt length") && strings.Contains(signal, "tokens"):
 		return true
 	default:
 		return false

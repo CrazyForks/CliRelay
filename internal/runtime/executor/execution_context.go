@@ -155,7 +155,9 @@ func newExecutionContext(
 		ctx = context.Background()
 	}
 	originalPayload := req.Payload
-	originalPayloadIsRequest := len(opts.OriginalRequest) == 0
+	// Production handlers set OriginalRequest to the same slice as Payload.
+	// Treat shared storage as "same request" so TranslateRequestPair only runs once.
+	originalPayloadIsRequest := len(opts.OriginalRequest) == 0 || samePayloadStorage(opts.OriginalRequest, req.Payload)
 	if !originalPayloadIsRequest {
 		originalPayload = opts.OriginalRequest
 	}
@@ -222,7 +224,11 @@ func (ec *ExecutionContext) TranslateRequestPair(payload []byte) ([]byte, []byte
 		payload,
 		ec.Execution.TranslateAsStream,
 	)
-	if ec.originalPayloadIsRequest && samePayloadStorage(payload, ec.Request.Payload) {
+	// Skip second translate when original is the same request (empty override,
+	// shared storage with req.Payload, or payload already is OriginalPayload).
+	if ec.originalPayloadIsRequest ||
+		samePayloadStorage(payload, ec.OriginalPayload) ||
+		samePayloadStorage(payload, ec.Request.Payload) && samePayloadStorage(ec.OriginalPayload, ec.Request.Payload) {
 		return translated, translated
 	}
 	originalTranslated := sdktranslator.TranslateRequest(

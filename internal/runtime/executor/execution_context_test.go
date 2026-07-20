@@ -97,6 +97,46 @@ func TestExecutionContextTranslatesSharedRequestPayloadOnce(t *testing.T) {
 	}
 }
 
+func TestExecutionContextTranslatesSharedNonEmptyOriginalRequestOnce(t *testing.T) {
+	// Production handlers set OriginalRequest to the same slice as Payload (non-empty).
+	var calls atomic.Int32
+	from := sdktranslator.FromString("execution-context-shared-nonempty-source")
+	to := sdktranslator.FromString("execution-context-shared-nonempty-target")
+	sdktranslator.Register(from, to, func(_ string, rawJSON []byte, _ bool) []byte {
+		calls.Add(1)
+		return bytes.Clone(rawJSON)
+	}, sdktranslator.ResponseTransform{})
+
+	raw := []byte(`{"input":"production-shared"}`)
+	req := cliproxyexecutor.Request{
+		Model:   "test-model",
+		Payload: raw,
+	}
+	execCtx := newExecutionContext(
+		context.Background(),
+		"test-provider",
+		&config.Config{},
+		nil,
+		req,
+		cliproxyexecutor.Options{
+			OriginalRequest: raw,
+			SourceFormat:    from,
+		},
+		ExecutionOptions{TargetFormat: to},
+	)
+
+	translated, originalTranslated := execCtx.TranslateRequestPair(nil)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("translator calls = %d, want 1 for non-empty shared OriginalRequest", got)
+	}
+	if string(translated) != string(raw) || string(originalTranslated) != string(raw) {
+		t.Fatalf("translated payloads differ: translated=%q original=%q", translated, originalTranslated)
+	}
+	if len(translated) > 0 && &translated[0] != &originalTranslated[0] {
+		t.Fatal("shared non-empty OriginalRequest should reuse the single translated result")
+	}
+}
+
 func TestExecutionContextTranslatesDistinctOriginalRequestSeparately(t *testing.T) {
 	var calls atomic.Int32
 	from := sdktranslator.FromString("execution-context-distinct-source")

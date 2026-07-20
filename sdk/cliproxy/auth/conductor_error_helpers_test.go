@@ -197,6 +197,31 @@ func TestIsRequestInvalidError_IgnoresGenericBadRequestWithoutInvalidSignal(t *t
 	}
 }
 
+func TestIsRequestInvalidError_RecognizesPromptTooLongText(t *testing.T) {
+	t.Parallel()
+
+	// Observed Grok/cli-chat-proxy rejection on multi-MB Claude→Codex traffic.
+	err := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    "This model's maximum prompt length is 500000 but the request contains 816381 tokens.",
+	}
+	if !isRequestInvalidError(err) {
+		t.Fatal("expected prompt-length 400 to be treated as invalid request (no auth failover)")
+	}
+}
+
+func TestIsRequestInvalidError_RecognizesContextLengthExceededCode(t *testing.T) {
+	t.Parallel()
+
+	err := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    `{"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"too many tokens"}}`,
+	}
+	if !isRequestInvalidError(err) {
+		t.Fatal("expected context_length_exceeded payload to be treated as invalid request")
+	}
+}
+
 func TestMarkResult_RequestInvalidErrorDoesNotCooldownAuth(t *testing.T) {
 	t.Parallel()
 

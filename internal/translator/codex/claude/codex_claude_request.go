@@ -208,19 +208,9 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	inputBuf.WriteByte(']')
 
 	// Convert tools declarations once.
+	// Codex rejects defer_loading without tools.tool_search; strip it on each tool
+	// fragment only — never N× sjson.DeleteBytes on the full multi-MB request.
 	toolsResult := rootResult.Get("tools")
-	// Codex validates deferred tools strictly: defer_loading requires tools.tool_search.
-	// Claude Code may set defer_loading on tools when tool schemas are deferred.
-	// The Codex endpoint we proxy to rejects defer_loading without tool_search, so strip the flag.
-	if toolsResult.IsArray() && toolsResult.Get("#(defer_loading=true)").Exists() {
-		toolsResult.ForEach(func(i, _ gjson.Result) bool {
-			// sjson only on original rawJSON (small tools array relative to messages).
-			rawJSON, _ = sjson.DeleteBytes(rawJSON, fmt.Sprintf("tools.%d.defer_loading", i.Int()))
-			return true
-		})
-		rootResult = gjson.ParseBytes(rawJSON)
-		toolsResult = rootResult.Get("tools")
-	}
 
 	var toolsBuf bytes.Buffer
 	toolsFirst := true
@@ -268,6 +258,10 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			tool, _ = sjson.SetRaw(tool, "parameters", normalizeToolParameters(toolResult.Get("input_schema").Raw))
 			tool, _ = sjson.Delete(tool, "input_schema")
 			tool, _ = sjson.Delete(tool, "parameters.$schema")
+			// Drop Claude deferred-tool flag from the small tool fragment only.
+			if toolResult.Get("defer_loading").Exists() {
+				tool, _ = sjson.Delete(tool, "defer_loading")
+			}
 			tool, _ = sjson.Set(tool, "strict", false)
 			appendTool(tool)
 		}
