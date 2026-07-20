@@ -178,10 +178,10 @@ func TestQueryDashboardThroughputLatestPointUsesRollingMinuteWindow(t *testing.T
 	if latest.Label != "15:05" {
 		t.Fatalf("latest label = %q, want 15:05", latest.Label)
 	}
-	// Throughput now uses minute rollup buckets (not sub-minute request_logs scan).
-	// At 15:05:05 the current minute bucket is still empty.
-	if latest.RPM != 0 || latest.TPM != 0 {
-		t.Fatalf("latest minute throughput = (%.0f, %.0f), want (0, 0)", latest.RPM, latest.TPM)
+	// Rolling last-60s window [15:04:05, 15:05:05] includes two 15:04 late requests,
+	// not the empty in-progress calendar minute 15:05.
+	if latest.RPM != 2 || latest.TPM != 300 {
+		t.Fatalf("latest rolling throughput = (%.0f, %.0f), want (2, 300)", latest.RPM, latest.TPM)
 	}
 
 	// Completed previous calendar minute reports full-minute rollup totals (3 requests).

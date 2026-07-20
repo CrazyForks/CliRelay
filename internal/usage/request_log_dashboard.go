@@ -262,14 +262,12 @@ func queryDashboardThroughputSeriesAt(tenantID string, now time.Time, loc *time.
 		byKey[buckets[i].key] = &buckets[i]
 	}
 
-	// Completed minute points stay calendar-aligned; the latest point is filled
-	// from a rolling 60s window so the dashboard value does not drop to zero at
-	// each minute boundary.
+	// Completed minute points stay calendar-aligned via minute rollup.
+	// The latest point is a real rolling last-60s aggregate from request_logs so
+	// RPM/TPM do not drop to zero at each calendar-minute boundary (rollup alone
+	// only has the in-progress minute bucket, which is empty early in the minute).
 	windowStart := now.Add(-time.Minute)
 	start := now.Truncate(time.Minute).Add(-time.Duration(dashboardThroughputBucketCount-1) * time.Minute)
-	if windowStart.Before(start) {
-		start = windowStart
-	}
 
 	var (
 		rows *sql.Rows
@@ -302,11 +300,6 @@ func queryDashboardThroughputSeriesAt(tenantID string, now time.Time, loc *time.
 	}
 	defer rows.Close()
 
-	var (
-		windowRequests int64
-		windowTokens   int64
-	)
-	latestKey := now.Truncate(time.Minute).Format("2006-01-02 15:04")
 	for rows.Next() {
 		var bucketStart string
 		var requests, totalTokens int64
@@ -319,17 +312,15 @@ func queryDashboardThroughputSeriesAt(tenantID string, now time.Time, loc *time.
 			bucket.requests += requests
 			bucket.totalToken += totalTokens
 		}
-		// Approximate rolling last-minute window with the current minute bucket.
-		if key == latestKey {
-			windowRequests += requests
-			windowTokens += totalTokens
-		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("usage: iterate dashboard throughput rows: %w", err)
 	}
-	_ = windowStart
 
+	windowRequests, windowTokens, err := queryRollingThroughputWindow(db, tenantID, windowStart, now, allTenants)
+	if err != nil {
+		return nil, err
+	}
 	if len(buckets) > 0 {
 		// Replace the in-progress calendar minute with the rolling window so the
 		// rightmost chart point and headline RPM/TPM stay continuous.
@@ -338,6 +329,30 @@ func queryDashboardThroughputSeriesAt(tenantID string, now time.Time, loc *time.
 	}
 
 	return throughputSeriesFromBuckets(buckets), nil
+}
+
+// queryRollingThroughputWindow aggregates the last ~60s from request_logs.
+// Bounded timestamp range only — avoids the multi-day dashboard poll storm.
+func queryRollingThroughputWindow(db *sql.DB, tenantID string, windowStart, now time.Time, allTenants bool) (requests int64, totalTokens int64, err error) {
+	fromUTC := windowStart.UTC().Format(time.RFC3339Nano)
+	toUTC := now.UTC().Format(time.RFC3339Nano)
+	if allTenants {
+		err = db.QueryRow(`
+			SELECT COALESCE(COUNT(*), 0), COALESCE(SUM(total_tokens), 0)
+			FROM request_logs
+			WHERE timestamp >= ? AND timestamp <= ?
+		`, fromUTC, toUTC).Scan(&requests, &totalTokens)
+	} else {
+		err = db.QueryRow(`
+			SELECT COALESCE(COUNT(*), 0), COALESCE(SUM(total_tokens), 0)
+			FROM request_logs
+			WHERE tenant_id = ? AND timestamp >= ? AND timestamp <= ?
+		`, normalizeTenantID(tenantID), fromUTC, toUTC).Scan(&requests, &totalTokens)
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("usage: query rolling throughput window: %w", err)
+	}
+	return requests, totalTokens, nil
 }
 
 func dashboardTrendsFromBuckets(buckets []dashboardBucket) DashboardTrends {
