@@ -704,6 +704,14 @@ func backfillSharedDailyUsageForSubject(db *sql.DB, subjectID string) error {
 		return err
 	}
 	for _, row := range batch {
+		firstValue := nullableStoredTimeArg(row.first)
+		updatedValue := nullableStoredTimeArg(row.updated)
+		if firstValue == nil {
+			firstValue = time.Now().UTC().Format(time.RFC3339Nano)
+		}
+		if updatedValue == nil {
+			updatedValue = firstValue
+		}
 		if _, err := db.Exec(`
 			INSERT INTO ai_account_subject_usage_buckets
 				(auth_subject_id, bucket_kind, bucket_start, request_count, success_count, failure_count, cost_total, first_event_at, updated_at)
@@ -714,7 +722,7 @@ func backfillSharedDailyUsageForSubject(db *sql.DB, subjectID string) error {
 				failure_count = CASE WHEN excluded.failure_count > ai_account_subject_usage_buckets.failure_count THEN excluded.failure_count ELSE ai_account_subject_usage_buckets.failure_count END,
 				cost_total = CASE WHEN excluded.cost_total > ai_account_subject_usage_buckets.cost_total THEN excluded.cost_total ELSE ai_account_subject_usage_buckets.cost_total END,
 				updated_at = CASE WHEN excluded.updated_at > ai_account_subject_usage_buckets.updated_at THEN excluded.updated_at ELSE ai_account_subject_usage_buckets.updated_at END
-		`, subjectID, row.day, row.req, row.success, row.failure, row.cost, row.first, row.updated); err != nil {
+		`, subjectID, row.day, row.req, row.success, row.failure, row.cost, firstValue, updatedValue); err != nil {
 			return err
 		}
 	}
@@ -801,9 +809,13 @@ func backfillSharedQuotaCyclesForSubject(db *sql.DB, subjectID string) error {
 	}
 	cycleStarts := make(map[string]struct{}, len(batch))
 	for _, row := range batch {
-		startValue := canonicalAIAccountSubjectTime(row.start)
-		resetValue := canonicalAIAccountSubjectTime(row.reset)
-		verifiedValue := canonicalAIAccountSubjectTime(row.verified)
+		startValue, okStart := requiredStoredTimeArg(row.start)
+		resetValue, okReset := requiredStoredTimeArg(row.reset)
+		verifiedValue, okVerified := requiredStoredTimeArg(row.verified)
+		// Postgres rejects empty strings for timestamptz; skip unusable legacy rows.
+		if !okStart || !okReset || !okVerified {
+			continue
+		}
 		if _, err := db.Exec(`
 			INSERT INTO ai_account_subject_quota_cycles
 				(auth_subject_id, provider, quota_key, cycle_start_at, reset_at, window_seconds, last_verified_at)
@@ -834,6 +846,28 @@ func canonicalAIAccountSubjectTime(value string) string {
 	return strings.TrimSpace(value)
 }
 
+// nullableStoredTimeArg returns a canonical RFC3339Nano string or nil (SQL NULL).
+// Never returns "" — Postgres timestamptz rejects empty strings (SQLSTATE 22007).
+func nullableStoredTimeArg(value string) any {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	if parsed, ok := parseStoredTimeString(value); ok {
+		return parsed.UTC().Format(time.RFC3339Nano)
+	}
+	return nil
+}
+
+func requiredStoredTimeArg(value string) (string, bool) {
+	arg := nullableStoredTimeArg(value)
+	if arg == nil {
+		return "", false
+	}
+	s, ok := arg.(string)
+	return s, ok && s != ""
+}
+
 // Current-cycle migration is intentionally estimated from the legacy daily
 // projection. It never scans request_logs, so the first partial day may be
 // conservative until the next full provider cycle starts.
@@ -857,8 +891,8 @@ func backfillSharedCycleUsageForSubject(db *sql.DB, subjectID, cycleStart string
 	if req == 0 {
 		return nil
 	}
-	updatedValue := canonicalAIAccountSubjectTime(updated.String)
-	if updatedValue == "" {
+	updatedValue := nullableStoredTimeArg(updated.String)
+	if updatedValue == nil {
 		updatedValue = cycleStart
 	}
 	_, err := db.Exec(`
@@ -908,9 +942,14 @@ func backfillSharedQuotaPointsForSubject(db *sql.DB, subjectID string) error {
 		if row.percent.Valid {
 			percentValue = row.percent.Float64
 		}
-		var resetValue any
-		if row.reset.Valid && strings.TrimSpace(row.reset.String) != "" {
-			resetValue = row.reset.String
+		// NULL, not "": PG timestamptz + COALESCE(reset_at, '') raises SQLSTATE 22007.
+		resetValue := nullableStoredTimeArg("")
+		if row.reset.Valid {
+			resetValue = nullableStoredTimeArg(row.reset.String)
+		}
+		recordedValue, okRecorded := requiredStoredTimeArg(row.recorded)
+		if !okRecorded {
+			continue
 		}
 		if _, err := db.Exec(`
 			INSERT INTO ai_account_subject_quota_points
@@ -920,11 +959,11 @@ func backfillSharedQuotaPointsForSubject(db *sql.DB, subjectID string) error {
 				SELECT 1 FROM ai_account_subject_quota_points
 				WHERE auth_subject_id = ? AND provider = ? AND quota_key = ? AND quota_label = ?
 				  AND COALESCE(percent, -1) = COALESCE(?, -1)
-				  AND COALESCE(reset_at, '') = COALESCE(?, '')
+				  AND ((reset_at IS NULL AND ? IS NULL) OR reset_at = ?)
 				  AND window_seconds = ? AND recorded_at = ?
 			)
-		`, subjectID, row.provider, row.key, row.label, percentValue, resetValue, row.window, row.recorded,
-			subjectID, row.provider, row.key, row.label, percentValue, resetValue, row.window, row.recorded); err != nil {
+		`, subjectID, row.provider, row.key, row.label, percentValue, resetValue, row.window, recordedValue,
+			subjectID, row.provider, row.key, row.label, percentValue, resetValue, resetValue, row.window, recordedValue); err != nil {
 			return err
 		}
 	}

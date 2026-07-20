@@ -128,9 +128,8 @@ func (s *Service) StartRefresh(tenantID string, req RefreshRequest) RefreshAccep
 	// Refresh boundary: allow stale cleanup without waiting for GET throttle alone.
 	s.maybeNormalizeStaleRefresh(tenantID)
 	auths := s.listAuths(tenantID)
-	if err := reconcileTenantBindings(auths); err != nil {
-		return RefreshAccepted{Skipped: []string{"binding_reconciliation_failed"}}
-	}
+	// Best-effort: still start refresh even if some legacy bindings fail to reconcile.
+	_ = reconcileTenantBindings(auths)
 	byIndex := make(map[string]*coreauth.Auth, len(auths))
 	bySubject := make(map[string]*coreauth.Auth, len(auths))
 	for _, auth := range auths {
@@ -730,9 +729,8 @@ func (s *Service) ListStatus(tenantID string, authIndexes, authSubjectIDs []stri
 	tenantID = strings.TrimSpace(tenantID)
 	s.maybeNormalizeStaleRefresh(tenantID)
 	auths := s.listAuths(tenantID)
-	if err := reconcileTenantBindings(auths); err != nil {
-		return StatusListResponse{}, err
-	}
+	// Binding reconcile is best-effort; never fail the read path for legacy write noise.
+	_ = reconcileTenantBindings(auths)
 	indexFilter := make(map[string]struct{})
 	for _, idx := range authIndexes {
 		if v := strings.TrimSpace(idx); v != "" {
@@ -971,6 +969,8 @@ func reconcileTenantBindings(auths []*coreauth.Auth) error {
 	for _, row := range rows {
 		byID[row.AuthID] = row
 	}
+	// Best-effort per auth: one bad legacy row must not 500 the whole status list.
+	var firstErr error
 	for _, auth := range auths {
 		if auth == nil {
 			continue
@@ -984,10 +984,12 @@ func reconcileTenantBindings(auths []*coreauth.Auth) error {
 			continue
 		}
 		if err := usage.UpsertAIAccountTenantBinding(auth, identity); err != nil {
-			return err
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
-	return nil
+	return firstErr
 }
 
 func sanitizeMsg(msg string) string {

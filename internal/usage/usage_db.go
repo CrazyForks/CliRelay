@@ -1008,7 +1008,17 @@ func parseStoredTimeString(value string) (time.Time, bool) {
 	if value == "" {
 		return time.Time{}, false
 	}
-	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05"} {
+	// Include Postgres text forms of timestamptz (space separator, +00 / -07 offsets).
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999999Z07:00",
+		"2006-01-02 15:04:05.999999999-07",
+		"2006-01-02 15:04:05Z07:00",
+		"2006-01-02 15:04:05-07",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02 15:04:05",
+	} {
 		if parsed, err := time.Parse(layout, value); err == nil {
 			return parsed.UTC(), true
 		}

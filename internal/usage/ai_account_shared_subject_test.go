@@ -462,3 +462,21 @@ func TestFingerprintPolicyUsesSharedSubjectKeyAndTenantFallbackIsolation(t *test
 		t.Fatalf("tenant B fallback saw tenant A policy: %+v err=%v", fallbackBPolicy, err)
 	}
 }
+
+func TestNullableStoredTimeArgNeverReturnsEmptyString(t *testing.T) {
+	if got := nullableStoredTimeArg(""); got != nil {
+		t.Fatalf("empty -> %v, want nil", got)
+	}
+	if got := nullableStoredTimeArg("   "); got != nil {
+		t.Fatalf("blank -> %v, want nil", got)
+	}
+	if _, ok := requiredStoredTimeArg(""); ok {
+		t.Fatal("required empty should fail")
+	}
+	raw := "2026-07-20 16:01:43.169028+00"
+	got := nullableStoredTimeArg(raw)
+	s, ok := got.(string)
+	if !ok || s == "" {
+		t.Fatalf("parseable time -> %v", got)
+	}
+}
