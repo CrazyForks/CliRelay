@@ -21,6 +21,9 @@ import (
 // ProbeResult is the typed output of a provider-specific upstream status probe.
 type ProbeResult struct {
 	PlanType               string
+	SubscriptionStartedAt  *time.Time
+	SubscriptionExpiresAt  *time.Time
+	SubscriptionSource     string
 	Quotas                 []usage.QuotaWindowDTO
 	ResetCreditCount       *int64
 	ResetCreditExpirations []string

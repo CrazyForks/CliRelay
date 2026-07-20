@@ -49,8 +49,8 @@ type Service struct {
 
 	mu            sync.Mutex
 	jobs          map[string]*job
-	inFlight      map[string]string    // tenant|subject -> jobID owning the flight
-	lastSuccess   map[string]time.Time // tenant|subject -> last successful probe (closes force=false TOCTOU)
+	inFlight      map[string]string    // shared subject -> owning job ID (job visibility stays tenant-private)
+	lastSuccess   map[string]time.Time // shared subject -> last successful probe (closes force=false TOCTOU)
 	staleNormMu   sync.Mutex
 	lastStaleNorm map[string]time.Time
 }
@@ -128,6 +128,9 @@ func (s *Service) StartRefresh(tenantID string, req RefreshRequest) RefreshAccep
 	// Refresh boundary: allow stale cleanup without waiting for GET throttle alone.
 	s.maybeNormalizeStaleRefresh(tenantID)
 	auths := s.listAuths(tenantID)
+	if err := reconcileTenantBindings(auths); err != nil {
+		return RefreshAccepted{Skipped: []string{"binding_reconciliation_failed"}}
+	}
 	byIndex := make(map[string]*coreauth.Auth, len(auths))
 	bySubject := make(map[string]*coreauth.Auth, len(auths))
 	for _, auth := range auths {
@@ -177,10 +180,10 @@ func (s *Service) StartRefresh(tenantID string, req RefreshRequest) RefreshAccep
 	// by N small-table queries under the service lock.
 	recentBySubject := map[string]time.Time{}
 	if !req.Force && len(subjectIDs) > 0 {
-		if rows, err := usage.ListAIAccountStatusForTenant(tenantID, subjectIDs); err == nil {
+		if rows, err := usage.ListAIAccountSubjectStatus(subjectIDs); err == nil {
 			nowCheck := time.Now()
 			for _, rec := range rows {
-				if rec.RefreshState != string(RefreshSuccess) || rec.UpstreamCheckedAt == nil {
+				if rec.LastProbeState != string(RefreshSuccess) || rec.UpstreamCheckedAt == nil {
 					continue
 				}
 				if nowCheck.Sub(*rec.UpstreamCheckedAt) < accountRefreshMinGap {
@@ -229,14 +232,14 @@ func (s *Service) StartRefresh(tenantID string, req RefreshRequest) RefreshAccep
 		}
 
 		// force never bypasses in-flight singleflight/dedupe.
-		if existingJob, busy := s.inFlight[key]; busy {
+		if _, busy := s.inFlight[key]; busy {
 			deduped++
 			j.Results[subjectID] = &AccountRefreshResult{
 				AuthIndex:     auth.Index,
 				AuthSubjectID: subjectID,
 				State:         RefreshError,
 				ErrorCode:     "deduplicated",
-				ErrorMessage:  "refresh already in progress for job " + existingJob,
+				ErrorMessage:  "shared refresh already in progress",
 				UpdatedAt:     now,
 			}
 			j.order = append(j.order, subjectID)
@@ -459,7 +462,17 @@ func (s *Service) refreshOne(jobID, tenantID string, auth *coreauth.Auth, subjec
 	}
 
 	checked := time.Now().UTC()
+	if probeErr == nil {
+		asserted := readProviderAssertedAccountFacts(auth)
+		if strings.TrimSpace(probe.PlanType) == "" {
+			probe.PlanType = asserted.PlanType
+		}
+		probe.SubscriptionStartedAt = asserted.SubscriptionStarted
+		probe.SubscriptionExpiresAt = asserted.SubscriptionExpires
+		probe.SubscriptionSource = asserted.SubscriptionSource
+	}
 	if probeErr != nil {
+		_ = usage.UpdateAIAccountSubjectProbeFailure(subjectID, auth.Provider, "probe_failed", probeErr.Error(), checked)
 		_ = usage.UpdateAIAccountRefreshFailure(
 			tenantID, subjectID, auth.Index, auth.Provider, string(auth.Status),
 			"probe_failed", probeErr.Error(), checked,
@@ -474,6 +487,7 @@ func (s *Service) refreshOne(jobID, tenantID string, auth *coreauth.Auth, subjec
 	}
 
 	if probe.Unsupported {
+		_ = usage.UpdateAIAccountSubjectProbeFailure(subjectID, auth.Provider, "unsupported_probe", probe.UnsupportedReason, checked)
 		_ = usage.UpdateAIAccountRefreshFailure(
 			tenantID, subjectID, auth.Index, auth.Provider, string(auth.Status),
 			"unsupported_probe", probe.UnsupportedReason, checked,
@@ -488,8 +502,8 @@ func (s *Service) refreshOne(jobID, tenantID string, auth *coreauth.Auth, subjec
 	}
 
 	healthStatus := strings.TrimSpace(probe.Health)
-	if healthStatus == "" || healthStatus == "ok" {
-		healthStatus = string(auth.Status)
+	if healthStatus == "" {
+		healthStatus = "ok"
 	}
 	record := usage.AIAccountStatusRecord{
 		TenantID:               tenantID,
@@ -498,11 +512,12 @@ func (s *Service) refreshOne(jobID, tenantID string, auth *coreauth.Auth, subjec
 		Provider:               auth.Provider,
 		RefreshState:           string(RefreshSuccess),
 		HealthStatus:           healthStatus,
-		PlanType:               firstNonEmpty(probe.PlanType, metadataString(auth, "plan_type", "planType")),
+		PlanType:               strings.TrimSpace(probe.PlanType),
 		Quotas:                 probe.Quotas,
 		ResetCreditCount:       probe.ResetCreditCount,
 		ResetCreditExpirations: probe.ResetCreditExpirations,
 		UpstreamCheckedAt:      &checked,
+		ExpiresAt:              probe.SubscriptionExpiresAt,
 		UpdatedAt:              checked,
 	}
 	if len(probe.Quotas) > 0 {
@@ -526,6 +541,16 @@ func (s *Service) refreshOne(jobID, tenantID string, auth *coreauth.Auth, subjec
 		}
 		_ = usage.RecordDailyQuotaSnapshotIdentityForTenant(tenantID, auth.Index, subjectID, auth.Provider, daily)
 		_ = usage.RecordQuotaSnapshotPointsIdentityForTenant(tenantID, auth.Index, subjectID, auth.Provider, points)
+		if err := usage.RecordAIAccountSubjectQuotaPoints(subjectID, auth.Provider, points); err != nil {
+			_ = usage.UpdateAIAccountSubjectProbeFailure(subjectID, auth.Provider, "persist_failed", err.Error(), checked)
+			s.setResult(jobID, subjectID, func(r *AccountRefreshResult) {
+				r.State = RefreshError
+				r.ErrorCode = "persist_failed"
+				r.ErrorMessage = sanitizeMsg(err.Error())
+				r.UpdatedAt = checked
+			})
+			return
+		}
 	}
 
 	// Latest-status persistence is the trust boundary: write failure must not be reported as success.
@@ -547,8 +572,42 @@ func (s *Service) refreshOne(jobID, tenantID string, auth *coreauth.Auth, subjec
 		})
 		return
 	}
+	legacyPersisted, err := s.loadLegacyPersistedStatus(tenantID, subjectID)
+	if err != nil || legacyPersisted == nil {
+		msg := "persisted status reload failed"
+		if err != nil {
+			msg = err.Error()
+		}
+		_ = usage.UpdateAIAccountRefreshFailure(tenantID, subjectID, auth.Index, auth.Provider, string(auth.Status), "persist_reload_failed", msg, checked)
+		s.setResult(jobID, subjectID, func(r *AccountRefreshResult) {
+			r.State = RefreshError
+			r.ErrorCode = "persist_reload_failed"
+			r.ErrorMessage = sanitizeMsg(msg)
+			r.UpdatedAt = checked
+			r.Result = nil
+		})
+		return
+	}
+	if err := usage.UpsertAIAccountSubjectStatus(usage.AIAccountSubjectStatusRecord{
+		AuthSubjectID: subjectID, Provider: auth.Provider, LastProbeState: string(RefreshSuccess),
+		HealthStatus: healthStatus, PlanType: strings.TrimSpace(probe.PlanType),
+		SubscriptionStartedAt: probe.SubscriptionStartedAt, SubscriptionExpiresAt: probe.SubscriptionExpiresAt,
+		SubscriptionSource: probe.SubscriptionSource, RestrictionSummary: record.RestrictionSummary, Quotas: probe.Quotas,
+		ResetCreditCount: probe.ResetCreditCount, ResetCreditExpirations: probe.ResetCreditExpirations,
+		UpstreamCheckedAt: &checked, Version: legacyPersisted.Version, UpdatedAt: checked,
+	}); err != nil {
+		_ = usage.UpdateAIAccountRefreshFailure(tenantID, subjectID, auth.Index, auth.Provider, string(auth.Status), "persist_failed", err.Error(), checked)
+		s.setResult(jobID, subjectID, func(r *AccountRefreshResult) {
+			r.State = RefreshError
+			r.ErrorCode = "persist_failed"
+			r.ErrorMessage = sanitizeMsg(err.Error())
+			r.UpdatedAt = checked
+			r.Result = nil
+		})
+		return
+	}
 	// DB assigns version = previous+1 on conflict; never invent version from the in-memory draft.
-	persisted, err := s.loadPersistedStatus(tenantID, subjectID)
+	persisted, err := s.loadPersistedStatus(subjectID)
 	if err != nil || persisted == nil {
 		msg := "persisted status reload failed"
 		if err != nil {
@@ -582,7 +641,7 @@ func (s *Service) refreshOne(jobID, tenantID string, auth *coreauth.Auth, subjec
 	})
 }
 
-func (s *Service) loadPersistedStatus(tenantID, subjectID string) (*usage.AIAccountStatusRecord, error) {
+func (s *Service) loadLegacyPersistedStatus(tenantID, subjectID string) (*usage.AIAccountStatusRecord, error) {
 	rows, err := usage.ListAIAccountStatusForTenant(tenantID, []string{subjectID})
 	if err != nil {
 		return nil, err
@@ -594,10 +653,24 @@ func (s *Service) loadPersistedStatus(tenantID, subjectID string) (*usage.AIAcco
 	return &rec, nil
 }
 
-func (s *Service) viewFromPersistedRecord(tenantID string, auth *coreauth.Auth, record usage.AIAccountStatusRecord) *AccountStatusView {
-	cycleStarts, _ := usage.QueryLatestWeeklyQuotaCyclesBatch(tenantID, []string{record.AuthSubjectID}, primaryWeeklyKeys(auth.Provider))
-	summaries, _ := usage.QueryAuthSubjectUsageSummaries(tenantID, []string{record.AuthSubjectID}, cycleStarts)
-	view := statusViewFromRecord(record, auth, summaries[record.AuthSubjectID])
+func (s *Service) loadPersistedStatus(subjectID string) (*usage.AIAccountSubjectStatusRecord, error) {
+	rows, err := usage.ListAIAccountSubjectStatus([]string{subjectID})
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("status row missing after upsert")
+	}
+	rec := rows[0]
+	return &rec, nil
+}
+
+func (s *Service) viewFromPersistedRecord(tenantID string, auth *coreauth.Auth, record usage.AIAccountSubjectStatusRecord) *AccountStatusView {
+	cycleStarts, _ := usage.QueryLatestAIAccountSubjectWeeklyCyclesBatch([]string{record.AuthSubjectID}, primaryWeeklyKeys(auth.Provider))
+	summaries, _ := usage.QueryAIAccountSubjectUsageSummaries([]string{record.AuthSubjectID}, cycleStarts)
+	subjects, _ := usage.ListAIAccountSubjects([]string{record.AuthSubjectID})
+	counts, _ := usage.CountAIAccountTenantBindings(tenantID, []string{record.AuthSubjectID})
+	view := statusViewFromSharedRecord(record, auth, summaries[record.AuthSubjectID], subjects[record.AuthSubjectID], counts[record.AuthSubjectID])
 	return &view
 }
 
@@ -655,10 +728,11 @@ func (s *Service) GetJob(tenantID, jobID string) (JobSnapshot, bool) {
 
 func (s *Service) ListStatus(tenantID string, authIndexes, authSubjectIDs []string) (StatusListResponse, error) {
 	tenantID = strings.TrimSpace(tenantID)
-	// Best-effort stale cleanup: throttled per tenant so GET stays read-mostly.
 	s.maybeNormalizeStaleRefresh(tenantID)
-
 	auths := s.listAuths(tenantID)
+	if err := reconcileTenantBindings(auths); err != nil {
+		return StatusListResponse{}, err
+	}
 	indexFilter := make(map[string]struct{})
 	for _, idx := range authIndexes {
 		if v := strings.TrimSpace(idx); v != "" {
@@ -672,7 +746,6 @@ func (s *Service) ListStatus(tenantID string, authIndexes, authSubjectIDs []stri
 		}
 	}
 	filterOn := len(indexFilter) > 0 || len(subjectFilter) > 0
-
 	wanted := make(map[string]*coreauth.Auth)
 	for _, auth := range auths {
 		if auth == nil {
@@ -690,105 +763,94 @@ func (s *Service) ListStatus(tenantID string, authIndexes, authSubjectIDs []stri
 				continue
 			}
 		}
-		// Prefer enabled/usable alias when multiple credentials share one subject.
 		wanted[identity.ID] = preferAuthRepresentative(wanted[identity.ID], auth)
 	}
 	subjectIDs := make([]string, 0, len(wanted))
 	for sid := range wanted {
 		subjectIDs = append(subjectIDs, sid)
 	}
-	// Empty filter match / empty tenant catalog: do not call store with empty IDs
-	// (empty means "all subjects for tenant" and would scan the whole status table).
 	if len(subjectIDs) == 0 {
 		return StatusListResponse{Items: []AccountStatusView{}}, nil
 	}
 
-	statusRows, err := usage.ListAIAccountStatusForTenant(tenantID, subjectIDs)
+	statusRows, err := usage.ListAIAccountSubjectStatus(subjectIDs)
 	if err != nil {
 		return StatusListResponse{}, err
 	}
-	statusBySubject := make(map[string]usage.AIAccountStatusRecord, len(statusRows))
+	statusBySubject := make(map[string]usage.AIAccountSubjectStatusRecord, len(statusRows))
 	for _, row := range statusRows {
 		statusBySubject[row.AuthSubjectID] = row
 	}
-
-	// One batch cycle query for all preferred weekly keys used by present providers.
+	subjectRows, err := usage.ListAIAccountSubjects(subjectIDs)
+	if err != nil {
+		return StatusListResponse{}, err
+	}
+	bindingCounts, err := usage.CountAIAccountTenantBindings(tenantID, subjectIDs)
+	if err != nil {
+		return StatusListResponse{}, err
+	}
 	prefKeys := make([]string, 0)
 	prefSeen := map[string]struct{}{}
 	for _, auth := range wanted {
-		for _, k := range primaryWeeklyKeys(auth.Provider) {
-			if _, ok := prefSeen[k]; ok {
-				continue
+		for _, key := range primaryWeeklyKeys(auth.Provider) {
+			if _, ok := prefSeen[key]; !ok {
+				prefSeen[key] = struct{}{}
+				prefKeys = append(prefKeys, key)
 			}
-			prefSeen[k] = struct{}{}
-			prefKeys = append(prefKeys, k)
 		}
 	}
-	cycleStart, err := usage.QueryLatestWeeklyQuotaCyclesBatch(tenantID, subjectIDs, prefKeys)
+	cycleStart, err := usage.QueryLatestAIAccountSubjectWeeklyCyclesBatch(subjectIDs, prefKeys)
 	if err != nil {
 		return StatusListResponse{}, err
 	}
-	summaries, err := usage.QueryAuthSubjectUsageSummaries(tenantID, subjectIDs, cycleStart)
+	summaries, err := usage.QueryAIAccountSubjectUsageSummaries(subjectIDs, cycleStart)
 	if err != nil {
 		return StatusListResponse{}, err
 	}
 
-	items := make([]AccountStatusView, 0, len(wanted))
+	items := make([]AccountStatusView, 0, len(subjectIDs))
 	for _, sid := range subjectIDs {
 		auth := wanted[sid]
+		identity := usage.ResolveAuthSubjectIdentity(auth)
+		subject := subjectRows[sid]
+		if subject.AuthSubjectID == "" && identity != nil {
+			subject = usage.AIAccountSubjectRecord{AuthSubjectID: sid, Provider: identity.Provider, SubjectScope: identity.SubjectScope, SeedKind: identity.SeedKind, ShareEligible: identity.ShareEligible}
+		}
 		row, has := statusBySubject[sid]
 		if !has {
 			items = append(items, AccountStatusView{
-				AuthSubjectID: sid,
-				AuthIndex:     auth.Index,
-				Provider:      auth.Provider,
-				RefreshState:  string(RefreshIdle),
-				HealthStatus:  string(auth.Status),
-				PlanType:      metadataString(auth, "plan_type", "planType"),
-				Quotas:        []usage.QuotaWindowDTO{},
-				Usage:         summaries[sid],
+				AuthSubjectID: sid, AuthIndex: auth.Index, Provider: auth.Provider,
+				StatusScope: usage.AIAccountStatusScopeShared, SubjectScope: subject.SubjectScope,
+				ShareEligible: subject.ShareEligible, SubjectSeedKind: subject.SeedKind,
+				CurrentTenantBindingCount: bindingCounts[sid], RefreshState: string(RefreshIdle),
+				HealthStatus: string(auth.Status), Quotas: []usage.QuotaWindowDTO{}, Usage: summaries[sid],
 			})
 			continue
 		}
-		items = append(items, statusViewFromRecord(row, auth, summaries[sid]))
+		items = append(items, statusViewFromSharedRecord(row, auth, summaries[sid], subject, bindingCounts[sid]))
 	}
 	return StatusListResponse{Items: items}, nil
 }
 
-func statusViewFromRecord(row usage.AIAccountStatusRecord, auth *coreauth.Auth, summary usage.AuthSubjectUsageSummary) AccountStatusView {
+func statusViewFromSharedRecord(row usage.AIAccountSubjectStatusRecord, auth *coreauth.Auth, summary usage.AuthSubjectUsageSummary, subject usage.AIAccountSubjectRecord, bindingCount int) AccountStatusView {
 	view := AccountStatusView{
-		AuthSubjectID:          row.AuthSubjectID,
-		AuthIndex:              row.AuthIndex,
-		Provider:               row.Provider,
-		RefreshState:           row.RefreshState,
-		HealthStatus:           row.HealthStatus,
-		PlanType:               row.PlanType,
-		RestrictionSummary:     row.RestrictionSummary,
-		ErrorSummary:           row.ErrorSummary,
-		ErrorCode:              row.ErrorCode,
-		ErrorMessage:           row.ErrorMessage,
-		Quotas:                 row.Quotas,
-		ResetCreditCount:       row.ResetCreditCount,
-		ResetCreditExpirations: row.ResetCreditExpirations,
-		Usage:                  summary,
-		UpstreamCheckedAt:      row.UpstreamCheckedAt,
-		UsageUpdatedAt:         row.UsageUpdatedAt,
-		ExpiresAt:              row.ExpiresAt,
-		Version:                row.Version,
-		UpdatedAt:              timePointer(row.UpdatedAt),
+		AuthSubjectID: row.AuthSubjectID, Provider: row.Provider, StatusScope: usage.AIAccountStatusScopeShared,
+		SubjectScope: subject.SubjectScope, ShareEligible: subject.ShareEligible, SubjectSeedKind: subject.SeedKind,
+		CurrentTenantBindingCount: bindingCount, RefreshState: row.LastProbeState, HealthStatus: row.HealthStatus,
+		PlanType: row.PlanType, RestrictionSummary: row.RestrictionSummary, ErrorSummary: row.ErrorSummary,
+		ErrorCode: row.ErrorCode, Quotas: row.Quotas, ResetCreditCount: row.ResetCreditCount,
+		ResetCreditExpirations: row.ResetCreditExpirations, Usage: summary,
+		SubscriptionStartedAt: row.SubscriptionStartedAt, SubscriptionExpiresAt: row.SubscriptionExpiresAt,
+		SubscriptionSource: row.SubscriptionSource, UpstreamCheckedAt: row.UpstreamCheckedAt,
+		ExpiresAt: row.SubscriptionExpiresAt, Version: row.Version, UpdatedAt: timePointer(row.UpdatedAt),
 	}
 	if auth != nil {
-		if view.AuthIndex == "" {
-			view.AuthIndex = auth.Index
-		}
+		view.AuthIndex = auth.Index
 		if view.Provider == "" {
 			view.Provider = auth.Provider
 		}
 		if view.HealthStatus == "" {
 			view.HealthStatus = string(auth.Status)
-		}
-		if view.PlanType == "" {
-			view.PlanType = metadataString(auth, "plan_type", "planType")
 		}
 	}
 	if view.Quotas == nil {
@@ -797,7 +859,7 @@ func statusViewFromRecord(row usage.AIAccountStatusRecord, auth *coreauth.Auth, 
 	if view.Usage.AuthSubjectID == "" {
 		view.Usage.AuthSubjectID = row.AuthSubjectID
 	}
-	if view.UsageUpdatedAt == nil && !summary.UpdatedAt.IsZero() {
+	if !summary.UpdatedAt.IsZero() {
 		view.UsageUpdatedAt = timePointer(summary.UpdatedAt)
 	}
 	if view.Usage.WeeklyQuotaUsed == nil && auth != nil {
@@ -883,8 +945,49 @@ func (s *Service) purgeExpiredJobs() {
 	}
 }
 
-func flightKey(tenantID, subjectID string) string {
-	return strings.TrimSpace(tenantID) + "|" + strings.TrimSpace(subjectID)
+func flightKey(_ string, subjectID string) string {
+	return strings.TrimSpace(subjectID)
+}
+
+func reconcileTenantBindings(auths []*coreauth.Auth) error {
+	if len(auths) == 0 {
+		return nil
+	}
+	tenantID := ""
+	authIDs := make([]string, 0, len(auths))
+	for _, auth := range auths {
+		if auth != nil {
+			tenantID = auth.TenantID
+			if id := strings.TrimSpace(auth.ID); id != "" {
+				authIDs = append(authIDs, id)
+			}
+		}
+	}
+	rows, err := usage.ListAIAccountBindingsForTenantAuths(tenantID, authIDs)
+	if err != nil {
+		return err
+	}
+	byID := make(map[string]usage.AIAccountTenantBinding, len(rows))
+	for _, row := range rows {
+		byID[row.AuthID] = row
+	}
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		identity := usage.ResolveAuthSubjectIdentity(auth)
+		if identity == nil {
+			continue
+		}
+		row, ok := byID[auth.ID]
+		if ok && row.BindingState == "active" && row.AuthSubjectID == identity.ID && row.AuthIndex == auth.EnsureIndex() && row.BindingSeedHash == identity.SeedHash {
+			continue
+		}
+		if err := usage.UpsertAIAccountTenantBinding(auth, identity); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func sanitizeMsg(msg string) string {

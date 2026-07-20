@@ -7,8 +7,8 @@ import (
 
 func TestRuntimeMigrationsCoverCoreTables(t *testing.T) {
 	migrations := RuntimeMigrations()
-	if len(migrations) != 19 {
-		t.Fatalf("RuntimeMigrations len = %d, want 19", len(migrations))
+	if len(migrations) != 20 {
+		t.Fatalf("RuntimeMigrations len = %d, want 20", len(migrations))
 	}
 	// Latest: usage rollup buckets for stats/limits isolation from request_logs.
 	rollupSQL := migrations[18].SQL
@@ -96,6 +96,20 @@ func TestRuntimeMigrationsCoverCoreTables(t *testing.T) {
 			t.Fatalf("ai account status migration missing %q", fragment)
 		}
 	}
+	sharedSQL := migrations[19].SQL
+	for _, fragment := range []string{
+		"CREATE TABLE IF NOT EXISTS ai_account_subjects",
+		"CREATE TABLE IF NOT EXISTS ai_account_tenant_bindings",
+		"CREATE TABLE IF NOT EXISTS ai_account_subject_status",
+		"CREATE TABLE IF NOT EXISTS ai_account_subject_usage_buckets",
+		"CREATE TABLE IF NOT EXISTS ai_account_subject_quota_cycles",
+		"CREATE TABLE IF NOT EXISTS ai_account_subject_quota_points",
+	} {
+		if !strings.Contains(sharedSQL, fragment) {
+			t.Fatalf("shared AI account migration missing %q", fragment)
+		}
+	}
+
 	authLookupSQL := migrations[10].SQL
 	for _, fragment := range []string{
 		"idx_request_logs_tenant_auth_index_time",

@@ -10,7 +10,8 @@ import (
 )
 
 // cleanupExpiredRequestLogMetadata deletes oldest request_logs past retention
-// or hard caps. Cascade removes content. Never touches usage_rollup_buckets.
+// or hard caps. Cascade removes content. Never touches usage_rollup_buckets or
+// ai_account_subject_usage_buckets; shared card totals survive detail retention.
 // Skips while rollup backfill marker is incomplete so first upgrade cannot
 // prune historical detail before lifetime projection is rebuilt.
 func cleanupExpiredRequestLogMetadata(ctx context.Context, db *sql.DB) (int64, error) {

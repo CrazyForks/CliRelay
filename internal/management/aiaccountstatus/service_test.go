@@ -763,3 +763,157 @@ func TestPersistReloadFailedDoesNotReportSuccess(t *testing.T) {
 		}
 	}
 }
+
+func TestListStatusNewTenantBindingReadsExistingSharedStatus(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.db")
+	if err := usage.InitDB(dbPath, config.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	t.Cleanup(func() { usage.CloseDB(); _ = os.Remove(dbPath) })
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	authA := &coreauth.Auth{ID: "shared-a", TenantID: "tenant-a", Provider: "codex", FileName: "a.json", Metadata: map[string]any{"account_id": "physical-account"}}
+	authB := &coreauth.Auth{ID: "shared-b", TenantID: "tenant-b", Provider: "codex", FileName: "b.json", Metadata: map[string]any{"account_id": "physical-account"}}
+	for _, auth := range []*coreauth.Auth{authA, authB} {
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatal(err)
+		}
+	}
+	identity := usage.ResolveAuthSubjectIdentity(authA)
+	if identity == nil || identity.ID != usage.ResolveAuthSubjectIdentity(authB).ID {
+		t.Fatal("expected shared account subject")
+	}
+	if err := usage.UpsertAIAccountTenantBinding(authA, identity); err != nil {
+		t.Fatal(err)
+	}
+	checked := time.Now().UTC()
+	pct := 68.0
+	if err := usage.UpsertAIAccountSubjectStatus(usage.AIAccountSubjectStatusRecord{
+		AuthSubjectID:     identity.ID,
+		Provider:          "codex",
+		LastProbeState:    string(RefreshSuccess),
+		HealthStatus:      "ok",
+		PlanType:          "plus",
+		Quotas:            []usage.QuotaWindowDTO{{QuotaKey: "code_week", Percent: &pct}},
+		UpstreamCheckedAt: &checked,
+		UpdatedAt:         checked,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mounting the same physical account in tenant B repairs only B's missing binding,
+	// then immediately reads the already-populated shared subject snapshot.
+	svc := New(&config.Config{}, manager, nil, nil)
+	response, err := svc.ListStatus("tenant-b", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Items) != 1 {
+		t.Fatalf("items=%+v", response.Items)
+	}
+	item := response.Items[0]
+	if item.AuthSubjectID != identity.ID || item.PlanType != "plus" || item.StatusScope != usage.AIAccountStatusScopeShared || item.SubjectScope != usage.AIAccountSubjectScopeShared || !item.ShareEligible {
+		t.Fatalf("shared status=%+v", item)
+	}
+	if item.CurrentTenantBindingCount != 1 || item.AuthIndex != authB.EnsureIndex() {
+		t.Fatalf("tenant B binding projection=%+v", item)
+	}
+}
+
+func TestListStatusRejectsGuessedSubjectWithoutCurrentTenantBinding(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.db")
+	if err := usage.InitDB(dbPath, config.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	t.Cleanup(func() { usage.CloseDB(); _ = os.Remove(dbPath) })
+
+	authA := &coreauth.Auth{ID: "only-a", TenantID: "tenant-a", Provider: "codex", FileName: "a.json", Metadata: map[string]any{"account_id": "secret-account"}}
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), authA); err != nil {
+		t.Fatal(err)
+	}
+	identity := usage.ResolveAuthSubjectIdentity(authA)
+	if err := usage.UpsertAIAccountTenantBinding(authA, identity); err != nil {
+		t.Fatal(err)
+	}
+	if err := usage.UpsertAIAccountSubjectStatus(usage.AIAccountSubjectStatusRecord{
+		AuthSubjectID: identity.ID, Provider: "codex", LastProbeState: string(RefreshSuccess), PlanType: "plus", UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := New(&config.Config{}, manager, nil, nil).ListStatus("tenant-b", nil, []string{identity.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Items) != 0 {
+		t.Fatalf("guessed subject leaked shared status: %+v", response.Items)
+	}
+}
+
+func TestCrossTenantRefreshSingleflightDoesNotLeakForeignJobID(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.db")
+	if err := usage.InitDB(dbPath, config.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	t.Cleanup(func() { usage.CloseDB(); _ = os.Remove(dbPath) })
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	authA := &coreauth.Auth{ID: "refresh-a", TenantID: "tenant-a", Provider: "codex", FileName: "a.json", Metadata: map[string]any{"account_id": "refresh-physical"}}
+	authB := &coreauth.Auth{ID: "refresh-b", TenantID: "tenant-b", Provider: "codex", FileName: "b.json", Metadata: map[string]any{"account_id": "refresh-physical"}}
+	for _, auth := range []*coreauth.Auth{authA, authB} {
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var probes atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	svc := New(&config.Config{}, manager, func(tenantID string) *managementapitools.Service {
+		return managementapitools.NewForTenant(tenantID, &config.Config{}, manager, managementapitools.Dependencies{})
+	}, nil)
+	svc.SetProbeFunc(func(ctx context.Context, _ *managementapitools.Service, _ *config.Config, _ *coreauth.Auth) (ProbeResult, error) {
+		if probes.Add(1) == 1 {
+			close(started)
+		}
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return ProbeResult{Quotas: []usage.QuotaWindowDTO{}}, nil
+	})
+
+	first := svc.StartRefresh("tenant-a", RefreshRequest{Force: true})
+	if first.Accepted != 1 {
+		t.Fatalf("first=%+v", first)
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first probe did not start")
+	}
+	second := svc.StartRefresh("tenant-b", RefreshRequest{Force: true})
+	if second.Accepted != 0 || second.Deduplicated != 1 {
+		t.Fatalf("second=%+v", second)
+	}
+	secondJob, ok := svc.GetJob("tenant-b", second.JobID)
+	if !ok || len(secondJob.Results) != 1 {
+		t.Fatalf("tenant B job=%+v ok=%v", secondJob, ok)
+	}
+	result := secondJob.Results[0]
+	if result.ErrorCode != "deduplicated" || result.ErrorMessage != "shared refresh already in progress" {
+		t.Fatalf("dedupe result=%+v", result)
+	}
+	if first.JobID != "" && (result.ErrorMessage == first.JobID || result.ErrorCode == first.JobID) {
+		t.Fatalf("foreign job ID leaked: first=%s result=%+v", first.JobID, result)
+	}
+	if _, ok := svc.GetJob("tenant-b", first.JobID); ok {
+		t.Fatal("tenant B can read tenant A job")
+	}
+	close(release)
+	waitJob(t, svc, "tenant-a", first.JobID)
+	if probes.Load() != 1 {
+		t.Fatalf("cross-tenant shared subject probed %d times", probes.Load())
+	}
+}

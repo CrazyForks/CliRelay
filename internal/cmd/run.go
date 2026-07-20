@@ -44,6 +44,7 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
+		WithCoreAuthHook(usage.NewAIAccountBindingHook()).
 		WithLocalManagementPassword(localPassword)
 
 	ctxSignal, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -86,6 +87,7 @@ func StartServiceBackground(cfg *config.Config, configPath string, localPassword
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
+		WithCoreAuthHook(usage.NewAIAccountBindingHook()).
 		WithLocalManagementPassword(localPassword)
 
 	ctx, cancelFn := context.WithCancel(context.Background())
@@ -145,6 +147,9 @@ func initializeRuntimeDataStack(cfg *config.Config, configPath string, loc *time
 	// Metadata cleanup is gated on this marker so detail retention cannot run first.
 	if err := usage.RunUsageRollupBackfillAtInit(); err != nil {
 		return fmt.Errorf("usage rollup backfill: %w", err)
+	}
+	if _, err := usage.RunAIAccountSharedSubjectBackfillAtInit(); err != nil {
+		return fmt.Errorf("ai account shared subject backfill: %w", err)
 	}
 	// Old blue-green slot may keep writing request_logs without rollup until drain.
 	// Catch-up absolute rebuilds after drain so those rows are not permanently missing.

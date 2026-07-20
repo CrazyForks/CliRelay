@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	identitypkg "github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/identityfingerprint"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -225,7 +226,7 @@ func TestGetIdentityFingerprintAccountReturnsLearnedPresetAndBuiltinDefault(t *t
 	}
 	t.Cleanup(usage.CloseDB)
 
-	accountKey := "authsub_codex_test"
+	manager, accountKey := registerIdentityFingerprintTestAuth(t, "codex", "codex-test-account")
 	if err := usage.UpsertIdentityFingerprint(&identityfingerprint.LearnedRecord{
 		Provider:      identityfingerprint.ProviderCodex,
 		AccountKey:    accountKey,
@@ -249,7 +250,7 @@ func TestGetIdentityFingerprintAccountReturnsLearnedPresetAndBuiltinDefault(t *t
 		t.Fatalf("UpsertIdentityFingerprint: %v", err)
 	}
 
-	h := &Handler{cfg: &config.Config{IdentityFingerprint: config.IdentityFingerprintConfig{
+	h := &Handler{authManager: manager, cfg: &config.Config{IdentityFingerprint: config.IdentityFingerprintConfig{
 		Codex: config.CodexIdentityFingerprintConfig{
 			Enabled:       true,
 			UserAgent:     "codex-tui/0.118.0 (Mac OS 26.3.1; arm64)",
@@ -323,12 +324,13 @@ func TestGetIdentityFingerprintAccountReturnsXAIBuiltinDefaultFields(t *testing.
 	}
 	t.Cleanup(usage.CloseDB)
 
-	h := &Handler{cfg: &config.Config{IdentityFingerprint: config.IdentityFingerprintConfig{
+	manager, accountKey := registerIdentityFingerprintTestAuth(t, "xai", "xai-test-account")
+	h := &Handler{authManager: manager, cfg: &config.Config{IdentityFingerprint: config.IdentityFingerprintConfig{
 		XAI: config.XAIIdentityFingerprintConfig{Enabled: true},
 	}}}
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodGet, "/identity-fingerprint/account?provider=xai&account_key=authsub_xai_test", nil)
+	c.Request = httptest.NewRequest(http.MethodGet, "/identity-fingerprint/account?provider=xai&account_key="+accountKey, nil)
 
 	h.GetIdentityFingerprintAccount(c)
 
@@ -441,6 +443,25 @@ func TestBuildIdentityFingerprintSummaryUsesClaudeLearnedCLIVersion(t *testing.T
 	}
 }
 
+func registerIdentityFingerprintTestAuth(t *testing.T, provider, accountID string) (*coreauth.Manager, string) {
+	t.Helper()
+	manager := coreauth.NewManager(nil, nil, nil)
+	registered, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       provider + "-" + accountID,
+		TenantID: identitypkg.SystemTenantID,
+		Provider: provider,
+		Metadata: map[string]any{"account_id": accountID},
+	})
+	if err != nil {
+		t.Fatalf("Register identity fingerprint auth: %v", err)
+	}
+	resolved := usage.ResolveAuthSubjectIdentity(registered)
+	if resolved == nil || resolved.ID == "" {
+		t.Fatal("registered auth did not resolve an account subject")
+	}
+	return manager, resolved.ID
+}
+
 func writeTestAuthFile(path string) error {
 	return os.WriteFile(path, []byte(`{"type":"claude"}`), 0o600)
 }
@@ -452,7 +473,7 @@ func TestCodexIdentityFingerprintAccountProfilesAndPolicy(t *testing.T) {
 	}
 	t.Cleanup(usage.CloseDB)
 
-	accountKey := "codex-account-profiles"
+	manager, accountKey := registerIdentityFingerprintTestAuth(t, "codex", "codex-profile-account")
 	now := time.Now().UTC()
 	for _, record := range []*identityfingerprint.LearnedRecord{
 		{
@@ -492,7 +513,7 @@ func TestCodexIdentityFingerprintAccountProfilesAndPolicy(t *testing.T) {
 		}
 	}
 
-	h := &Handler{cfg: &config.Config{IdentityFingerprint: config.IdentityFingerprintConfig{
+	h := &Handler{authManager: manager, cfg: &config.Config{IdentityFingerprint: config.IdentityFingerprintConfig{
 		Codex: config.CodexIdentityFingerprintConfig{
 			Enabled:      true,
 			UserAgent:    "Codex Desktop/global-preset",
@@ -541,5 +562,37 @@ func TestCodexIdentityFingerprintAccountProfilesAndPolicy(t *testing.T) {
 	}
 	if got := detail.Effective.Fields[identityfingerprint.FieldUserAgent].Value; got != "Codex Desktop/0.144.0-alpha.4" {
 		t.Fatalf("active Desktop User-Agent = %q", got)
+	}
+}
+
+func TestIdentityFingerprintScopeDoesNotRewriteCurrentBinding(t *testing.T) {
+	if err := usage.InitDB(filepath.Join(t.TempDir(), "usage.db"), config.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	t.Cleanup(usage.CloseDB)
+
+	manager, accountKey := registerIdentityFingerprintTestAuth(t, "codex", "binding-idempotent")
+	h := &Handler{authManager: manager}
+	identity, count, ok := h.identityFingerprintScopeForTenant(identitypkg.SystemTenantID, accountKey)
+	if !ok || identity == nil || count != 1 {
+		t.Fatalf("initial scope identity=%+v count=%d ok=%v", identity, count, ok)
+	}
+	authID := "codex-binding-idempotent"
+	before, err := usage.ListAIAccountBindingsForTenantAuths(identitypkg.SystemTenantID, []string{authID})
+	if err != nil || len(before) != 1 {
+		t.Fatalf("initial binding rows=%+v err=%v", before, err)
+	}
+
+	time.Sleep(5 * time.Millisecond)
+	identity, count, ok = h.identityFingerprintScopeForTenant(identitypkg.SystemTenantID, accountKey)
+	if !ok || identity == nil || count != 1 {
+		t.Fatalf("second scope identity=%+v count=%d ok=%v", identity, count, ok)
+	}
+	after, err := usage.ListAIAccountBindingsForTenantAuths(identitypkg.SystemTenantID, []string{authID})
+	if err != nil || len(after) != 1 {
+		t.Fatalf("second binding rows=%+v err=%v", after, err)
+	}
+	if !after[0].LastSeenAt.Equal(before[0].LastSeenAt) {
+		t.Fatalf("current binding was rewritten: before=%s after=%s", before[0].LastSeenAt, after[0].LastSeenAt)
 	}
 }

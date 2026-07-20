@@ -733,6 +733,16 @@ func initOpenedDBLocked(db, readDB *sql.DB, dbPath, driver string, storageCfg co
 		ensureRequestLogDetailIndexes(db)
 	}
 	bootstrapAIAccountStatusReadModels(db, loc)
+	if err := ensureAIAccountSharedSubjectTables(db); err != nil {
+		_ = db.Close()
+		usageDB, usageReadDB = nil, nil
+		return err
+	}
+	if err := loadAIAccountSubjectCycleCache(db); err != nil {
+		_ = db.Close()
+		usageDB, usageReadDB = nil, nil
+		return fmt.Errorf("usage: load shared ai account cycles: %w", err)
+	}
 	if err := bootstrapAPIKeyDailySpendingResets(db); err != nil {
 		_ = db.Close()
 		usageDB, usageReadDB = nil, nil
@@ -809,6 +819,7 @@ func CloseDB() {
 	usageLoc = nil
 	usageDriver = ""
 	usageDBMu.Unlock()
+	resetAIAccountSubjectCycleCache()
 	log.Info("usage: database closed")
 }
 

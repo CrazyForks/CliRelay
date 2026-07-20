@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/identityfingerprint"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -41,15 +42,19 @@ type identityFingerprintProfileDetail struct {
 }
 
 type identityFingerprintAccountDetail struct {
-	Summary            identityFingerprintAccountSummary        `json:"summary"`
-	Effective          identityfingerprint.EffectiveFingerprint `json:"effective"`
-	Learned            *identityfingerprint.LearnedRecord       `json:"learned,omitempty"`
-	Profiles           []identityFingerprintProfileDetail       `json:"profiles"`
-	Policy             identityfingerprint.AccountPolicy        `json:"policy"`
-	SelectedProfileKey string                                   `json:"selected_profile_key,omitempty"`
-	SelectionReason    string                                   `json:"selection_reason"`
-	Preset             any                                      `json:"preset"`
-	BuiltinDefault     any                                      `json:"builtin_default"`
+	StatusScope               string                                   `json:"status_scope"`
+	SubjectScope              string                                   `json:"subject_scope"`
+	ShareEligible             bool                                     `json:"share_eligible"`
+	CurrentTenantBindingCount int                                      `json:"current_tenant_binding_count"`
+	Summary                   identityFingerprintAccountSummary        `json:"summary"`
+	Effective                 identityfingerprint.EffectiveFingerprint `json:"effective"`
+	Learned                   *identityfingerprint.LearnedRecord       `json:"learned,omitempty"`
+	Profiles                  []identityFingerprintProfileDetail       `json:"profiles"`
+	Policy                    identityfingerprint.AccountPolicy        `json:"policy"`
+	SelectedProfileKey        string                                   `json:"selected_profile_key,omitempty"`
+	SelectionReason           string                                   `json:"selection_reason"`
+	Preset                    any                                      `json:"preset"`
+	BuiltinDefault            any                                      `json:"builtin_default"`
 }
 
 func (h *Handler) GetIdentityFingerprintAccount(c *gin.Context) {
@@ -63,11 +68,17 @@ func (h *Handler) GetIdentityFingerprintAccount(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "account_key is required"})
 		return
 	}
+	identity, bindingCount, ok := h.identityFingerprintScopeForTenant(effectiveTenantID(c), accountKey)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "account subject is not bound to the current tenant"})
+		return
+	}
 	detail, err := h.identityFingerprintAccountDetail(provider, accountKey, strings.TrimSpace(c.Query("auth_subject_id")))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	applyIdentityFingerprintScope(&detail, identity, bindingCount)
 	c.JSON(http.StatusOK, detail)
 }
 
@@ -93,6 +104,11 @@ func (h *Handler) PutIdentityFingerprintAccountPolicy(c *gin.Context) {
 	accountKey := strings.TrimSpace(body.AccountKey)
 	if accountKey == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "account_key is required"})
+		return
+	}
+	identity, bindingCount, bound := h.identityFingerprintScopeForTenant(effectiveTenantID(c), accountKey)
+	if !bound {
+		c.JSON(http.StatusNotFound, gin.H{"error": "account subject is not bound to the current tenant"})
 		return
 	}
 	strategy := identityfingerprint.AccountStrategy(strings.TrimSpace(body.Strategy))
@@ -136,6 +152,8 @@ func (h *Handler) PutIdentityFingerprintAccountPolicy(c *gin.Context) {
 		return
 	}
 	detail.Policy = policy
+	applyIdentityFingerprintScope(&detail, identity, bindingCount)
+	h.recordAIAccountIdentityAudit(c, "ai_account.identity_policy.update", accountKey, provider, policy.ActiveProfileKey, policy.Revision)
 	c.JSON(http.StatusOK, detail)
 }
 
@@ -151,7 +169,12 @@ func (h *Handler) DeleteIdentityFingerprintAccountProfile(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "account_key and profile_key are required"})
 		return
 	}
-	deleted, _, err := usage.DeleteIdentityFingerprintProfileAndRepairPolicy(provider, accountKey, profileKey)
+	identity, bindingCount, bound := h.identityFingerprintScopeForTenant(effectiveTenantID(c), accountKey)
+	if !bound {
+		c.JSON(http.StatusNotFound, gin.H{"error": "account subject is not bound to the current tenant"})
+		return
+	}
+	deleted, policy, err := usage.DeleteIdentityFingerprintProfileAndRepairPolicy(provider, accountKey, profileKey)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -161,7 +184,35 @@ func (h *Handler) DeleteIdentityFingerprintAccountProfile(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	applyIdentityFingerprintScope(&detail, identity, bindingCount)
+	if deleted > 0 {
+		h.recordAIAccountIdentityAudit(c, "ai_account.identity_profile.delete", accountKey, provider, profileKey, policy.Revision)
+	}
 	c.JSON(http.StatusOK, gin.H{"deleted": deleted, "detail": detail})
+}
+
+func (h *Handler) recordAIAccountIdentityAudit(c *gin.Context, action, accountKey string, provider identityfingerprint.Provider, profileKey string, revision int64) {
+	principal, ok := principalFromContext(c)
+	service := h.identity()
+	if !ok || service == nil || c == nil || c.Request == nil {
+		return
+	}
+	service.RecordAudit(c.Request.Context(), identity.AuditEvent{
+		TenantID:       principal.EffectiveTenant.ID,
+		ActorKind:      principal.Kind,
+		ActorUserID:    principal.User.ID,
+		ActorSessionID: principal.SessionID,
+		Action:         action,
+		ResourceType:   "ai_account_subject",
+		ResourceID:     accountKey,
+		Result:         "success",
+		Changes: map[string]any{
+			"provider":       string(provider),
+			"profile_key":    strings.TrimSpace(profileKey),
+			"revision":       revision,
+			"tenant_context": principal.EffectiveTenant.ID,
+		},
+	})
 }
 
 func (h *Handler) enrichAuthFileIdentityFingerprintSummaries(files []map[string]any, auths []*coreauth.Auth) {
@@ -208,6 +259,14 @@ func (h *Handler) identityFingerprintSummaryForAuth(auth *coreauth.Auth) *identi
 	if err != nil {
 		return nil
 	}
+	identity := usage.ResolveAuthSubjectIdentity(auth)
+	count := 1
+	if auth != nil {
+		if counts, err := usage.CountAIAccountTenantBindings(auth.TenantID, []string{accountKey}); err == nil && counts[accountKey] > 0 {
+			count = counts[accountKey]
+		}
+	}
+	applyIdentityFingerprintScope(&detail, identity, count)
 	return &detail.Summary
 }
 
@@ -297,6 +356,70 @@ func (h *Handler) identityFingerprintAccountDetail(provider identityfingerprint.
 		Preset:          preset,
 		BuiltinDefault:  builtinDefault,
 	}, nil
+}
+
+func (h *Handler) identityFingerprintScopeForTenant(tenantID, accountKey string) (*usage.AuthSubjectIdentity, int, bool) {
+	if h == nil || h.authManager == nil {
+		return nil, 0, false
+	}
+	tenantID = strings.TrimSpace(tenantID)
+	accountKey = strings.TrimSpace(accountKey)
+	matchedAuths := make([]*coreauth.Auth, 0)
+	authIDs := make([]string, 0)
+	var matched *usage.AuthSubjectIdentity
+	for _, auth := range h.authManager.ListForTenant(tenantID) {
+		identity := usage.ResolveAuthSubjectIdentity(auth)
+		if identity == nil || identity.ID != accountKey {
+			continue
+		}
+		matched = identity
+		matchedAuths = append(matchedAuths, auth)
+		if authID := strings.TrimSpace(auth.ID); authID != "" {
+			authIDs = append(authIDs, authID)
+		}
+	}
+	if matched == nil || len(matchedAuths) == 0 {
+		return nil, 0, false
+	}
+
+	rows, err := usage.ListAIAccountBindingsForTenantAuths(tenantID, authIDs)
+	if err != nil {
+		return nil, 0, false
+	}
+	byAuthID := make(map[string]usage.AIAccountTenantBinding, len(rows))
+	for _, row := range rows {
+		byAuthID[row.AuthID] = row
+	}
+	count := 0
+	for _, auth := range matchedAuths {
+		identity := usage.ResolveAuthSubjectIdentity(auth)
+		if identity == nil {
+			continue
+		}
+		row, exists := byAuthID[auth.ID]
+		bindingCurrent := exists && row.BindingState == "active" &&
+			row.AuthSubjectID == identity.ID && row.AuthIndex == auth.EnsureIndex() &&
+			row.BindingSeedHash == identity.SeedHash
+		if !bindingCurrent {
+			// Management reads may repair a missing/stale lifecycle binding, but a
+			// healthy binding remains read-only and never becomes a per-request UPSERT.
+			if err := usage.UpsertAIAccountTenantBinding(auth, identity); err != nil {
+				return nil, 0, false
+			}
+		}
+		count++
+	}
+	return matched, count, count > 0
+}
+
+func applyIdentityFingerprintScope(detail *identityFingerprintAccountDetail, identity *usage.AuthSubjectIdentity, bindingCount int) {
+	if detail == nil || identity == nil {
+		return
+	}
+	detail.StatusScope = usage.AIAccountStatusScopeShared
+	detail.SubjectScope = identity.SubjectScope
+	detail.ShareEligible = identity.ShareEligible
+	detail.CurrentTenantBindingCount = bindingCount
 }
 
 func (h *Handler) currentIdentityFingerprintConfig() config.IdentityFingerprintConfig {

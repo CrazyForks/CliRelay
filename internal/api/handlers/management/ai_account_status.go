@@ -127,7 +127,7 @@ func (h *Handler) GetAIAccountStatusRefreshJob(c *gin.Context) {
 }
 
 // GetAIAccountStatus returns latest status + lightweight usage summary.
-// Does not scan request_logs; reads ai_account_status + auth_subject_usage_daily.
+// Does not scan request_logs; reads current-tenant bindings and shared subject small tables.
 func (h *Handler) GetAIAccountStatus(c *gin.Context) {
 	svc := h.aiAccountStatusService()
 	if svc == nil {

@@ -8,11 +8,20 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
+// AuthSubjectIdentity is the single account identity contract used by status,
+// usage, quota and identity fingerprints. AccountKey must always equal ID.
+// Only provider-stable account_id seeds are eligible for cross-tenant sharing;
+// all fallbacks include tenant_id in the seed and remain tenant scoped.
 type AuthSubjectIdentity struct {
-	ID        string
-	Provider  string
-	AccountID string
-	Email     string
+	ID            string
+	Provider      string
+	AccountID     string
+	Email         string
+	SeedKind      string
+	SeedHash      string
+	SubjectScope  string
+	ShareEligible bool
+	ShareReason   string
 }
 
 type AuthSubjectMatcher struct {
@@ -31,18 +40,25 @@ func ResolveAuthSubjectIdentity(auth *coreauth.Auth) *AuthSubjectIdentity {
 	if provider == "" {
 		provider = "unknown"
 	}
+	tenantID := coreauth.NormalizedTenantID(auth.TenantID)
 	accountID := authMetadataString(auth.Metadata, "account_id", "accountId", "chatgpt_account_id")
-	email := authEmail(auth)
+	email := strings.ToLower(authEmail(auth))
 
 	seedKind := ""
 	seedValue := ""
+	shareEligible := false
+	subjectScope := "tenant"
+	shareReason := "fallback_identity_is_tenant_scoped"
 	switch {
 	case accountID != "":
 		seedKind = "account_id"
 		seedValue = accountID
+		shareEligible = true
+		subjectScope = "shared"
+		shareReason = "stable_provider_account_id"
 	case email != "":
 		seedKind = "email"
-		seedValue = strings.ToLower(email)
+		seedValue = email
 	case strings.TrimSpace(auth.ID) != "":
 		seedKind = "auth_id"
 		seedValue = strings.TrimSpace(auth.ID)
@@ -55,11 +71,23 @@ func ResolveAuthSubjectIdentity(auth *coreauth.Auth) *AuthSubjectIdentity {
 		seedValue = authIndex
 	}
 
+	subjectSeed := []string{provider, seedKind, seedValue}
+	seedHashValue := seedValue
+	if !shareEligible {
+		subjectSeed = []string{provider, seedKind, tenantID, seedValue}
+		seedHashValue = tenantID + "\x1f" + seedValue
+	}
+
 	return &AuthSubjectIdentity{
-		ID:        stableAuthSubjectID(provider, seedKind, seedValue),
-		Provider:  provider,
-		AccountID: accountID,
-		Email:     strings.ToLower(email),
+		ID:            stableAuthSubjectID(subjectSeed...),
+		Provider:      provider,
+		AccountID:     accountID,
+		Email:         email,
+		SeedKind:      seedKind,
+		SeedHash:      stableSeedHash(seedHashValue),
+		SubjectScope:  subjectScope,
+		ShareEligible: shareEligible,
+		ShareReason:   shareReason,
 	}
 }
 
@@ -168,6 +196,11 @@ func authMetadataString(metadata map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func stableSeedHash(value string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(value)))
+	return hex.EncodeToString(sum[:])
 }
 
 func stableAuthSubjectID(parts ...string) string {

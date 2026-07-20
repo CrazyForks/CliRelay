@@ -31,6 +31,8 @@ func RuntimeMigrations() []Migration {
 		{Version: "202607190002_end_user_daily_spending_resets", SQL: endUserDailySpendingResetsSQL},
 		// Small usage rollup so stats/limits stop scanning request_logs.
 		{Version: "202607200001_usage_rollup_buckets", SQL: usageRollupBucketsSQL},
+		// Shared physical AI-account subjects; credentials remain tenant-private bindings.
+		{Version: "202607200002_ai_account_shared_subjects", SQL: aiAccountSharedSubjectsSQL},
 	}
 }
 
@@ -960,4 +962,115 @@ ALTER TABLE model_configs ADD COLUMN IF NOT EXISTS max_completion_tokens INTEGER
 ALTER TABLE model_configs ADD COLUMN IF NOT EXISTS supported_parameters TEXT NOT NULL DEFAULT '';
 ALTER TABLE model_configs ADD COLUMN IF NOT EXISTS reasoning TEXT NOT NULL DEFAULT '';
 ALTER TABLE model_configs ADD COLUMN IF NOT EXISTS knowledge_cutoff TEXT NOT NULL DEFAULT '';
+`
+
+const aiAccountSharedSubjectsSQL = `
+CREATE TABLE IF NOT EXISTS ai_account_subjects (
+  auth_subject_id          TEXT PRIMARY KEY,
+  provider                 TEXT NOT NULL,
+  subject_scope            TEXT NOT NULL CHECK (subject_scope IN ('shared', 'tenant')),
+  seed_kind                TEXT NOT NULL,
+  seed_hash                TEXT NOT NULL,
+  share_eligible           BOOLEAN NOT NULL DEFAULT false,
+  usage_projected_since    TIMESTAMPTZ,
+  usage_history_complete   BOOLEAN NOT NULL DEFAULT false,
+  created_at               TIMESTAMPTZ NOT NULL,
+  updated_at               TIMESTAMPTZ NOT NULL,
+  UNIQUE (provider, subject_scope, seed_kind, seed_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_ai_account_subjects_provider_scope
+  ON ai_account_subjects(provider, subject_scope, updated_at);
+
+CREATE TABLE IF NOT EXISTS ai_account_tenant_bindings (
+  tenant_id                UUID NOT NULL,
+  auth_id                  TEXT NOT NULL,
+  auth_index               TEXT NOT NULL,
+  provider                 TEXT NOT NULL,
+  auth_subject_id          TEXT NOT NULL,
+  binding_seed_kind        TEXT NOT NULL,
+  binding_seed_hash        TEXT NOT NULL,
+  share_eligible           BOOLEAN NOT NULL DEFAULT false,
+  binding_state            TEXT NOT NULL DEFAULT 'active'
+                           CHECK (binding_state IN ('active', 'deleted')),
+  binding_revision         BIGINT NOT NULL DEFAULT 1,
+  bound_at                 TIMESTAMPTZ NOT NULL,
+  last_seen_at             TIMESTAMPTZ NOT NULL,
+  deleted_at               TIMESTAMPTZ,
+  PRIMARY KEY (tenant_id, auth_id),
+  FOREIGN KEY (auth_subject_id) REFERENCES ai_account_subjects(auth_subject_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_account_binding_active_index
+  ON ai_account_tenant_bindings(tenant_id, auth_index)
+  WHERE binding_state = 'active';
+CREATE INDEX IF NOT EXISTS idx_ai_account_binding_subject
+  ON ai_account_tenant_bindings(auth_subject_id, binding_state);
+CREATE INDEX IF NOT EXISTS idx_ai_account_binding_tenant_subject
+  ON ai_account_tenant_bindings(tenant_id, auth_subject_id, binding_state);
+
+CREATE TABLE IF NOT EXISTS ai_account_subject_status (
+  auth_subject_id           TEXT PRIMARY KEY,
+  provider                  TEXT NOT NULL,
+  last_probe_state          TEXT NOT NULL DEFAULT 'idle'
+                            CHECK (last_probe_state IN ('idle', 'success', 'error')),
+  health_status             TEXT NOT NULL DEFAULT '',
+  plan_type                 TEXT NOT NULL DEFAULT '',
+  subscription_started_at   TIMESTAMPTZ,
+  subscription_expires_at   TIMESTAMPTZ,
+  subscription_source       TEXT NOT NULL DEFAULT ''
+                            CHECK (subscription_source IN ('', 'probe', 'signed_claims', 'migration')),
+  restriction_summary       TEXT NOT NULL DEFAULT '',
+  error_code                TEXT NOT NULL DEFAULT '',
+  error_summary             TEXT NOT NULL DEFAULT '',
+  quota_json                TEXT NOT NULL DEFAULT '[]',
+  reset_credit_count        BIGINT,
+  reset_credit_expirations  TEXT NOT NULL DEFAULT '[]',
+  upstream_checked_at       TIMESTAMPTZ,
+  version                   BIGINT NOT NULL DEFAULT 1,
+  updated_at                TIMESTAMPTZ NOT NULL,
+  FOREIGN KEY (auth_subject_id) REFERENCES ai_account_subjects(auth_subject_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ai_account_subject_status_checked
+  ON ai_account_subject_status(upstream_checked_at, updated_at);
+
+CREATE TABLE IF NOT EXISTS ai_account_subject_usage_buckets (
+  auth_subject_id   TEXT NOT NULL,
+  bucket_kind       TEXT NOT NULL CHECK (bucket_kind IN ('day', 'lifetime', 'cycle')),
+  bucket_start      TEXT NOT NULL,
+  request_count     BIGINT NOT NULL DEFAULT 0,
+  success_count     BIGINT NOT NULL DEFAULT 0,
+  failure_count     BIGINT NOT NULL DEFAULT 0,
+  cost_total        DOUBLE PRECISION NOT NULL DEFAULT 0,
+  first_event_at    TIMESTAMPTZ NOT NULL,
+  updated_at        TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (auth_subject_id, bucket_kind, bucket_start)
+);
+CREATE INDEX IF NOT EXISTS idx_ai_account_subject_usage_day
+  ON ai_account_subject_usage_buckets(bucket_kind, bucket_start, auth_subject_id);
+
+CREATE TABLE IF NOT EXISTS ai_account_subject_quota_cycles (
+  auth_subject_id    TEXT NOT NULL,
+  provider           TEXT NOT NULL,
+  quota_key          TEXT NOT NULL,
+  cycle_start_at     TIMESTAMPTZ NOT NULL,
+  reset_at           TIMESTAMPTZ NOT NULL,
+  window_seconds     BIGINT NOT NULL DEFAULT 0,
+  last_verified_at   TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (auth_subject_id, quota_key),
+  FOREIGN KEY (auth_subject_id) REFERENCES ai_account_subjects(auth_subject_id)
+);
+
+CREATE TABLE IF NOT EXISTS ai_account_subject_quota_points (
+  id                 BIGSERIAL PRIMARY KEY,
+  auth_subject_id    TEXT NOT NULL,
+  provider           TEXT NOT NULL,
+  quota_key          TEXT NOT NULL,
+  quota_label        TEXT NOT NULL DEFAULT '',
+  percent            DOUBLE PRECISION,
+  reset_at           TIMESTAMPTZ,
+  window_seconds     BIGINT NOT NULL DEFAULT 0,
+  recorded_at        TIMESTAMPTZ NOT NULL,
+  FOREIGN KEY (auth_subject_id) REFERENCES ai_account_subjects(auth_subject_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ai_account_subject_quota_points_key_time
+  ON ai_account_subject_quota_points(auth_subject_id, quota_key, recorded_at DESC);
 `

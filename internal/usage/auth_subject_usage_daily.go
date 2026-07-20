@@ -12,18 +12,25 @@ const authSubjectUsageDailyBackfillDays = 30
 
 // AuthSubjectUsageSummary is the lightweight cycle/window summary for cards.
 type AuthSubjectUsageSummary struct {
-	AuthSubjectID     string    `json:"auth_subject_id"`
-	RequestTotal7d    int64     `json:"request_total_7d"`
-	CostTotal7d       float64   `json:"cost_total_7d"`
-	RequestTotal30d   int64     `json:"request_total_30d"`
-	SuccessTotal30d   int64     `json:"success_total_30d"`
-	FailureTotal30d   int64     `json:"failure_total_30d"`
-	CycleRequestTotal int64     `json:"cycle_request_total"`
-	CycleCostTotal    float64   `json:"cycle_cost_total"`
-	CycleKnown        bool      `json:"cycle_known"`
-	CycleStart        string    `json:"cycle_start,omitempty"`
-	WeeklyQuotaUsed   *float64  `json:"weekly_quota_used_percent,omitempty"`
-	UpdatedAt         time.Time `json:"updated_at,omitempty"`
+	AuthSubjectID     string     `json:"auth_subject_id"`
+	RequestTotal      int64      `json:"request_total"`
+	SuccessTotal      int64      `json:"success_total"`
+	FailureTotal      int64      `json:"failure_total"`
+	CostTotal         float64    `json:"cost_total"`
+	SuccessRate       *float64   `json:"success_rate,omitempty"`
+	RequestTotal7d    int64      `json:"request_total_7d"`
+	CostTotal7d       float64    `json:"cost_total_7d"`
+	RequestTotal30d   int64      `json:"request_total_30d"`
+	SuccessTotal30d   int64      `json:"success_total_30d"`
+	FailureTotal30d   int64      `json:"failure_total_30d"`
+	CycleRequestTotal int64      `json:"cycle_request_total"`
+	CycleCostTotal    float64    `json:"cycle_cost_total"`
+	CycleKnown        bool       `json:"cycle_known"`
+	CycleStart        string     `json:"cycle_start,omitempty"`
+	ProjectedSince    *time.Time `json:"projected_since,omitempty"`
+	HistoryComplete   bool       `json:"history_complete"`
+	WeeklyQuotaUsed   *float64   `json:"weekly_quota_used_percent,omitempty"`
+	UpdatedAt         time.Time  `json:"updated_at,omitempty"`
 }
 
 // commitLogWithAuthSubjectUsageDaily projects daily card counters then commits the request_log tx.

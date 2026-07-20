@@ -110,6 +110,7 @@ func TestApplyMigrationsUpgradeFromPublishedSchema(t *testing.T) {
 	}
 	assertAllMigrationsClean(t, ctx, db, all)
 	assertMigratedFixture(t, ctx, db)
+	assertAIAccountSharedSubjectTables(t, ctx, db)
 
 	// Re-apply must stay idempotent: no dirty rows, no data mutation.
 	if err := ApplyMigrations(ctx, db, all); err != nil {
@@ -117,6 +118,27 @@ func TestApplyMigrationsUpgradeFromPublishedSchema(t *testing.T) {
 	}
 	assertAllMigrationsClean(t, ctx, db, all)
 	assertMigratedFixture(t, ctx, db)
+	assertAIAccountSharedSubjectTables(t, ctx, db)
+}
+
+func assertAIAccountSharedSubjectTables(t *testing.T, ctx context.Context, db *sql.DB) {
+	t.Helper()
+	for _, table := range []string{
+		"ai_account_subjects",
+		"ai_account_tenant_bindings",
+		"ai_account_subject_status",
+		"ai_account_subject_usage_buckets",
+		"ai_account_subject_quota_cycles",
+		"ai_account_subject_quota_points",
+	} {
+		var exists bool
+		if err := db.QueryRowContext(ctx, `SELECT to_regclass(?) IS NOT NULL`, "public."+table).Scan(&exists); err != nil {
+			t.Fatalf("check shared AI account table %s: %v", table, err)
+		}
+		if !exists {
+			t.Fatalf("shared AI account table %s missing after upgrade", table)
+		}
+	}
 }
 
 // publishedBaselineMigrations returns migrations up to and including

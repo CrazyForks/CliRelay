@@ -129,6 +129,16 @@ type Hook interface {
 	OnResult(ctx context.Context, result Result)
 }
 
+// AuthLoadedHook and AuthDeletedHook are optional lifecycle extensions. Keeping
+// them separate preserves compatibility with existing Hook implementations.
+type AuthLoadedHook interface {
+	OnAuthLoaded(ctx context.Context, auth *Auth)
+}
+
+type AuthDeletedHook interface {
+	OnAuthDeleted(ctx context.Context, auth *Auth)
+}
+
 // NoopHook provides optional hook defaults.
 type NoopHook struct{}
 
@@ -221,6 +231,20 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
 	AttachDefaultModelRegistry(manager)
 	return manager
+}
+
+// SetHook replaces lifecycle callbacks. It is intended for host wiring before
+// Load/Register traffic starts.
+func (m *Manager) SetHook(hook Hook) {
+	if m == nil {
+		return
+	}
+	if hook == nil {
+		hook = NoopHook{}
+	}
+	m.mu.Lock()
+	m.hook = hook
+	m.mu.Unlock()
 }
 
 func (m *Manager) SetModelRegistry(registry ModelRegistry) {

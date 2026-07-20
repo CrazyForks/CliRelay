@@ -78,6 +78,8 @@ type Service struct {
 
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
+	// coreAuthHook observes credential lifecycle without entering request hot paths.
+	coreAuthHook coreauth.Hook
 
 	// shutdownOnce ensures shutdown is called only once.
 	shutdownOnce sync.Once
@@ -116,6 +118,8 @@ type Builder struct {
 
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
+	// coreAuthHook observes credential lifecycle without entering request hot paths.
+	coreAuthHook coreauth.Hook
 
 	// serverOptions contains additional server configuration options.
 	serverOptions []api.ServerOption
@@ -191,6 +195,12 @@ func (b *Builder) WithRequestAccessManager(mgr *sdkaccess.Manager) *Builder {
 // WithCoreAuthManager overrides the runtime auth manager responsible for request execution.
 func (b *Builder) WithCoreAuthManager(mgr *coreauth.Manager) *Builder {
 	b.coreManager = mgr
+	return b
+}
+
+// WithCoreAuthHook configures lifecycle callbacks for bindings and related read models.
+func (b *Builder) WithCoreAuthHook(hook coreauth.Hook) *Builder {
+	b.coreAuthHook = hook
 	return b
 }
 
@@ -278,7 +288,10 @@ func (b *Builder) Build() (*Service, error) {
 			selector = &coreauth.RoundRobinSelector{}
 		}
 
-		coreManager = coreauth.NewManager(tokenStore, selector, nil)
+		coreManager = coreauth.NewManager(tokenStore, selector, b.coreAuthHook)
+	}
+	if b.coreAuthHook != nil {
+		coreManager.SetHook(b.coreAuthHook)
 	}
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())

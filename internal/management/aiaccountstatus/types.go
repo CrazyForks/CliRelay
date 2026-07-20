@@ -54,25 +54,33 @@ type JobSnapshot struct {
 }
 
 type AccountStatusView struct {
-	AuthSubjectID          string                        `json:"auth_subject_id"`
-	AuthIndex              string                        `json:"auth_index"`
-	Provider               string                        `json:"provider"`
-	RefreshState           string                        `json:"refresh_state"`
-	HealthStatus           string                        `json:"health_status"`
-	PlanType               string                        `json:"plan_type,omitempty"`
-	RestrictionSummary     string                        `json:"restriction_summary,omitempty"`
-	ErrorSummary           string                        `json:"error_summary,omitempty"`
-	ErrorCode              string                        `json:"error_code,omitempty"`
-	ErrorMessage           string                        `json:"error_message,omitempty"`
-	Quotas                 []usage.QuotaWindowDTO        `json:"quotas"`
-	ResetCreditCount       *int64                        `json:"reset_credit_count,omitempty"`
-	ResetCreditExpirations []string                      `json:"reset_credit_expirations,omitempty"`
-	Usage                  usage.AuthSubjectUsageSummary `json:"usage"`
-	UpstreamCheckedAt      *time.Time                    `json:"upstream_checked_at,omitempty"`
-	UsageUpdatedAt         *time.Time                    `json:"usage_updated_at,omitempty"`
-	ExpiresAt              *time.Time                    `json:"expires_at,omitempty"`
-	Version                int64                         `json:"version"`
-	UpdatedAt              *time.Time                    `json:"updated_at,omitempty"`
+	AuthSubjectID             string                        `json:"auth_subject_id"`
+	AuthIndex                 string                        `json:"auth_index"`
+	Provider                  string                        `json:"provider"`
+	StatusScope               string                        `json:"status_scope"`
+	SubjectScope              string                        `json:"subject_scope"`
+	ShareEligible             bool                          `json:"share_eligible"`
+	SubjectSeedKind           string                        `json:"subject_seed_kind"`
+	CurrentTenantBindingCount int                           `json:"current_tenant_binding_count"`
+	RefreshState              string                        `json:"refresh_state"`
+	HealthStatus              string                        `json:"health_status"`
+	PlanType                  string                        `json:"plan_type,omitempty"`
+	RestrictionSummary        string                        `json:"restriction_summary,omitempty"`
+	ErrorSummary              string                        `json:"error_summary,omitempty"`
+	ErrorCode                 string                        `json:"error_code,omitempty"`
+	ErrorMessage              string                        `json:"error_message,omitempty"`
+	Quotas                    []usage.QuotaWindowDTO        `json:"quotas"`
+	ResetCreditCount          *int64                        `json:"reset_credit_count,omitempty"`
+	ResetCreditExpirations    []string                      `json:"reset_credit_expirations,omitempty"`
+	Usage                     usage.AuthSubjectUsageSummary `json:"usage"`
+	SubscriptionStartedAt     *time.Time                    `json:"subscription_started_at,omitempty"`
+	SubscriptionExpiresAt     *time.Time                    `json:"subscription_expires_at,omitempty"`
+	SubscriptionSource        string                        `json:"subscription_source,omitempty"`
+	UpstreamCheckedAt         *time.Time                    `json:"upstream_checked_at,omitempty"`
+	UsageUpdatedAt            *time.Time                    `json:"usage_updated_at,omitempty"`
+	ExpiresAt                 *time.Time                    `json:"expires_at,omitempty"`
+	Version                   int64                         `json:"version"`
+	UpdatedAt                 *time.Time                    `json:"updated_at,omitempty"`
 }
 
 type StatusListResponse struct {

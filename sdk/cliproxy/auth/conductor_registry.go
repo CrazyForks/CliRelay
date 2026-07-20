@@ -188,25 +188,38 @@ func (m *Manager) Delete(ctx context.Context, id string) (*Auth, error) {
 		return nil, err
 	}
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	if hook, ok := m.hook.(AuthDeletedHook); ok {
+		hook.OnAuthDeleted(ctx, snapshot.Clone())
+	}
 	return snapshot.Clone(), nil
 }
 
-// Load resets manager state from the backing store.
+// Load resets manager state from the backing store. Lifecycle callbacks run
+// after releasing the manager lock so database-backed hooks cannot deadlock auth
+// selection or refresh paths.
 func (m *Manager) Load(ctx context.Context) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	items, err := m.loadPersistedAuths(ctx)
 	if err != nil {
 		return err
 	}
+	loaded := make([]*Auth, 0, len(items))
+	m.mu.Lock()
 	m.auths = make(map[string]*Auth, len(items))
 	for _, auth := range items {
 		if auth == nil || auth.ID == "" {
 			continue
 		}
 		auth.EnsureIndex()
-		m.auths[auth.ID] = auth.Clone()
+		snapshot := auth.Clone()
+		m.auths[auth.ID] = snapshot
+		loaded = append(loaded, snapshot.Clone())
 	}
 	m.rebuildAPIKeyModelAliasLocked()
+	m.mu.Unlock()
+	if hook, ok := m.hook.(AuthLoadedHook); ok {
+		for _, auth := range loaded {
+			hook.OnAuthLoaded(ctx, auth)
+		}
+	}
 	return nil
 }

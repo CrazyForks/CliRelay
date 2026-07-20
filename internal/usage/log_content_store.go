@@ -308,6 +308,16 @@ func runRequestLogMaintenancePass(ctx context.Context, db *sql.DB, driver string
 	} else if n > 0 {
 		log.Infof("usage: pruned %d expired usage_rollup_buckets rows", n)
 	}
+	if n, err := cleanupExpiredAIAccountSubjectUsageBuckets(db); err != nil {
+		log.Errorf("usage: prune shared AI account day buckets: %v", err)
+	} else if n > 0 {
+		log.Infof("usage: pruned %d expired shared AI account day rows", n)
+	}
+	if n, err := cleanupExpiredAIAccountSubjectQuotaPoints(db); err != nil {
+		log.Errorf("usage: prune shared AI account quota points: %v", err)
+	} else if n > 0 {
+		log.Infof("usage: pruned %d expired shared AI account quota point rows", n)
+	}
 
 	// cleanup-enabled gates metadata and content retention/size cleanup only.
 	// Body purge when store-content=false still runs above (privacy, not retention).
