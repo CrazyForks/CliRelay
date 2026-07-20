@@ -145,16 +145,17 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body = execCtx.ApplyPayloadConfig(body, originalTranslated)
 	body = ensureTranslatedCodexModel(body, execCtx.BaseModel)
 	body = sanitizeCodexResponsesRequest(body)
-	body, _ = sjson.SetBytes(body, "stream", true)
-	body, _ = sjson.DeleteBytes(body, "previous_response_id")
-	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
-	body, _ = sjson.DeleteBytes(body, "safety_identifier")
+	sets := map[string][]byte{"stream": util.JSONBool(true)}
 	if !gjson.GetBytes(body, "instructions").Exists() {
 		// Extract system messages from original OpenAI-format payload to use as instructions.
 		// This preserves system prompts injected by SystemPromptMiddleware.
-		sysContent := extractSystemMessagesAsInstructions(execCtx.Request.Payload)
-		body, _ = sjson.SetBytes(body, "instructions", sysContent)
+		sets["instructions"] = util.JSONString(extractSystemMessagesAsInstructions(execCtx.Request.Payload))
 	}
+	body = util.MutateTopLevelObject(body, sets, []string{
+		"previous_response_id",
+		"prompt_cache_retention",
+		"safety_identifier",
+	})
 	body = maybeEnsureCodexImageGenerationTool(body, auth, execCtx.BaseModel, codexAdmissionHeadersFromContext(execCtx.Context))
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -169,7 +170,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	httpResp, err := httpClient.Do(httpReq) //nolint:bodyclose // body is closed by the defer below.
 	if err != nil {
 		recorder.RecordResponseError(err)
-		reporter.publishFailureWithContent(execCtx.Context, string(req.Payload), err.Error())
+		reporter.publishFailureWithContentBytes(execCtx.Context, req.Payload, err.Error())
 		return resp, err
 	}
 	defer func() {
@@ -182,7 +183,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		b := readUpstreamErrorBody(e.Identifier(), httpResp.Body)
 		recorder.AppendResponseChunk(b)
 		logWithRequestID(execCtx.Context).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		reporter.publishFailureWithContent(execCtx.Context, string(req.Payload), string(b))
+		reporter.publishFailureWithContentBytes(execCtx.Context, req.Payload, string(b))
 		err = newCodexStatusErr(httpResp.StatusCode, b, httpResp.Header)
 		return resp, err
 	}
@@ -231,7 +232,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		line = imageStream.rewriteAssistantMarkdown(line)
 
 		if detail, ok := parseCodexUsage(line); ok {
-			reporter.publishWithContent(execCtx.Context, detail, string(req.Payload), string(data))
+			reporter.publishWithContentBytes(execCtx.Context, detail, req.Payload, string(data))
 		}
 
 		var param any
@@ -240,7 +241,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, nil
 	}
 	if streamErr != nil {
-		reporter.publishFailureWithContent(execCtx.Context, string(req.Payload), streamErr.Error())
+		reporter.publishFailureWithContentBytes(execCtx.Context, req.Payload, streamErr.Error())
 		return resp, streamErr
 	}
 	err = statusErr{code: 408, msg: "stream error: stream disconnected before completion: stream closed before response.completed"}
@@ -289,7 +290,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recorder.RecordResponseError(err)
-		reporter.publishFailureWithContent(execCtx.Context, string(req.Payload), err.Error())
+		reporter.publishFailureWithContentBytes(execCtx.Context, req.Payload, err.Error())
 		return resp, err
 	}
 	defer func() {
@@ -302,7 +303,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		b := readUpstreamErrorBody(e.Identifier(), httpResp.Body)
 		recorder.AppendResponseChunk(b)
 		logWithRequestID(execCtx.Context).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		reporter.publishFailureWithContent(execCtx.Context, string(req.Payload), string(b))
+		reporter.publishFailureWithContentBytes(execCtx.Context, req.Payload, string(b))
 		err = newCodexStatusErr(httpResp.StatusCode, b, httpResp.Header)
 		return resp, err
 	}
@@ -312,7 +313,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	recorder.AppendResponseChunk(data)
-	reporter.publishWithContent(execCtx.Context, parseOpenAIUsage(data), string(req.Payload), string(data))
+	reporter.publishWithContentBytes(execCtx.Context, parseOpenAIUsage(data), req.Payload, string(data))
 	reporter.ensurePublished(execCtx.Context)
 	var param any
 	out := sdktranslator.TranslateNonStream(execCtx.Context, to, execCtx.SourceFormat, req.Model, execCtx.OriginalPayload, body, data, &param)
@@ -350,14 +351,16 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	body = execCtx.ApplyPayloadConfig(body, originalTranslated)
 	body = sanitizeCodexResponsesRequest(body)
-	body, _ = sjson.DeleteBytes(body, "previous_response_id")
-	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
-	body, _ = sjson.DeleteBytes(body, "safety_identifier")
-	body = ensureTranslatedCodexModel(body, execCtx.BaseModel)
+	sets := map[string][]byte{}
 	if !gjson.GetBytes(body, "instructions").Exists() {
-		sysContent := extractSystemMessagesAsInstructions(execCtx.Request.Payload)
-		body, _ = sjson.SetBytes(body, "instructions", sysContent)
+		sets["instructions"] = util.JSONString(extractSystemMessagesAsInstructions(execCtx.Request.Payload))
 	}
+	body = util.MutateTopLevelObject(body, sets, []string{
+		"previous_response_id",
+		"prompt_cache_retention",
+		"safety_identifier",
+	})
+	body = ensureTranslatedCodexModel(body, execCtx.BaseModel)
 	body = maybeEnsureCodexImageGenerationTool(body, auth, execCtx.BaseModel, codexAdmissionHeadersFromContext(execCtx.Context))
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -373,7 +376,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recorder.RecordResponseError(err)
-		reporter.publishFailureWithContent(execCtx.Context, string(req.Payload), err.Error())
+		reporter.publishFailureWithContentBytes(execCtx.Context, req.Payload, err.Error())
 		return nil, err
 	}
 	recorder.RecordResponseMetadata(httpResp.StatusCode, httpResp.Header.Clone())
@@ -388,12 +391,12 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 		recorder.AppendResponseChunk(data)
 		logWithRequestID(execCtx.Context).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		reporter.publishFailureWithContent(execCtx.Context, string(req.Payload), string(data))
+		reporter.publishFailureWithContentBytes(execCtx.Context, req.Payload, string(data))
 		err = newCodexStatusErr(httpResp.StatusCode, data, httpResp.Header)
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
-	reporter.setInputContent(string(req.Payload))
+	reporter.setInputContentBytes(req.Payload)
 	go func() {
 		defer close(out)
 		defer func() {
@@ -488,14 +491,15 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 
 	body = ensureTranslatedCodexModel(body, execCtx.BaseModel)
 	body = sanitizeCodexResponsesRequest(body)
-	body, _ = sjson.DeleteBytes(body, "previous_response_id")
-	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
-	body, _ = sjson.DeleteBytes(body, "safety_identifier")
-	body, _ = sjson.SetBytes(body, "stream", false)
+	sets := map[string][]byte{"stream": util.JSONBool(false)}
 	if !gjson.GetBytes(body, "instructions").Exists() {
-		sysContent := extractSystemMessagesAsInstructions(execCtx.Request.Payload)
-		body, _ = sjson.SetBytes(body, "instructions", sysContent)
+		sets["instructions"] = util.JSONString(extractSystemMessagesAsInstructions(execCtx.Request.Payload))
 	}
+	body = util.MutateTopLevelObject(body, sets, []string{
+		"previous_response_id",
+		"prompt_cache_retention",
+		"safety_identifier",
+	})
 
 	enc, err := tokenizerForCodexModel(execCtx.BaseModel)
 	if err != nil {

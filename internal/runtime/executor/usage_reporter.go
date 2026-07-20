@@ -80,13 +80,17 @@ func (r *usageReporter) publish(ctx context.Context, detail coreusage.Detail) {
 }
 
 func (r *usageReporter) publishWithContent(ctx context.Context, detail coreusage.Detail, inputContent, outputContent string) {
+	r.publishWithContentBytes(ctx, detail, []byte(inputContent), outputContent)
+}
+
+func (r *usageReporter) publishWithContentBytes(ctx context.Context, detail coreusage.Detail, inputContent []byte, outputContent string) {
 	if r == nil {
 		return
 	}
-	r.streamingRequest = isStreamingUsageRequest(inputContent)
+	r.streamingRequest = isStreamingUsageRequestBytes(inputContent)
 	if r.captureFullContent {
 		r.contentMu.Lock()
-		r.setInputContentLocked(inputContent)
+		r.setInputContentLocked(string(inputContent))
 		r.outputContent = outputContent
 		r.contentMu.Unlock()
 	}
@@ -128,21 +132,31 @@ func (r *usageReporter) setVisionFallbackModel(model string) {
 // setInputContent stores the request payload for inclusion in usage records.
 // Call before starting the streaming goroutine.
 func (r *usageReporter) setInputContent(content string) {
+	r.setInputContentBytes([]byte(content))
+}
+
+// setInputContentBytes is the hot-path form: never force a string(payload) copy when
+// store-content is off and we only need the stream flag.
+func (r *usageReporter) setInputContentBytes(content []byte) {
 	if r == nil {
 		return
 	}
-	r.streamingRequest = isStreamingUsageRequest(content)
+	r.streamingRequest = isStreamingUsageRequestBytes(content)
 	if !r.captureFullContent {
 		return
 	}
 	r.contentMu.Lock()
 	defer r.contentMu.Unlock()
-	r.setInputContentLocked(content)
+	r.setInputContentLocked(string(content))
 }
 
 func isStreamingUsageRequest(content string) bool {
+	return isStreamingUsageRequestBytes([]byte(content))
+}
+
+func isStreamingUsageRequestBytes(content []byte) bool {
 	// Only read top-level "stream"; full Unmarshal on multi-MB bodies was a hot alloc path.
-	return gjson.Get(content, "stream").Bool()
+	return gjson.GetBytes(content, "stream").Bool()
 }
 
 // appendOutputChunk accumulates a streaming response line for inclusion in usage records.
@@ -208,16 +222,20 @@ func (r *usageReporter) publishFailure(ctx context.Context) {
 // request payload and the upstream error response body so that the error
 // is visible in the management UI error-detail modal.
 func (r *usageReporter) publishFailureWithContent(ctx context.Context, inputContent, outputContent string) {
+	r.publishFailureWithContentBytes(ctx, []byte(inputContent), outputContent)
+}
+
+func (r *usageReporter) publishFailureWithContentBytes(ctx context.Context, inputContent []byte, outputContent string) {
 	if r == nil {
 		return
 	}
 	if shouldSuppressUsageFailure(nil, outputContent) {
 		return
 	}
-	r.streamingRequest = isStreamingUsageRequest(inputContent)
+	r.streamingRequest = isStreamingUsageRequestBytes(inputContent)
 	r.contentMu.Lock()
 	if r.captureFullContent {
-		r.setInputContentLocked(inputContent)
+		r.setInputContentLocked(string(inputContent))
 		r.outputContent = outputContent
 	} else {
 		r.outputContent = internalusage.CompactFailedOutputContent(outputContent)
