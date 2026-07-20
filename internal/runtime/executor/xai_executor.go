@@ -19,7 +19,6 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 const (
@@ -347,15 +346,18 @@ func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, auth *cliprox
 	body = execCtx.ApplyPayloadConfig(body, originalTranslated)
 	body = ensureTranslatedCodexModel(body, execCtx.BaseModel)
 	body = sanitizeCodexResponsesRequest(body)
-	body, _ = sjson.SetBytes(body, "stream", stream)
-	body, _ = sjson.DeleteBytes(body, "previous_response_id")
-	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
-	body, _ = sjson.DeleteBytes(body, "safety_identifier")
-	body, _ = sjson.DeleteBytes(body, "stream_options")
-	if !gjson.GetBytes(body, "instructions").Exists() {
-		sysContent := extractSystemMessagesAsInstructions(execCtx.Request.Payload)
-		body, _ = sjson.SetBytes(body, "instructions", sysContent)
+	sets := map[string][]byte{
+		"stream": util.JSONBool(stream),
 	}
+	if !gjson.GetBytes(body, "instructions").Exists() {
+		sets["instructions"] = util.JSONString(extractSystemMessagesAsInstructions(execCtx.Request.Payload))
+	}
+	body = util.MutateTopLevelObject(body, sets, []string{
+		"previous_response_id",
+		"prompt_cache_retention",
+		"safety_identifier",
+		"stream_options",
+	})
 	return execCtx, body, originalTranslated, nil
 }
 

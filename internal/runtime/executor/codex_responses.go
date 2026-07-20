@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -15,18 +16,17 @@ func ensureTranslatedCodexModel(body []byte, fallback string) []byte {
 	if strings.TrimSpace(gjson.GetBytes(body, "model").String()) != "" {
 		return body
 	}
-	body, _ = sjson.SetBytes(body, "model", fallback)
-	return body
+	return util.MutateTopLevelObject(body, map[string][]byte{
+		"model": util.JSONString(fallback),
+	}, nil)
 }
 
 func sanitizeCodexResponsesRequest(body []byte) []byte {
-	for _, field := range []string{
+	body = util.MutateTopLevelObject(body, nil, []string{
 		"max_output_tokens",
 		"max_completion_tokens",
 		"max_tokens",
-	} {
-		body, _ = sjson.DeleteBytes(body, field)
-	}
+	})
 	body = stripCodexResponsesImageGenerationSize(body)
 	// History hygiene: never forward multi-MB data:image blobs from Desktop session replay.
 	body = stripCodexHistoryDataURLImages(body)

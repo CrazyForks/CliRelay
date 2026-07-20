@@ -15,6 +15,7 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 )
 
 const usageReporterOutputMemoryLimit = 256 * 1024
@@ -140,13 +141,8 @@ func (r *usageReporter) setInputContent(content string) {
 }
 
 func isStreamingUsageRequest(content string) bool {
-	var payload struct {
-		Stream bool `json:"stream"`
-	}
-	if err := json.Unmarshal([]byte(content), &payload); err != nil {
-		return false
-	}
-	return payload.Stream
+	// Only read top-level "stream"; full Unmarshal on multi-MB bodies was a hot alloc path.
+	return gjson.Get(content, "stream").Bool()
 }
 
 // appendOutputChunk accumulates a streaming response line for inclusion in usage records.

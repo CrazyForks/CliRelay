@@ -1,9 +1,11 @@
 package responses
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -14,32 +16,36 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	rawJSON := inputRawJSON
 	rawJSON = normalizeOpenAIResponsesImageRequest(rawJSON)
 
-	inputResult := gjson.GetBytes(rawJSON, "input")
-	if inputResult.Type == gjson.String {
-		input, _ := sjson.Set(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`, "0.content.0.text", inputResult.String())
-		rawJSON, _ = sjson.SetRawBytes(rawJSON, "input", []byte(input))
+	// One-pass top-level mutate: avoid N full-document sjson copies on large bodies.
+	sets := map[string][]byte{
+		"stream":              util.JSONBool(true),
+		"store":               util.JSONBool(false),
+		"parallel_tool_calls": util.JSONBool(true),
+		"include":             []byte(`["reasoning.encrypted_content"]`),
+	}
+	dels := []string{
+		"max_output_tokens",
+		"max_completion_tokens",
+		"temperature",
+		"top_p",
+		"service_tier",
+		"truncation",
+		"user",
+		"context_management",
 	}
 
-	rawJSON, _ = sjson.SetBytes(rawJSON, "stream", true)
-	rawJSON, _ = sjson.SetBytes(rawJSON, "store", false)
-	rawJSON, _ = sjson.SetBytes(rawJSON, "parallel_tool_calls", true)
-	rawJSON, _ = sjson.SetBytes(rawJSON, "include", []string{"reasoning.encrypted_content"})
-	// Codex Responses rejects token limit fields, so strip them out before forwarding.
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_output_tokens")
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_completion_tokens")
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "temperature")
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "top_p")
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "service_tier")
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "truncation")
-	rawJSON = applyResponsesCompactionCompatibility(rawJSON)
+	inputResult := gjson.GetBytes(rawJSON, "input")
+	switch {
+	case inputResult.Type == gjson.String:
+		input, _ := sjson.Set(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`, "0.content.0.text", inputResult.String())
+		sets["input"] = []byte(input)
+	case inputResult.IsArray():
+		if rewritten, ok := rewriteInputSystemRoles(inputResult); ok {
+			sets["input"] = rewritten
+		}
+	}
 
-	// Delete the user field as it is not supported by the Codex upstream.
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "user")
-
-	// Convert role "system" to "developer" in input array to comply with Codex API requirements.
-	rawJSON = convertSystemRoleToDeveloper(rawJSON)
-
-	return rawJSON
+	return util.MutateTopLevelObject(rawJSON, sets, dels)
 }
 
 func normalizeOpenAIResponsesImageRequest(rawJSON []byte) []byte {
@@ -52,6 +58,7 @@ func normalizeOpenAIResponsesImageRequest(rawJSON []byte) []byte {
 		return rawJSON
 	}
 
+	// Image-tool path is rare and body is usually small; keep sjson here.
 	if toolIndex < 0 {
 		rawJSON, _ = sjson.SetRawBytes(rawJSON, "tools", []byte(`[]`))
 		rawJSON, _ = sjson.SetRawBytes(rawJSON, "tools.-1", []byte(`{"type":"image_generation"}`))
@@ -103,9 +110,9 @@ func normalizeOpenAIResponsesPromptInput(rawJSON []byte) []byte {
 	if prompt == "" {
 		return rawJSON
 	}
-	rawJSON, _ = sjson.SetBytes(rawJSON, "input", prompt)
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "prompt")
-	return rawJSON
+	return util.MutateTopLevelObject(rawJSON, map[string][]byte{
+		"input": util.JSONString(prompt),
+	}, []string{"prompt"})
 }
 
 func firstImageGenerationToolIndex(rawJSON []byte) int {
@@ -125,21 +132,45 @@ func isOpenAIResponsesImageOnlyModel(model string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "gpt-image-")
 }
 
-// applyResponsesCompactionCompatibility handles OpenAI Responses context_management.compaction
-// for Codex upstream compatibility.
-//
-// Codex /responses currently rejects context_management with:
-// {"detail":"Unsupported parameter: context_management"}.
-//
-// Compatibility strategy:
-// 1) Remove context_management before forwarding to Codex upstream.
-func applyResponsesCompactionCompatibility(rawJSON []byte) []byte {
-	if !gjson.GetBytes(rawJSON, "context_management").Exists() {
-		return rawJSON
+// rewriteInputSystemRoles rebuilds the input array once, converting role "system" -> "developer".
+// Returns ok=false when no change is needed so callers can skip the top-level rewrite.
+func rewriteInputSystemRoles(inputResult gjson.Result) ([]byte, bool) {
+	if !inputResult.IsArray() {
+		return nil, false
+	}
+	arr := inputResult.Array()
+	changed := false
+	for _, item := range arr {
+		if item.Get("role").String() == "system" {
+			changed = true
+			break
+		}
+	}
+	if !changed {
+		return nil, false
 	}
 
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "context_management")
-	return rawJSON
+	var b bytes.Buffer
+	b.Grow(len(inputResult.Raw))
+	b.WriteByte('[')
+	for i, item := range arr {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		if item.Get("role").String() != "system" {
+			b.WriteString(item.Raw)
+			continue
+		}
+		// Small object: one sjson on the item fragment only (not the whole request body).
+		rewritten, err := sjson.Set(item.Raw, "role", "developer")
+		if err != nil {
+			b.WriteString(item.Raw)
+			continue
+		}
+		b.WriteString(rewritten)
+	}
+	b.WriteByte(']')
+	return b.Bytes(), true
 }
 
 // convertSystemRoleToDeveloper traverses the input array and converts any message items
@@ -147,20 +178,9 @@ func applyResponsesCompactionCompatibility(rawJSON []byte) []byte {
 // accept "system" role in the input array.
 func convertSystemRoleToDeveloper(rawJSON []byte) []byte {
 	inputResult := gjson.GetBytes(rawJSON, "input")
-	if !inputResult.IsArray() {
+	rewritten, ok := rewriteInputSystemRoles(inputResult)
+	if !ok {
 		return rawJSON
 	}
-
-	inputArray := inputResult.Array()
-	result := rawJSON
-
-	// Directly modify role values for items with "system" role
-	for i := 0; i < len(inputArray); i++ {
-		rolePath := fmt.Sprintf("input.%d.role", i)
-		if gjson.GetBytes(result, rolePath).String() == "system" {
-			result, _ = sjson.SetBytes(result, rolePath, "developer")
-		}
-	}
-
-	return result
+	return util.MutateTopLevelObject(rawJSON, map[string][]byte{"input": rewritten}, nil)
 }
