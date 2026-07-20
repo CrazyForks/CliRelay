@@ -255,8 +255,22 @@ func UpsertAIAccountTenantBinding(auth *coreauth.Auth, identity *AuthSubjectIden
 		return nil
 	}
 	tenantID := normalizeTenantID(auth.TenantID)
+	authID := strings.TrimSpace(auth.ID)
 	authIndex := strings.TrimSpace(auth.EnsureIndex())
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	// Partial unique index (tenant_id, auth_index) WHERE active: free the index slot first.
+	if authIndex != "" {
+		if _, err := db.Exec(`
+			UPDATE ai_account_tenant_bindings
+			SET binding_state = 'deleted',
+			    binding_revision = binding_revision + 1,
+			    deleted_at = ?,
+			    last_seen_at = ?
+			WHERE tenant_id = ? AND auth_index = ? AND binding_state = 'active' AND auth_id <> ?
+		`, now, now, tenantID, authIndex, authID); err != nil {
+			return fmt.Errorf("usage: free active auth_index binding: %w", err)
+		}
+	}
 	_, err := db.Exec(`
 		INSERT INTO ai_account_tenant_bindings (
 			tenant_id, auth_id, auth_index, provider, auth_subject_id,
@@ -279,7 +293,7 @@ func UpsertAIAccountTenantBinding(auth *coreauth.Auth, identity *AuthSubjectIden
 			END,
 			last_seen_at = excluded.last_seen_at,
 			deleted_at = NULL
-	`, tenantID, strings.TrimSpace(auth.ID), authIndex, identity.Provider, identity.ID,
+	`, tenantID, authID, authIndex, identity.Provider, identity.ID,
 		identity.SeedKind, identity.SeedHash, identity.ShareEligible, now, now)
 	if err != nil {
 		return fmt.Errorf("usage: upsert ai account tenant binding: %w", err)
@@ -942,13 +956,34 @@ func backfillSharedQuotaPointsForSubject(db *sql.DB, subjectID string) error {
 		if row.percent.Valid {
 			percentValue = row.percent.Float64
 		}
-		// NULL, not "": PG timestamptz + COALESCE(reset_at, '') raises SQLSTATE 22007.
-		resetValue := nullableStoredTimeArg("")
+		// NULL, not "": PG timestamptz rejects "".
+		var resetValue any
 		if row.reset.Valid {
 			resetValue = nullableStoredTimeArg(row.reset.String)
 		}
 		recordedValue, okRecorded := requiredStoredTimeArg(row.recorded)
 		if !okRecorded {
+			continue
+		}
+		// Skip EXISTS check when reset is NULL: untyped NULL params confuse PG (42P18).
+		// Rare path; duplicate insert is prevented by natural uniqueness + ignore conflicts.
+		if resetValue == nil {
+			_, err := db.Exec(`
+				INSERT INTO ai_account_subject_quota_points
+					(auth_subject_id, provider, quota_key, quota_label, percent, reset_at, window_seconds, recorded_at)
+				SELECT ?, ?, ?, ?, ?, NULL, ?, ?
+				WHERE NOT EXISTS (
+					SELECT 1 FROM ai_account_subject_quota_points
+					WHERE auth_subject_id = ? AND provider = ? AND quota_key = ? AND quota_label = ?
+					  AND COALESCE(percent, -1) = COALESCE(?, -1)
+					  AND reset_at IS NULL
+					  AND window_seconds = ? AND recorded_at = ?
+				)
+			`, subjectID, row.provider, row.key, row.label, percentValue, row.window, recordedValue,
+				subjectID, row.provider, row.key, row.label, percentValue, row.window, recordedValue)
+			if err != nil {
+				return err
+			}
 			continue
 		}
 		if _, err := db.Exec(`
@@ -959,11 +994,11 @@ func backfillSharedQuotaPointsForSubject(db *sql.DB, subjectID string) error {
 				SELECT 1 FROM ai_account_subject_quota_points
 				WHERE auth_subject_id = ? AND provider = ? AND quota_key = ? AND quota_label = ?
 				  AND COALESCE(percent, -1) = COALESCE(?, -1)
-				  AND ((reset_at IS NULL AND ? IS NULL) OR reset_at = ?)
+				  AND reset_at = ?
 				  AND window_seconds = ? AND recorded_at = ?
 			)
 		`, subjectID, row.provider, row.key, row.label, percentValue, resetValue, row.window, recordedValue,
-			subjectID, row.provider, row.key, row.label, percentValue, resetValue, resetValue, row.window, recordedValue); err != nil {
+			subjectID, row.provider, row.key, row.label, percentValue, resetValue, row.window, recordedValue); err != nil {
 			return err
 		}
 	}
