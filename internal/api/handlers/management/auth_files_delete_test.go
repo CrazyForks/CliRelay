@@ -2,14 +2,18 @@ package management
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/contentmoderation"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
@@ -111,6 +115,22 @@ func TestDeleteAuthFileRemovesDeletedChannelReferences(t *testing.T) {
 		authManager: manager,
 		tokenStore:  store,
 	}
+	moderationStore := contentmoderation.NewStore(usage.RuntimeDB())
+	moderationProfile, err := contentmoderation.NewProfile(identity.SystemTenantID, "profile-auth-cleanup", contentmoderation.CreateProfileInput{Name: "auth cleanup"}, time.Now())
+	if err != nil {
+		t.Fatalf("NewProfile: %v", err)
+	}
+	if err = moderationStore.CreateProfile(context.Background(), moderationProfile); err != nil {
+		t.Fatalf("CreateProfile: %v", err)
+	}
+	profileID := moderationProfile.ID
+	if err = moderationStore.PatchBindings(context.Background(), identity.SystemTenantID, false, []contentmoderation.BindingOperation{{
+		ChannelType: contentmoderation.ChannelTypeAuthFile,
+		ChannelID:   "kimi-a.json",
+		ProfileID:   &profileID,
+	}}); err != nil {
+		t.Fatalf("PatchBindings: %v", err)
+	}
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -126,6 +146,9 @@ func TestDeleteAuthFileRemovesDeletedChannelReferences(t *testing.T) {
 	}
 	if _, ok := manager.GetByID("kimi-b.json"); !ok {
 		t.Fatal("expected remaining auth to stay in manager")
+	}
+	if _, _, err = moderationStore.ResolveProfile(context.Background(), identity.SystemTenantID, "kimi-a.json", "", ""); !errors.Is(err, contentmoderation.ErrNotFound) {
+		t.Fatalf("ResolveProfile error=%v, want ErrNotFound", err)
 	}
 
 	profiles := usage.ListAPIKeyPermissionProfiles()

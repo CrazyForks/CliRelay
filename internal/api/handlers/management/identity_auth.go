@@ -589,6 +589,7 @@ func isTenantScopedManagementPath(path string) bool {
 	case relative == "/dashboard-summary", relative == "/config":
 		return true
 	case strings.HasPrefix(relative, "/auth-files"),
+		strings.HasPrefix(relative, "/content-moderation"),
 		strings.HasPrefix(relative, "/identity-fingerprint"),
 		strings.HasPrefix(relative, "/model-definitions/"),
 		strings.HasPrefix(relative, "/image-generation"),
