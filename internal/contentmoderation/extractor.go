@@ -30,14 +30,14 @@ func collectLastRoleContent(messages gjson.Result, role string, parts *[]string,
 		return
 	}
 	items := messages.Array()
-	if len(items) == 0 {
+	for i := len(items) - 1; i >= 0; i-- {
+		item := items[i]
+		if !strings.EqualFold(strings.TrimSpace(item.Get("role").String()), role) {
+			continue
+		}
+		collectTextValue(item.Get("content"), parts, skipSystemReminder)
 		return
 	}
-	last := items[len(items)-1]
-	if !strings.EqualFold(strings.TrimSpace(last.Get("role").String()), role) {
-		return
-	}
-	collectTextValue(last.Get("content"), parts, skipSystemReminder)
 }
 
 func collectResponsesInput(input gjson.Result, parts *[]string) {
@@ -48,18 +48,18 @@ func collectResponsesInput(input gjson.Result, parts *[]string) {
 		addText(parts, input.String(), false)
 	case input.IsArray():
 		items := input.Array()
-		if len(items) == 0 {
+		for i := len(items) - 1; i >= 0; i-- {
+			item := items[i]
+			role := strings.ToLower(strings.TrimSpace(item.Get("role").String()))
+			typeName := strings.ToLower(strings.TrimSpace(item.Get("type").String()))
+			if role != "user" && typeName != "input_text" {
+				continue
+			}
+			collectTextValue(item.Get("content"), parts, false)
+			if typeName == "input_text" || item.Get("text").Exists() {
+				collectTextValue(item, parts, false)
+			}
 			return
-		}
-		last := items[len(items)-1]
-		role := strings.ToLower(strings.TrimSpace(last.Get("role").String()))
-		typeName := strings.ToLower(strings.TrimSpace(last.Get("type").String()))
-		if role != "user" && typeName != "input_text" {
-			return
-		}
-		collectTextValue(last.Get("content"), parts, false)
-		if typeName == "input_text" || last.Get("text").Exists() {
-			collectTextValue(last, parts, false)
 		}
 	case input.IsObject():
 		role := strings.ToLower(strings.TrimSpace(input.Get("role").String()))
@@ -76,18 +76,18 @@ func collectLastGeminiContent(contents gjson.Result, parts *[]string) {
 		return
 	}
 	items := contents.Array()
-	if len(items) == 0 {
-		return
-	}
-	last := items[len(items)-1]
-	role := strings.ToLower(strings.TrimSpace(last.Get("role").String()))
-	if role != "" && role != "user" {
-		return
-	}
-	if values := last.Get("parts"); values.IsArray() {
-		for _, part := range values.Array() {
-			addText(parts, part.Get("text").String(), false)
+	for i := len(items) - 1; i >= 0; i-- {
+		item := items[i]
+		role := strings.ToLower(strings.TrimSpace(item.Get("role").String()))
+		if role != "" && role != "user" {
+			continue
 		}
+		if values := item.Get("parts"); values.IsArray() {
+			for _, part := range values.Array() {
+				addText(parts, part.Get("text").String(), false)
+			}
+		}
+		return
 	}
 }
 

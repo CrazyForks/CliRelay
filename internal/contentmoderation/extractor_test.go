@@ -17,6 +17,9 @@ func TestExtractLastUserText(t *testing.T) {
 		{"responses", sdktranslator.FormatOpenAIResponse, `{"input":[{"role":"assistant","content":[{"type":"output_text","text":"old"}]},{"role":"user","content":[{"type":"input_text","text":"response text"}]}]}`, "response text"},
 		{"claude", sdktranslator.FormatClaude, `{"messages":[{"role":"user","content":[{"type":"text","text":"claude text"}]}]}`, "claude text"},
 		{"gemini", sdktranslator.FormatGemini, `{"contents":[{"role":"user","parts":[{"text":"gemini text"}]}]}`, "gemini text"},
+		{"last user before assistant", sdktranslator.FormatOpenAI, `{"messages":[{"role":"user","content":"last user"},{"role":"assistant","content":"generated"}]}`, "last user"},
+		{"responses last user before output", sdktranslator.FormatOpenAIResponse, `{"input":[{"role":"user","content":[{"type":"input_text","text":"response user"}]},{"role":"assistant","content":[{"type":"output_text","text":"generated"}]}]}`, "response user"},
+		{"gemini last user before model", sdktranslator.FormatGemini, `{"contents":[{"role":"user","parts":[{"text":"gemini user"}]},{"role":"model","parts":[{"text":"generated"}]}]}`, "gemini user"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

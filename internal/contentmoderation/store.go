@@ -288,6 +288,9 @@ func (s *Store) DeleteChannelBinding(ctx context.Context, tenantID, channelType,
 }
 
 func (s *Store) ResolveProfile(ctx context.Context, tenantID, authFileID, providerKeyID, providerID string) (Profile, string, error) {
+	if s == nil || s.db == nil {
+		return Profile{}, "", ErrUnavailable
+	}
 	lookups := []struct {
 		channelType string
 		channelID   string
