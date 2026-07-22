@@ -1,8 +1,10 @@
 package management
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
 	postgresstore "github.com/router-for-me/CLIProxyAPI/v6/internal/storage/postgres"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/storage/postgres/compatdriver"
+	_ "modernc.org/sqlite"
 )
 
 func TestPermissionForManagementRequest(t *testing.T) {
@@ -122,6 +125,46 @@ func TestServiceCredentialCannotAccessTenantGovernance(t *testing.T) {
 	}
 	if reached {
 		t.Fatal("service credential reached tenant governance handler")
+	}
+}
+
+func TestPostUserBindsSnakeCaseDisplayName(t *testing.T) {
+	ctx := context.Background()
+	service := newSQLiteIdentityTestService(t)
+
+	h := NewHandler(nil, "", nil)
+	h.identityService = service
+	t.Cleanup(h.Close)
+
+	principal := identity.Principal{
+		Kind:            "user",
+		User:            identity.User{ID: identity.SystemUserID, TenantID: identity.SystemTenantID},
+		EffectiveTenant: identity.Tenant{ID: identity.SystemTenantID},
+		PlatformAdmin:   true,
+	}
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.POST("/v0/management/users", func(c *gin.Context) {
+		c.Set(managementPrincipalKey, principal)
+		h.PostUser(c)
+	})
+
+	body := []byte(`{"username":"snake-case-user","display_name":"Snake Case User","password":"snake-case-password-123","role_ids":[]}`)
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v0/management/users", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	var user identity.User
+	if err := json.Unmarshal(rec.Body.Bytes(), &user); err != nil {
+		t.Fatalf("decode response: %v; body=%s", err, rec.Body.String())
+	}
+	if user.DisplayName != "Snake Case User" {
+		t.Fatalf("display_name = %q, want %q", user.DisplayName, "Snake Case User")
 	}
 }
 
@@ -281,6 +324,37 @@ func TestLogsDeleteMiddlewareRequiresExplicitPermission(t *testing.T) {
 	if code, reached := serve(http.MethodDelete, deleteToken); code != http.StatusOK || !reached {
 		t.Fatalf("delete-capable DELETE: status=%d reached=%v, want 200 and handler executed", code, reached)
 	}
+}
+
+func newSQLiteIdentityTestService(t *testing.T) *identity.Service {
+	t.Helper()
+	dsn := fmt.Sprintf("file:identity_post_user_%d?mode=memory&cache=shared", time.Now().UnixNano())
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(4)
+	t.Cleanup(func() {
+		if closeErr := db.Close(); closeErr != nil {
+			t.Errorf("close sqlite identity db: %v", closeErr)
+		}
+	})
+	for _, statement := range []string{
+		`CREATE TABLE users (
+			id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, username TEXT NOT NULL, username_normalized TEXT NOT NULL,
+			display_name TEXT NOT NULL, password_hash TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+			must_change_password BOOLEAN NOT NULL DEFAULT false, last_login_at TIMESTAMP NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			version INTEGER NOT NULL DEFAULT 1, created_by TEXT
+		)`,
+		`CREATE TABLE roles (id TEXT PRIMARY KEY, code TEXT NOT NULL, name TEXT NOT NULL)`,
+		`CREATE TABLE user_roles (user_id TEXT NOT NULL, role_id TEXT NOT NULL, created_by TEXT)`,
+	} {
+		if _, err = db.Exec(statement); err != nil {
+			t.Fatalf("create sqlite identity schema: %v", err)
+		}
+	}
+	return identity.NewService(db)
 }
 
 func replacePostgresDatabaseForTest(dsn, dbName string) (string, error) {

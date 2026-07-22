@@ -4,8 +4,9 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"strings"
+	"time"
 
+	xaiauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/xai"
 	managementapitools "github.com/router-for-me/CLIProxyAPI/v6/internal/management/apitools"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -13,7 +14,7 @@ import (
 )
 
 const (
-	xaiBillingWeeklyURL  = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+	xaiBillingWeeklyURL  = xaiauth.CLIWeeklyBillingURL
 	xaiBillingMonthlyURL = "https://cli-chat-proxy.grok.com/v1/billing"
 )
 
@@ -107,49 +108,30 @@ func parseXAIBilling(body []byte, key, _ string, _ int64) []usage.QuotaWindowDTO
 }
 
 func parseXAIWeeklyBilling(body []byte) []usage.QuotaWindowDTO {
-	cfg := gjson.GetBytes(body, "config")
-	if !cfg.Exists() {
+	weekly, ok := xaiauth.ParseWeeklyBilling(body)
+	if !ok {
 		return nil
 	}
-	current := firstJSONResult(cfg, "currentPeriod", "current_period")
-	periodType := strings.ToLower(strings.TrimSpace(current.Get("type").String()))
-	used := firstJSONResult(cfg, "creditUsagePercent", "credit_usage_percent")
-	products := firstJSONResult(cfg, "productUsage", "product_usage")
-	if !used.Exists() && !strings.Contains(periodType, "weekly") && !products.IsArray() {
-		return nil
-	}
-
-	remaining := 100.0
-	if used.Exists() {
-		remaining = math.Round(100 - clampPct(used.Float()))
-	}
-	reset := firstJSONResult(current, "end")
-	if !reset.Exists() {
-		reset = firstJSONResult(cfg, "billingPeriodEnd", "billing_period_end")
+	var resetAt *time.Time
+	if !weekly.ResetAt.IsZero() {
+		reset := weekly.ResetAt
+		resetAt = &reset
 	}
 	// Weekly cards already show relative reset from ResetAt; keep Meta empty so the
 	// UI is not flooded with raw ISO period strings like "2026-07-16T06:45:51+00:00 - …".
 	out := []usage.QuotaWindowDTO{{
-		QuotaKey: "weekly_limit", QuotaLabel: "xai_quota.weekly_limit", Percent: &remaining,
-		Value: formatPercent(remaining), ResetAt: parseFlexibleTime(reset), WindowSeconds: 604800,
+		QuotaKey: "weekly_limit", QuotaLabel: "xai_quota.weekly_limit", Percent: &weekly.RemainingPercent,
+		Value: formatPercent(weekly.RemainingPercent), ResetAt: resetAt, WindowSeconds: 604800,
 	}}
-	if products.IsArray() {
-		index := 0
-		products.ForEach(func(_, product gjson.Result) bool {
-			index++
-			name := strings.TrimSpace(product.Get("product").String())
-			if name == "" {
-				name = fmt.Sprintf("Product %d", index)
-			}
-			productRemaining := 100.0
-			if productUsed := firstJSONResult(product, "usagePercent", "usage_percent"); productUsed.Exists() {
-				productRemaining = math.Round(100 - clampPct(productUsed.Float()))
-			}
-			out = append(out, usage.QuotaWindowDTO{
-				QuotaKey: "product:" + name, QuotaLabel: "xai_quota.product_usage_named::" + name,
-				Percent: &productRemaining, Value: formatPercent(productRemaining),
-			})
-			return true
+	for index, product := range weekly.Products {
+		name := product.Name
+		if name == "" {
+			name = fmt.Sprintf("Product %d", index+1)
+		}
+		remaining := product.RemainingPercent
+		out = append(out, usage.QuotaWindowDTO{
+			QuotaKey: "product:" + name, QuotaLabel: "xai_quota.product_usage_named::" + name,
+			Percent: &remaining, Value: formatPercent(remaining),
 		})
 	}
 	return out

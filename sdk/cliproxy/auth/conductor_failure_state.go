@@ -1,6 +1,11 @@
 package auth
 
-import "time"
+import (
+	"strings"
+	"time"
+)
+
+const xaiWeekExhaustedDefaultCooldown = 6 * time.Hour
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
 	if auth == nil {
@@ -63,19 +68,34 @@ func applyAuthQuotaFailureState(auth *Auth, resultErr *Error, retryAfter *time.D
 		auth.Quota.Window = resultErr.QuotaWindow
 		auth.Quota.WindowMinutes = resultErr.QuotaWindowMinutes
 	}
+	cooldown, nextLevel := quotaFailureCooldown(resultErr, retryAfter, auth.Quota.BackoffLevel, quotaCooldownDisabledForAuth(auth))
 	var next time.Time
-	if retryAfter != nil {
-		next = now.Add(*retryAfter)
-	} else {
-		// WindowMinutes is window length metadata (e.g. week=10080), not remaining cooldown.
-		cooldown, nextLevel := nextQuotaCooldown(auth.Quota.BackoffLevel, quotaCooldownDisabledForAuth(auth))
-		if cooldown > 0 {
-			next = now.Add(cooldown)
-		}
-		auth.Quota.BackoffLevel = nextLevel
+	if cooldown > 0 {
+		next = now.Add(cooldown)
 	}
+	auth.Quota.BackoffLevel = nextLevel
 	auth.Quota.NextRecoverAt = next
 	auth.NextRetryAfter = next
+}
+
+func quotaFailureCooldown(resultErr *Error, retryAfter *time.Duration, prevLevel int, disableCooling bool) (time.Duration, int) {
+	if retryAfter != nil {
+		return *retryAfter, prevLevel
+	}
+	if disableCooling {
+		return 0, prevLevel
+	}
+	if isXAIWeekBalanceExhaustedError(resultErr) {
+		return xaiWeekExhaustedDefaultCooldown, prevLevel
+	}
+	return nextQuotaCooldown(prevLevel, false)
+}
+
+func isXAIWeekBalanceExhaustedError(resultErr *Error) bool {
+	if resultErr == nil || !isUsageBalanceExhaustedMessage(resultErr.Message) {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(resultErr.QuotaWindow), "week") || resultErr.QuotaWindowMinutes == 10080
 }
 
 // nextQuotaCooldown returns the next cooldown duration and updated backoff level for repeated quota errors.
