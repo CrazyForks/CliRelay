@@ -910,21 +910,3 @@ func (h *Handler) GetEndUserAPIKeyDailySpendingResetHistory(c *gin.Context) {
 	}
 	h.ownedAPIKeyDailySpendingHistory(c, effectiveTenantID(c), c.Param("id"), c.Param("key_id"))
 }
-
-func (h *Handler) PostPortalAPIKeyDailySpendingReset(c *gin.Context) {
-	user, ok := h.portalKeyAccess(c)
-	if !ok {
-		return
-	}
-	h.resetOwnedAPIKeyDailySpending(c, user.TenantID, user.ID, c.Param("id"), apikeysettings.DailySpendingResetActor{
-		UserID: user.ID, Username: user.Username, Kind: "end_user",
-	})
-}
-
-func (h *Handler) GetPortalAPIKeyDailySpendingResetHistory(c *gin.Context) {
-	user, ok := h.portalKeyAccess(c)
-	if !ok {
-		return
-	}
-	h.ownedAPIKeyDailySpendingHistory(c, user.TenantID, user.ID, c.Param("id"))
-}

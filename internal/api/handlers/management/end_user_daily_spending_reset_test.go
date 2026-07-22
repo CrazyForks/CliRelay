@@ -1,8 +1,6 @@
 package management
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -99,67 +97,6 @@ func setupEndUserDailySpendingHandlerTest(t *testing.T) (*Handler, identity.Prin
 	return &Handler{}, principal, tenantID, endUserID
 }
 
-func setupPortalAPIKeyDailySpendingHandlerTest(t *testing.T) (*Handler, string, string, string, string) {
-	t.Helper()
-	h, _, tenantID, endUserID := setupEndUserDailySpendingHandlerTest(t)
-	if tenantID == identity.SystemTenantID {
-		t.Fatal("portal tenant must differ from system tenant")
-	}
-	db := usage.RuntimeDB()
-	if _, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS tenants (
-			id TEXT PRIMARY KEY,
-			status TEXT NOT NULL,
-			type TEXT NOT NULL,
-			expires_at TIMESTAMP,
-			access_token_ttl_seconds INTEGER,
-			refresh_token_ttl_seconds INTEGER
-		);
-		CREATE TABLE IF NOT EXISTS end_user_sessions (
-			id TEXT PRIMARY KEY,
-			end_user_id TEXT NOT NULL,
-			tenant_id TEXT NOT NULL,
-			access_token_hash TEXT NOT NULL UNIQUE,
-			refresh_token_hash TEXT NOT NULL UNIQUE,
-			access_expires_at TIMESTAMP NOT NULL,
-			refresh_expires_at TIMESTAMP NOT NULL,
-			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			last_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			revoked_at TIMESTAMP,
-			revoke_reason TEXT NOT NULL DEFAULT '',
-			user_agent_hash TEXT NOT NULL DEFAULT ''
-		)
-	`); err != nil {
-		t.Fatalf("create portal auth tables: %v", err)
-	}
-	if _, err := db.Exec(`INSERT INTO tenants (id, status, type) VALUES (?, 'active', 'standard')`, tenantID); err != nil {
-		t.Fatalf("insert tenant: %v", err)
-	}
-
-	keyID := uuid.NewString()
-	if err := usage.UpsertAPIKeyForTenant(tenantID, usage.APIKeyRow{
-		ID:                 keyID,
-		Key:                "sk-portal-reset-tenant",
-		Name:               "Portal reset tenant",
-		EndUserID:          endUserID,
-		DailySpendingLimit: 100,
-	}); err != nil {
-		t.Fatalf("insert owned API key: %v", err)
-	}
-
-	portalToken := "cpt_portal-reset-tenant-test"
-	portalTokenSum := sha256.Sum256([]byte(portalToken))
-	if _, err := db.Exec(`
-		INSERT INTO end_user_sessions (
-			id, end_user_id, tenant_id, access_token_hash, refresh_token_hash, access_expires_at, refresh_expires_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, uuid.NewString(), endUserID, tenantID, hex.EncodeToString(portalTokenSum[:]), "unused-portal-reset-refresh-hash",
-		time.Now().UTC().Add(time.Hour), time.Now().UTC().Add(2*time.Hour)); err != nil {
-		t.Fatalf("insert portal session: %v", err)
-	}
-	return h, tenantID, endUserID, keyID, portalToken
-}
-
 func TestEndUserDailySpendingResetWritesAndListsHistory(t *testing.T) {
 	h, principal, tenantID, endUserID := setupEndUserDailySpendingHandlerTest(t)
 
@@ -250,54 +187,6 @@ func TestEndUserDailySpendingResetRejectsUnlimitedAccount(t *testing.T) {
 	h.PostEndUserDailySpendingReset(ctx)
 	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), `"code":"daily_spending_limit_missing"`) {
 		t.Fatalf("status/body = %d %s, want 400 daily_spending_limit_missing", recorder.Code, recorder.Body.String())
-	}
-}
-
-func TestPortalAPIKeyDailySpendingResetAndHistoryUsePortalTenant(t *testing.T) {
-	h, tenantID, endUserID, keyID, portalToken := setupPortalAPIKeyDailySpendingHandlerTest(t)
-
-	historyRecorder := httptest.NewRecorder()
-	historyContext, _ := gin.CreateTestContext(historyRecorder)
-	historyContext.Params = gin.Params{{Key: "id", Value: keyID}}
-	historyContext.Request = httptest.NewRequest(http.MethodGet, "/v0/portal/api-keys/"+keyID+"/daily-spending/reset-history?limit=200", nil)
-	historyContext.Request.Header.Set("Authorization", "Bearer "+portalToken)
-	if got := effectiveTenantID(historyContext); got != identity.SystemTenantID {
-		t.Fatalf("effective tenant before portal auth = %q, want system tenant fallback", got)
-	}
-	h.GetPortalAPIKeyDailySpendingResetHistory(historyContext)
-	if historyRecorder.Code != http.StatusOK {
-		t.Fatalf("empty history status = %d, want %d; body=%s", historyRecorder.Code, http.StatusOK, historyRecorder.Body.String())
-	}
-	var emptyHistory struct {
-		Items []usage.APIKeyDailySpendingResetEvent `json:"items"`
-		Total int                                   `json:"total"`
-	}
-	if err := json.Unmarshal(historyRecorder.Body.Bytes(), &emptyHistory); err != nil {
-		t.Fatalf("decode empty history response: %v", err)
-	}
-	if emptyHistory.Total != 0 || len(emptyHistory.Items) != 0 {
-		t.Fatalf("empty history response = %#v, want no reset events", emptyHistory)
-	}
-
-	resetRecorder := httptest.NewRecorder()
-	resetContext, _ := gin.CreateTestContext(resetRecorder)
-	resetContext.Params = gin.Params{{Key: "id", Value: keyID}}
-	resetContext.Request = httptest.NewRequest(http.MethodPost, "/v0/portal/api-keys/"+keyID+"/daily-spending/reset", nil)
-	resetContext.Request.Header.Set("Authorization", "Bearer "+portalToken)
-	h.PostPortalAPIKeyDailySpendingReset(resetContext)
-	if resetRecorder.Code != http.StatusOK {
-		t.Fatalf("reset status = %d, want %d; body=%s", resetRecorder.Code, http.StatusOK, resetRecorder.Body.String())
-	}
-
-	events, err := usage.ListDailySpendingResetEvents(tenantID, keyID, 10)
-	if err != nil {
-		t.Fatalf("list portal key reset events: %v", err)
-	}
-	if len(events) != 1 {
-		t.Fatalf("reset events = %d, want 1", len(events))
-	}
-	if events[0].TenantID != tenantID || events[0].ActorUserID != endUserID || events[0].ActorKind != "end_user" {
-		t.Fatalf("reset event = %#v, want portal tenant/user actor", events[0])
 	}
 }
 

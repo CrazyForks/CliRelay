@@ -32,8 +32,6 @@ func registerIdentityAuthRoutes(engine *gin.Engine, h *managementhandlers.Handle
 	portal.GET("/api-keys/:id/secret", h.GetPortalAPIKeySecret)
 	portal.PATCH("/api-keys/:id", h.PatchPortalAPIKey)
 	portal.POST("/api-keys/:id/rotate", h.PostPortalAPIKeyRotate)
-	portal.POST("/api-keys/:id/daily-spending/reset", h.PostPortalAPIKeyDailySpendingReset)
-	portal.GET("/api-keys/:id/daily-spending/reset-history", h.GetPortalAPIKeyDailySpendingResetHistory)
 	portal.DELETE("/api-keys/:id", h.DeletePortalAPIKey)
 }
 

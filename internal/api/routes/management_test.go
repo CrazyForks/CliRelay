@@ -26,7 +26,7 @@ func TestRegisterManagementRouteTable(t *testing.T) {
 		routes[key] = route
 	}
 
-	if got, want := len(routes), 298; got != want {
+	if got, want := len(routes), 296; got != want {
 		t.Fatalf("route count = %d, want %d", got, want)
 	}
 	if got, want := sortedRouteKeys(routes), expectedManagementRoutes(); !slices.Equal(got, want) {
@@ -46,8 +46,6 @@ func TestRegisterManagementRouteTable(t *testing.T) {
 		"POST /v0/management/api-call",
 		"PATCH /v0/management/api-key-entries",
 		"GET /v0/management/end-users/:id/daily-spending/reset-history",
-		"POST /v0/portal/api-keys/:id/daily-spending/reset",
-		"GET /v0/portal/api-keys/:id/daily-spending/reset-history",
 		"POST /v0/management/end-users/:id/api-keys/:key_id/daily-spending/reset",
 		"GET /v0/management/end-users/:id/api-keys/:key_id/daily-spending/reset-history",
 		"POST /v0/management/opencode-go-api-key/usage",
@@ -190,8 +188,6 @@ func expectedManagementRoutes() []string {
 		"GET /v0/portal/api-keys/:id/secret",
 		"PATCH /v0/portal/api-keys/:id",
 		"POST /v0/portal/api-keys/:id/rotate",
-		"POST /v0/portal/api-keys/:id/daily-spending/reset",
-		"GET /v0/portal/api-keys/:id/daily-spending/reset-history",
 		"DELETE /v0/portal/api-keys/:id",
 		"POST /v0/portal/auth/login",
 		"POST /v0/portal/auth/logout",
