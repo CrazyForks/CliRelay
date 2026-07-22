@@ -150,7 +150,7 @@ func TestPostUserBindsSnakeCaseDisplayName(t *testing.T) {
 		h.PostUser(c)
 	})
 
-	body := []byte(`{"username":"snake-case-user","display_name":"Snake Case User","password":"snake-case-password-123","role_ids":[]}`)
+	body := []byte(`{"username":"snake-case-user","display_name":"Snake Case User","password":"Snake-Case-Password-123!","role_ids":[]}`)
 	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v0/management/users", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -165,6 +165,99 @@ func TestPostUserBindsSnakeCaseDisplayName(t *testing.T) {
 	}
 	if user.DisplayName != "Snake Case User" {
 		t.Fatalf("display_name = %q, want %q", user.DisplayName, "Snake Case User")
+	}
+}
+
+func TestPostUserBlankPasswordReturnsInitialPassword(t *testing.T) {
+	ctx := context.Background()
+	service := newSQLiteIdentityTestService(t)
+
+	h := NewHandler(nil, "", nil)
+	h.identityService = service
+	t.Cleanup(h.Close)
+
+	principal := identity.Principal{
+		Kind:            "user",
+		User:            identity.User{ID: identity.SystemUserID, TenantID: identity.SystemTenantID},
+		EffectiveTenant: identity.Tenant{ID: identity.SystemTenantID},
+		PlatformAdmin:   true,
+	}
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.POST("/v0/management/users", func(c *gin.Context) {
+		c.Set(managementPrincipalKey, principal)
+		h.PostUser(c)
+	})
+
+	body := []byte(`{"username":"generated-admin-user","display_name":"Generated Admin User","password":"   ","role_ids":[]}`)
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v0/management/users", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	var response struct {
+		ID              string `json:"id"`
+		DisplayName     string `json:"display_name"`
+		InitialPassword string `json:"initial_password"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v; body=%s", err, rec.Body.String())
+	}
+	if response.ID == "" {
+		t.Fatal("response id is empty")
+	}
+	if response.DisplayName != "Generated Admin User" {
+		t.Fatalf("display_name = %q, want %q", response.DisplayName, "Generated Admin User")
+	}
+	if response.InitialPassword == "" {
+		t.Fatalf("initial_password missing; body=%s", rec.Body.String())
+	}
+	if _, err := identity.HashPassword(response.InitialPassword); err != nil {
+		t.Fatalf("initial_password does not satisfy policy: %v", err)
+	}
+}
+
+func TestPostUserManualPasswordOmitsInitialPassword(t *testing.T) {
+	ctx := context.Background()
+	service := newSQLiteIdentityTestService(t)
+
+	h := NewHandler(nil, "", nil)
+	h.identityService = service
+	t.Cleanup(h.Close)
+
+	principal := identity.Principal{
+		Kind:            "user",
+		User:            identity.User{ID: identity.SystemUserID, TenantID: identity.SystemTenantID},
+		EffectiveTenant: identity.Tenant{ID: identity.SystemTenantID},
+		PlatformAdmin:   true,
+	}
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.POST("/v0/management/users", func(c *gin.Context) {
+		c.Set(managementPrincipalKey, principal)
+		h.PostUser(c)
+	})
+
+	body := []byte(`{"username":"manual-admin-user","display_name":"Manual Admin User","password":"Manual-Password-123!","role_ids":[]}`)
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v0/management/users", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v; body=%s", err, rec.Body.String())
+	}
+	if _, ok := response["initial_password"]; ok {
+		t.Fatalf("initial_password should be omitted for manual password; body=%s", rec.Body.String())
 	}
 }
 
@@ -227,7 +320,7 @@ func TestLogsDeleteMiddlewareRequiresExplicitPermission(t *testing.T) {
 	})
 
 	service := identity.NewService(db)
-	if err = service.Bootstrap(ctx, "bootstrap-password-123"); err != nil {
+	if err = service.Bootstrap(ctx, "Bootstrap-Password-123!"); err != nil {
 		t.Fatal(err)
 	}
 	// Pin the service on the handler so Middleware does not depend on process-global Default().
@@ -281,14 +374,14 @@ func TestLogsDeleteMiddlewareRequiresExplicitPermission(t *testing.T) {
 
 	readToken := seedPlatformLogUser(logUserFixture{
 		username:    "log-reader",
-		password:    "reader-password-123",
+		password:    "Reader-Password-123!",
 		userID:      "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb1",
 		roleID:      "cccccccc-cccc-cccc-cccc-ccccccccccc1",
 		permissions: []string{"system.logs.read"},
 	})
 	deleteToken := seedPlatformLogUser(logUserFixture{
 		username:    "log-deleter",
-		password:    "deleter-password-123",
+		password:    "Deleter-Password-123!",
 		userID:      "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb2",
 		roleID:      "cccccccc-cccc-cccc-cccc-ccccccccccc2",
 		permissions: []string{"system.logs.read", "system.logs.delete"},

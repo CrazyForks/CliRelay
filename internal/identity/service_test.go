@@ -1,10 +1,16 @@
 package identity
 
 import (
+	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
+	_ "modernc.org/sqlite"
 )
 
 func TestNormalizeUsername(t *testing.T) {
@@ -17,9 +23,48 @@ func TestHashPasswordPolicyAndVerification(t *testing.T) {
 	if _, err := HashPassword("too-short"); err == nil {
 		t.Fatal("expected short password to be rejected")
 	}
-	hash, err := HashPassword("correct-horse-battery-staple")
+	if _, err := HashPassword("alllowercase!"); err == nil {
+		t.Fatal("expected password without uppercase and sufficient complexity to be rejected")
+	}
+	hash, err := HashPassword("Correct-Horse-1!")
 	if err != nil || hash == "" {
 		t.Fatalf("HashPassword() hash=%q err=%v", hash, err)
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte("Correct-Horse-1!")); err != nil {
+		t.Fatalf("CompareHashAndPassword() err=%v", err)
+	}
+}
+
+func TestCreateUserGeneratesInitialPasswordWhenBlank(t *testing.T) {
+	ctx := context.Background()
+	service, db := newSQLiteCreateUserTestService(t)
+	principal := Principal{
+		PlatformAdmin:   true,
+		Kind:            "user",
+		User:            User{ID: SystemUserID, TenantID: SystemTenantID},
+		EffectiveTenant: Tenant{ID: SystemTenantID},
+	}
+
+	user, initialPassword, err := service.CreateUser(ctx, principal, SystemTenantID, "generated-user", "Generated User", "   ", nil)
+	if err != nil {
+		t.Fatalf("CreateUser() err=%v", err)
+	}
+	if user.ID == "" {
+		t.Fatal("CreateUser() returned empty user id")
+	}
+	if initialPassword == "" {
+		t.Fatal("CreateUser() did not return generated password")
+	}
+	if _, err := HashPassword(initialPassword); err != nil {
+		t.Fatalf("generated password does not satisfy policy: %v", err)
+	}
+
+	var passwordHash string
+	if err := db.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id = ?`, user.ID).Scan(&passwordHash); err != nil {
+		t.Fatalf("query generated user hash: %v", err)
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(initialPassword)); err != nil {
+		t.Fatalf("generated password does not verify against stored hash: %v", err)
 	}
 }
 
@@ -199,6 +244,37 @@ func TestMenuCodeForPermission(t *testing.T) {
 	if len(tests) != 0 {
 		t.Fatalf("permissions missing from catalog: %v", tests)
 	}
+}
+
+func newSQLiteCreateUserTestService(t *testing.T) (*Service, *sql.DB) {
+	t.Helper()
+	dsn := fmt.Sprintf("file:identity_create_user_%d?mode=memory&cache=shared", time.Now().UnixNano())
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(4)
+	t.Cleanup(func() {
+		if closeErr := db.Close(); closeErr != nil {
+			t.Errorf("close sqlite identity db: %v", closeErr)
+		}
+	})
+	for _, statement := range []string{
+		`CREATE TABLE users (
+			id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, username TEXT NOT NULL, username_normalized TEXT NOT NULL,
+			display_name TEXT NOT NULL, password_hash TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+			must_change_password BOOLEAN NOT NULL DEFAULT false, last_login_at TIMESTAMP NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			version INTEGER NOT NULL DEFAULT 1, created_by TEXT
+		)`,
+		`CREATE TABLE roles (id TEXT PRIMARY KEY, code TEXT NOT NULL, name TEXT NOT NULL)`,
+		`CREATE TABLE user_roles (user_id TEXT NOT NULL, role_id TEXT NOT NULL, created_by TEXT)`,
+	} {
+		if _, err = db.Exec(statement); err != nil {
+			t.Fatalf("create sqlite identity schema: %v", err)
+		}
+	}
+	return NewService(db), db
 }
 
 func ptrTime(value time.Time) *time.Time { return &value }

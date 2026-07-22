@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 	"sort"
 	"strings"
 	"sync"
@@ -33,7 +34,15 @@ var (
 	ErrValidation         = errors.New("validation failed")
 )
 
-const dummyPasswordHash = "$2a$10$7EqJtq98hPqEX7fNZaFWoO5fKvR2qv4V5BfQWqHkVq3VP7N5x5V7e"
+const (
+	dummyPasswordHash         = "$2a$10$7EqJtq98hPqEX7fNZaFWoO5fKvR2qv4V5BfQWqHkVq3VP7N5x5V7e"
+	generatedPasswordLength   = 16
+	passwordUpperCharacters   = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	passwordLowerCharacters   = "abcdefghijklmnopqrstuvwxyz"
+	passwordDigitCharacters   = "0123456789"
+	passwordSpecialCharacters = "!@#$%^&*()-_=+[]{}:,.?"
+	passwordAllCharacters     = passwordUpperCharacters + passwordLowerCharacters + passwordDigitCharacters + passwordSpecialCharacters
+)
 
 type Service struct {
 	db *sql.DB
@@ -66,8 +75,78 @@ func HashPassword(password string) (string, error) {
 	if len(password) < 12 {
 		return "", fmt.Errorf("%w: password must contain at least 12 characters", ErrValidation)
 	}
+
+	hasUpper := false
+	hasLower := false
+	hasSpecial := false
+	for i := 0; i < len(password); i++ {
+		switch c := password[i]; {
+		case c >= 'A' && c <= 'Z':
+			hasUpper = true
+		case c >= 'a' && c <= 'z':
+			hasLower = true
+		case c >= '0' && c <= '9':
+		default:
+			hasSpecial = true
+		}
+	}
+	if !hasUpper {
+		return "", fmt.Errorf("%w: password must contain at least one uppercase letter", ErrValidation)
+	}
+	if !hasLower {
+		return "", fmt.Errorf("%w: password must contain at least one lowercase letter", ErrValidation)
+	}
+	if !hasSpecial {
+		return "", fmt.Errorf("%w: password must contain at least one non-alphanumeric character", ErrValidation)
+	}
+
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	return string(hash), err
+}
+
+func randomPassword() (string, error) {
+	password := make([]byte, 0, generatedPasswordLength)
+	for _, charset := range []string{passwordUpperCharacters, passwordLowerCharacters, passwordDigitCharacters, passwordSpecialCharacters} {
+		ch, err := randomPasswordCharacter(charset)
+		if err != nil {
+			return "", err
+		}
+		password = append(password, ch)
+	}
+	for len(password) < generatedPasswordLength {
+		ch, err := randomPasswordCharacter(passwordAllCharacters)
+		if err != nil {
+			return "", err
+		}
+		password = append(password, ch)
+	}
+	if err := shufflePasswordCharacters(password); err != nil {
+		return "", err
+	}
+	return string(password), nil
+}
+
+func randomPasswordCharacter(charset string) (byte, error) {
+	if charset == "" {
+		return 0, errors.New("identity: empty password charset")
+	}
+	idx, err := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+	if err != nil {
+		return 0, err
+	}
+	return charset[idx.Int64()], nil
+}
+
+func shufflePasswordCharacters(password []byte) error {
+	for i := len(password) - 1; i > 0; i-- {
+		idx, err := rand.Int(rand.Reader, big.NewInt(int64(i+1)))
+		if err != nil {
+			return err
+		}
+		j := int(idx.Int64())
+		password[i], password[j] = password[j], password[i]
+	}
+	return nil
 }
 
 func generatedIdentifier(prefix string) string {
@@ -893,56 +972,65 @@ func (s *Service) ListUsers(ctx context.Context, tenantID string) ([]User, error
 	return users, rows.Err()
 }
 
-func (s *Service) CreateUser(ctx context.Context, actor Principal, tenantID, username, displayName, password string, roleIDs []string) (User, error) {
+func (s *Service) CreateUser(ctx context.Context, actor Principal, tenantID, username, displayName, password string, roleIDs []string) (User, string, error) {
 	if !actor.Has("tenant.users.create") && !actor.Has("platform.users.manage") {
-		return User{}, ErrPermissionDenied
+		return User{}, "", ErrPermissionDenied
 	}
 	if err := ensureActorTenantScope(actor, tenantID); err != nil {
-		return User{}, err
+		return User{}, "", err
 	}
 	if len(roleIDs) > 0 && !actor.Has("tenant.users.assign_roles") && !actor.Has("platform.users.manage") {
-		return User{}, ErrPermissionDenied
+		return User{}, "", ErrPermissionDenied
 	}
 	normalizedUsername := NormalizeUsername(username)
 	displayName = strings.TrimSpace(displayName)
 	if !validIdentifier(normalizedUsername, 128, true) || displayName == "" || len(displayName) > 128 {
-		return User{}, fmt.Errorf("%w: invalid user input", ErrValidation)
+		return User{}, "", fmt.Errorf("%w: invalid user input", ErrValidation)
+	}
+	generatedPassword := ""
+	if strings.TrimSpace(password) == "" {
+		var err error
+		generatedPassword, err = randomPassword()
+		if err != nil {
+			return User{}, "", err
+		}
+		password = generatedPassword
 	}
 	hash, err := HashPassword(password)
 	if err != nil {
-		return User{}, err
+		return User{}, "", err
 	}
 	userID := uuid.NewString()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return User{}, err
+		return User{}, "", err
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err = tx.ExecContext(ctx, `INSERT INTO users (id, tenant_id, username, username_normalized, display_name, password_hash, must_change_password, created_by) VALUES (?, ?, ?, ?, ?, ?, true, ?)`, userID, tenantID, strings.TrimSpace(username), normalizedUsername, displayName, hash, actor.User.ID); err != nil {
-		return User{}, err
+		return User{}, "", err
 	}
 	if err = ensureRolesDelegable(ctx, tx, actor, tenantID, roleIDs); err != nil {
-		return User{}, err
+		return User{}, "", err
 	}
 	for _, roleID := range roleIDs {
 		if _, err = tx.ExecContext(ctx, `INSERT INTO user_roles (user_id, role_id, created_by) VALUES (?, ?, ?)`, userID, roleID, actor.User.ID); err != nil {
-			return User{}, err
+			return User{}, "", err
 		}
 	}
 	if err = tx.Commit(); err != nil {
-		return User{}, err
+		return User{}, "", err
 	}
 	s.RecordAudit(ctx, AuditEvent{TenantID: tenantID, ActorKind: actor.Kind, ActorUserID: actor.User.ID, ActorSessionID: actor.SessionID, Action: "user.create", ResourceType: "user", ResourceID: userID, Result: "success"})
 	users, err := s.ListUsers(ctx, tenantID)
 	if err != nil {
-		return User{}, err
+		return User{}, "", err
 	}
 	for _, user := range users {
 		if user.ID == userID {
-			return user, nil
+			return user, generatedPassword, nil
 		}
 	}
-	return User{}, sql.ErrNoRows
+	return User{}, "", sql.ErrNoRows
 }
 
 func (s *Service) ResetPassword(ctx context.Context, actor Principal, tenantID, userID, password string) error {

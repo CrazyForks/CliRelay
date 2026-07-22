@@ -401,12 +401,18 @@ func (h *Handler) PostUser(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	user, err := h.identity().CreateUser(c.Request.Context(), principal, principal.EffectiveTenant.ID, body.Username, body.DisplayName, body.Password, body.RoleIDs)
+	user, initialPassword, err := h.identity().CreateUser(c.Request.Context(), principal, principal.EffectiveTenant.ID, body.Username, body.DisplayName, body.Password, body.RoleIDs)
 	if err != nil {
 		identityError(c, err)
 		return
 	}
-	c.JSON(http.StatusCreated, user)
+	c.JSON(http.StatusCreated, struct {
+		identity.User
+		InitialPassword string `json:"initial_password,omitempty"`
+	}{
+		User:            user,
+		InitialPassword: initialPassword,
+	})
 }
 
 func (h *Handler) PostUserResetPassword(c *gin.Context) {
