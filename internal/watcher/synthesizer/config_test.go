@@ -963,3 +963,38 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigSynthesizerAddsProviderBindingIDs(t *testing.T) {
+	cfg := &config.Config{
+		GeminiKey: []config.GeminiKey{{ID: "11111111-1111-4111-8111-111111111111", APIKey: "gemini-secret"}},
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			ID:      "22222222-2222-4222-8222-222222222222",
+			Name:    "compat",
+			BaseURL: "https://compat.example",
+			APIKeyEntries: []config.OpenAICompatibilityAPIKey{{
+				ID:     "33333333-3333-4333-8333-333333333333",
+				APIKey: "compat-secret",
+			}},
+		}},
+	}
+	auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
+		Config:      cfg,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil {
+		t.Fatalf("Synthesize: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("auth count = %d, want 2", len(auths))
+	}
+	if got := auths[0].Attributes["provider_key_id"]; got != cfg.GeminiKey[0].ID {
+		t.Fatalf("gemini provider_key_id = %q", got)
+	}
+	if got := auths[1].Attributes["provider_config_id"]; got != cfg.OpenAICompatibility[0].ID {
+		t.Fatalf("compat provider_config_id = %q", got)
+	}
+	if got := auths[1].Attributes["provider_key_id"]; got != cfg.OpenAICompatibility[0].APIKeyEntries[0].ID {
+		t.Fatalf("compat provider_key_id = %q", got)
+	}
+}

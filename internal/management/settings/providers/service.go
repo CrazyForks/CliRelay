@@ -25,3 +25,8 @@ func (s *Service) runValidator() error {
 	}
 	return s.validate()
 }
+
+func prepareProviderStableIDs(previous, next *config.Config) {
+	config.PreserveMissingProviderStableIDs(previous, next)
+	next.EnsureProviderStableIDs()
+}

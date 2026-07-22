@@ -11,6 +11,9 @@ const (
 // BedrockKey represents an AWS Bedrock Runtime credential.
 // It supports both AWS SigV4 credentials and Bedrock API key bearer auth.
 type BedrockKey struct {
+	// ID is the immutable persistent UUID used by channel bindings.
+	ID string `yaml:"id,omitempty" json:"id,omitempty"`
+
 	// Name is a human-readable label for this channel.
 	Name string `yaml:"name,omitempty" json:"name,omitempty"`
 

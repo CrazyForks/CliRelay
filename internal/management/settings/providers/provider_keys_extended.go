@@ -48,7 +48,9 @@ func (s *Service) ReplaceBedrockKeys(entries []config.BedrockKey) error {
 		NormalizeBedrockKey(&normalized[i])
 	}
 	prev := append([]config.BedrockKey(nil), s.cfg.BedrockKey...)
-	s.cfg.BedrockKey = normalized
+	next := &config.Config{BedrockKey: normalized}
+	prepareProviderStableIDs(&config.Config{BedrockKey: prev}, next)
+	s.cfg.BedrockKey = next.BedrockKey
 	s.cfg.SanitizeBedrockKeys()
 	if err := s.runValidator(); err != nil {
 		s.cfg.BedrockKey = prev
@@ -219,7 +221,9 @@ func (s *Service) ReplaceOpenCodeGoKeys(entries []config.OpenCodeGoKey) error {
 		return ErrProviderAPIKeyRequired
 	}
 	prev := append([]config.OpenCodeGoKey(nil), s.cfg.OpenCodeGoKey...)
-	s.cfg.OpenCodeGoKey = filtered
+	next := &config.Config{OpenCodeGoKey: filtered}
+	prepareProviderStableIDs(&config.Config{OpenCodeGoKey: prev}, next)
+	s.cfg.OpenCodeGoKey = next.OpenCodeGoKey
 	s.cfg.SanitizeOpenCodeGoKeys()
 	if err := s.runValidator(); err != nil {
 		s.cfg.OpenCodeGoKey = prev
@@ -395,7 +399,9 @@ func (s *Service) ReplaceClineKeys(entries []config.ClineKey) error {
 		return ErrProviderAPIKeyRequired
 	}
 	prev := append([]config.ClineKey(nil), s.cfg.ClineKey...)
-	s.cfg.ClineKey = filtered
+	next := &config.Config{ClineKey: filtered}
+	prepareProviderStableIDs(&config.Config{ClineKey: prev}, next)
+	s.cfg.ClineKey = next.ClineKey
 	s.cfg.SanitizeClineKeys()
 	if err := s.runValidator(); err != nil {
 		s.cfg.ClineKey = prev
@@ -571,7 +577,9 @@ func (s *Service) ReplaceOllamaCloudKeys(entries []config.OllamaCloudKey) error 
 		return ErrProviderAPIKeyRequired
 	}
 	prev := append([]config.OllamaCloudKey(nil), s.cfg.OllamaCloudKey...)
-	s.cfg.OllamaCloudKey = filtered
+	next := &config.Config{OllamaCloudKey: filtered}
+	prepareProviderStableIDs(&config.Config{OllamaCloudKey: prev}, next)
+	s.cfg.OllamaCloudKey = next.OllamaCloudKey
 	s.cfg.SanitizeOllamaCloudKeys()
 	if err := s.runValidator(); err != nil {
 		s.cfg.OllamaCloudKey = prev

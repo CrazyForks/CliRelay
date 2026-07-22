@@ -305,3 +305,21 @@ func TestBuildTenantRuntimeConfigPreservesExplicitDisabledIdentityFingerprint(t 
 		t.Fatalf("Codex.Enabled = false, want true from tenant runtime row")
 	}
 }
+
+func TestTenantRuntimeProviderStableIDBackfillPersistsOnce(t *testing.T) {
+	cleanup := setupConfigMigrationTestDB(t)
+	defer cleanup()
+
+	const tenantID = "00000000-0000-0000-0000-0000000000aa"
+	if err := UpsertRuntimeSettingForTenant(tenantID, RuntimeSettingGeminiKeys, []config.GeminiKey{{APIKey: "tenant-secret"}}); err != nil {
+		t.Fatalf("UpsertRuntimeSettingForTenant: %v", err)
+	}
+	first := BuildTenantRuntimeConfig(&config.Config{}, tenantID)
+	if len(first.GeminiKey) != 1 || first.GeminiKey[0].ID == "" {
+		t.Fatalf("first backfill = %#v", first.GeminiKey)
+	}
+	second := BuildTenantRuntimeConfig(&config.Config{}, tenantID)
+	if second.GeminiKey[0].ID != first.GeminiKey[0].ID {
+		t.Fatalf("tenant stable ID changed: first=%q second=%q", first.GeminiKey[0].ID, second.GeminiKey[0].ID)
+	}
+}

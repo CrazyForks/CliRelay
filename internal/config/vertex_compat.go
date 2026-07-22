@@ -9,6 +9,9 @@ import "strings"
 //
 // Example services: zenmux.ai and similar Vertex-compatible providers.
 type VertexCompatKey struct {
+	// ID is the immutable persistent UUID used by channel bindings.
+	ID string `yaml:"id,omitempty" json:"id,omitempty"`
+
 	// APIKey is the authentication key for accessing the Vertex-compatible API.
 	// Maps to the x-goog-api-key header.
 	APIKey string `yaml:"api-key" json:"api-key"`
