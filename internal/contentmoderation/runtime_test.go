@@ -27,6 +27,18 @@ func (e *runtimeEvaluatorStub) Evaluate(context.Context, Profile, string) Decisi
 	return e.decision
 }
 
+type blockingRuntimeEvaluator struct {
+	started  chan struct{}
+	release  chan struct{}
+	decision Decision
+}
+
+func (e *blockingRuntimeEvaluator) Evaluate(context.Context, Profile, string) Decision {
+	close(e.started)
+	<-e.release
+	return e.decision
+}
+
 type runtimeResolverStub struct {
 	calls atomic.Int32
 	fn    func() (Profile, string, error)
@@ -180,6 +192,59 @@ func TestRuntimeModeratorTenantMismatchNeverQueriesResolver(t *testing.T) {
 	}
 	if moderator.Metrics().Errors != 1 {
 		t.Fatalf("metrics = %#v, want one error", moderator.Metrics())
+	}
+}
+
+func TestRuntimeModeratorMetricsTrackAPILatencyAndInFlight(t *testing.T) {
+	const tenantID = "tenant-metrics"
+	profile, err := NewProfile(tenantID, "profile-metrics", CreateProfileInput{
+		Name:        "metrics",
+		Mode:        ModePreBlock,
+		KeywordMode: KeywordModeAPIOnly,
+		APIKey:      "moderation-secret",
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("NewProfile: %v", err)
+	}
+	resolver := &runtimeResolverStub{fn: func() (Profile, string, error) {
+		return profile, ChannelTypeProviderKey, nil
+	}}
+	evaluator := &blockingRuntimeEvaluator{
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+		decision: Decision{Action: ActionAllow, LatencyMS: 24},
+	}
+	moderator := NewRequestModerator(resolver, evaluator)
+	auth := &coreauth.Auth{
+		ID:       "auth-metrics",
+		TenantID: tenantID,
+		Attributes: map[string]string{
+			"provider_key_id": "key-metrics",
+		},
+	}
+	resultCh := make(chan coreauth.RequestModerationResult, 1)
+	go func() {
+		resultCh <- moderator.Moderate(context.Background(), auth, runtimeOptions(tenantID, "safe"))
+	}()
+
+	select {
+	case <-evaluator.started:
+	case <-time.After(time.Second):
+		t.Fatal("moderation evaluator did not start")
+	}
+	if metrics := moderator.Metrics(); metrics.Requests != 1 || metrics.InFlight != 1 {
+		t.Fatalf("metrics during evaluation = %#v", metrics)
+	}
+	close(evaluator.release)
+	if result := <-resultCh; result.Blocked {
+		t.Fatal("allow decision unexpectedly blocked")
+	}
+	metrics := moderator.Metrics()
+	if metrics.Requests != 1 || metrics.Allows != 1 || metrics.Blocks != 0 || metrics.Errors != 0 || metrics.InFlight != 0 {
+		t.Fatalf("metrics after evaluation = %#v", metrics)
+	}
+	if metrics.LatencyTotalMS != 24 || metrics.LatencySamples != 1 || metrics.AvgLatencyMS != 24 {
+		t.Fatalf("latency metrics = %#v", metrics)
 	}
 }
 

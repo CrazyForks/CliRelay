@@ -31,11 +31,14 @@ type RuntimeModerator struct {
 	lastGoodMu sync.RWMutex
 	lastGood   map[resolutionKey]resolvedProfile
 
-	requests  atomic.Uint64
-	allows    atomic.Uint64
-	blocks    atomic.Uint64
-	errors    atomic.Uint64
-	cacheHits atomic.Uint64
+	requests       atomic.Uint64
+	allows         atomic.Uint64
+	blocks         atomic.Uint64
+	errors         atomic.Uint64
+	cacheHits      atomic.Uint64
+	inFlight       atomic.Int64
+	latencyTotalMS atomic.Uint64
+	latencySamples atomic.Uint64
 }
 
 type resolutionKey struct {
@@ -56,11 +59,27 @@ type requestDecisionCache struct {
 }
 
 type ModerationMetrics struct {
-	Requests  uint64 `json:"requests"`
-	Allows    uint64 `json:"allows"`
-	Blocks    uint64 `json:"blocks"`
-	Errors    uint64 `json:"errors"`
-	CacheHits uint64 `json:"cache_hits"`
+	Requests       uint64  `json:"requests"`
+	Allows         uint64  `json:"allows"`
+	Blocks         uint64  `json:"blocks"`
+	Errors         uint64  `json:"errors"`
+	CacheHits      uint64  `json:"cache_hits"`
+	InFlight       int64   `json:"in_flight"`
+	LatencyTotalMS uint64  `json:"latency_total_ms"`
+	LatencySamples uint64  `json:"latency_samples"`
+	AvgLatencyMS   float64 `json:"avg_latency_ms"`
+}
+
+var runtimeModerator atomic.Pointer[RuntimeModerator]
+
+// SetRuntime exposes the live proxy moderator to process-local management metrics.
+func SetRuntime(moderator *RuntimeModerator) {
+	runtimeModerator.Store(moderator)
+}
+
+// Runtime returns the moderator used by the live proxy process.
+func Runtime() *RuntimeModerator {
+	return runtimeModerator.Load()
 }
 
 func NewRequestModerator(resolver ProfileResolver, evaluator DecisionEvaluator) *RuntimeModerator {
@@ -78,13 +97,22 @@ func (m *RuntimeModerator) Metrics() ModerationMetrics {
 	if m == nil {
 		return ModerationMetrics{}
 	}
-	return ModerationMetrics{
-		Requests:  m.requests.Load(),
-		Allows:    m.allows.Load(),
-		Blocks:    m.blocks.Load(),
-		Errors:    m.errors.Load(),
-		CacheHits: m.cacheHits.Load(),
+	latencyTotalMS := m.latencyTotalMS.Load()
+	latencySamples := m.latencySamples.Load()
+	metrics := ModerationMetrics{
+		Requests:       m.requests.Load(),
+		Allows:         m.allows.Load(),
+		Blocks:         m.blocks.Load(),
+		Errors:         m.errors.Load(),
+		CacheHits:      m.cacheHits.Load(),
+		InFlight:       m.inFlight.Load(),
+		LatencyTotalMS: latencyTotalMS,
+		LatencySamples: latencySamples,
 	}
+	if latencySamples > 0 {
+		metrics.AvgLatencyMS = float64(latencyTotalMS) / float64(latencySamples)
+	}
+	return metrics
 }
 
 func (m *RuntimeModerator) Moderate(ctx context.Context, auth *coreauth.Auth, opts cliproxyexecutor.Options) coreauth.RequestModerationResult {
@@ -94,7 +122,7 @@ func (m *RuntimeModerator) Moderate(ctx context.Context, auth *coreauth.Auth, op
 	m.requests.Add(1)
 	tenantID := coreauth.NormalizedTenantID(metadataString(opts.Metadata, cliproxyexecutor.TenantMetadataKey))
 	if coreauth.NormalizedTenantID(auth.TenantID) != tenantID {
-		m.recordError(tenantID, auth, "", Profile{}, "tenant_mismatch", 0)
+		m.recordError(tenantID, auth, "", Profile{}, "tenant_mismatch", 0, false)
 		return coreauth.RequestModerationResult{}
 	}
 
@@ -106,23 +134,27 @@ func (m *RuntimeModerator) Moderate(ctx context.Context, auth *coreauth.Auth, op
 		return coreauth.RequestModerationResult{}
 	}
 	if err != nil {
-		m.recordError(tenantID, auth, "", Profile{}, "store_error", 0)
+		m.recordError(tenantID, auth, "", Profile{}, "store_error", 0, false)
 		return coreauth.RequestModerationResult{}
 	}
 	if usedLastGood {
-		m.recordError(tenantID, auth, resolved.source, resolved.profile, "store_error_last_good", 0)
+		m.recordError(tenantID, auth, resolved.source, resolved.profile, "store_error_last_good", 0, false)
 	}
 	profile := resolved.profile
 	if profile.Mode == ModeOff {
 		m.allows.Add(1)
-		m.logDecision(tenantID, auth, resolved.source, profile, Decision{Action: ActionAllow}, false)
+		decision := Decision{Action: ActionAllow}
+		m.setSnapshot(ctx, auth, resolved.source, profile, decision, false, false)
+		m.logDecision(tenantID, auth, resolved.source, profile, decision, false)
 		return coreauth.RequestModerationResult{}
 	}
 
 	input := ExtractLastUserText(opts.SourceFormat, opts.OriginalRequest)
 	if input == "" {
 		m.allows.Add(1)
-		m.logDecision(tenantID, auth, resolved.source, profile, Decision{Action: ActionAllow}, false)
+		decision := Decision{Action: ActionAllow}
+		m.setSnapshot(ctx, auth, resolved.source, profile, decision, false, false)
+		m.logDecision(tenantID, auth, resolved.source, profile, decision, false)
 		return coreauth.RequestModerationResult{}
 	}
 
@@ -131,14 +163,25 @@ func (m *RuntimeModerator) Moderate(ctx context.Context, auth *coreauth.Auth, op
 	if cache != nil {
 		if decision, ok := cache.get(cacheKey); ok {
 			m.cacheHits.Add(1)
-			return m.resultForDecision(tenantID, auth, resolved.source, profile, decision, true)
+			return m.resultForDecision(ctx, tenantID, auth, resolved.source, profile, decision, true)
 		}
 	}
+	apiPath := moderationAPIPath(profile, input)
+	if apiPath {
+		m.inFlight.Add(1)
+	}
 	decision := m.evaluator.Evaluate(ctx, profile, input)
+	if apiPath {
+		m.inFlight.Add(-1)
+		if decision.LatencyMS >= 0 {
+			m.latencyTotalMS.Add(uint64(decision.LatencyMS))
+			m.latencySamples.Add(1)
+		}
+	}
 	if cache != nil {
 		cache.put(cacheKey, decision)
 	}
-	return m.resultForDecision(tenantID, auth, resolved.source, profile, decision, false)
+	return m.resultForDecision(ctx, tenantID, auth, resolved.source, profile, decision, false)
 }
 
 func (m *RuntimeModerator) resolve(ctx context.Context, key resolutionKey) (resolvedProfile, bool, error) {
@@ -165,12 +208,15 @@ func (m *RuntimeModerator) resolve(ctx context.Context, key resolutionKey) (reso
 	return resolvedProfile{}, false, err
 }
 
-func (m *RuntimeModerator) resultForDecision(tenantID string, auth *coreauth.Auth, source string, profile Profile, decision Decision, cached bool) coreauth.RequestModerationResult {
+func (m *RuntimeModerator) resultForDecision(ctx context.Context, tenantID string, auth *coreauth.Auth, source string, profile Profile, decision Decision, cached bool) coreauth.RequestModerationResult {
 	if decision.Action == ActionAPIError {
 		m.allows.Add(1)
-		m.recordError(tenantID, auth, source, profile, moderationErrorClass(decision.ModerationError), decision.LatencyMS)
+		errorClass := moderationErrorClass(decision.ModerationError)
+		m.setSnapshot(ctx, auth, source, profile, decision, true, cached)
+		m.recordError(tenantID, auth, source, profile, errorClass, decision.LatencyMS, cached)
 		return coreauth.RequestModerationResult{}
 	}
+	m.setSnapshot(ctx, auth, source, profile, decision, true, cached)
 	if decision.WouldBlock {
 		m.blocks.Add(1)
 		m.logDecision(tenantID, auth, source, profile, decision, cached)
@@ -181,12 +227,13 @@ func (m *RuntimeModerator) resultForDecision(tenantID string, auth *coreauth.Aut
 	return coreauth.RequestModerationResult{}
 }
 
-func (m *RuntimeModerator) recordError(tenantID string, auth *coreauth.Auth, source string, profile Profile, errorClass string, latencyMS int64) {
+func (m *RuntimeModerator) recordError(tenantID string, auth *coreauth.Auth, source string, profile Profile, errorClass string, latencyMS int64, cached bool) {
 	m.errors.Add(1)
 	fields := moderationLogFields(tenantID, auth, source, profile)
 	fields["action"] = ActionAPIError
 	fields["error_class"] = errorClass
 	fields["latency_ms"] = latencyMS
+	fields["cache_hit"] = cached
 	log.WithFields(fields).Warn("content moderation failed open")
 }
 
@@ -249,6 +296,17 @@ func runtimeChannelIDs(auth *coreauth.Auth) (authFileID, providerKeyID, provider
 	providerKeyID = strings.TrimSpace(auth.Attributes["provider_key_id"])
 	providerID = strings.TrimSpace(auth.Attributes["provider_config_id"])
 	return authFileID, providerKeyID, providerID
+}
+
+func moderationAPIPath(profile Profile, input string) bool {
+	if profile.Mode != ModePreBlock || profile.KeywordMode == KeywordModeKeywordOnly || strings.TrimSpace(input) == "" {
+		return false
+	}
+	if profile.KeywordMode == KeywordModeKeywordAndAPI {
+		_, keywordHit := matchKeyword(input, profile.BlockedKeywords)
+		return !keywordHit
+	}
+	return true
 }
 
 func decisionCacheKey(profile Profile, input string) string {

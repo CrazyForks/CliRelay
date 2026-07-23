@@ -18,6 +18,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 )
 
 func setupContentModerationHandlerTest(t *testing.T) (*Handler, string) {
@@ -54,6 +56,62 @@ func moderationContext(tenantID, method, path, body string) (*gin.Context, *http
 	c.Request = httptest.NewRequest(method, path, bytes.NewBufferString(body))
 	c.Request.Header.Set("Content-Type", "application/json")
 	return c, rec
+}
+
+type managementMetricsResolver struct {
+	profile contentmoderation.Profile
+}
+
+func (r managementMetricsResolver) ResolveProfile(context.Context, string, string, string, string) (contentmoderation.Profile, string, error) {
+	return r.profile, contentmoderation.ChannelTypeProviderKey, nil
+}
+
+type managementMetricsEvaluator struct{}
+
+func (managementMetricsEvaluator) Evaluate(context.Context, contentmoderation.Profile, string) contentmoderation.Decision {
+	return contentmoderation.Decision{Action: contentmoderation.ActionAllow}
+}
+
+func TestContentModerationMetricsUseLiveRuntime(t *testing.T) {
+	const tenantID = "tenant-metrics"
+	profile, err := contentmoderation.NewProfile(tenantID, "profile-metrics", contentmoderation.CreateProfileInput{
+		Name:        "metrics",
+		Mode:        contentmoderation.ModePreBlock,
+		KeywordMode: contentmoderation.KeywordModeKeywordOnly,
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("NewProfile: %v", err)
+	}
+	runtime := contentmoderation.NewRequestModerator(managementMetricsResolver{profile: profile}, managementMetricsEvaluator{})
+	previous := contentmoderation.Runtime()
+	contentmoderation.SetRuntime(runtime)
+	t.Cleanup(func() { contentmoderation.SetRuntime(previous) })
+	body, _ := json.Marshal(map[string]any{"messages": []map[string]any{{"role": "user", "content": "safe"}}})
+	runtime.Moderate(context.Background(), &coreauth.Auth{
+		ID:       "auth-metrics",
+		TenantID: tenantID,
+		Attributes: map[string]string{
+			"provider_key_id": "provider-key-metrics",
+		},
+	}, cliproxyexecutor.Options{
+		OriginalRequest: body,
+		SourceFormat:    sdktranslator.FormatOpenAI,
+		Metadata:        map[string]any{cliproxyexecutor.TenantMetadataKey: tenantID},
+	})
+
+	h := &Handler{}
+	c, rec := moderationContext(tenantID, http.MethodGet, "/v0/management/content-moderation/metrics", "")
+	h.GetContentModerationMetrics(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET metrics status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var metrics contentmoderation.ModerationMetrics
+	if err = json.Unmarshal(rec.Body.Bytes(), &metrics); err != nil {
+		t.Fatalf("decode metrics: %v", err)
+	}
+	if metrics.Requests != 1 || metrics.Allows != 1 {
+		t.Fatalf("metrics = %#v", metrics)
+	}
 }
 
 func TestContentModerationProfileUsesPrincipalTenantAndHidesSecret(t *testing.T) {
