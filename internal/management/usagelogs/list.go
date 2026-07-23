@@ -613,10 +613,12 @@ func enrichChannelFilterOptions(
 		return authIndex
 	}
 	resolveSubject := func(option usage.ChannelFilterOption, authIndex string) string {
-		if subjectID := strings.TrimSpace(option.AuthSubjectID); subjectID != "" {
+		// Live auth metadata is the canonical subject. Persisted request-log rows
+		// may still carry an older subject ID after the identity seed changes.
+		if subjectID := strings.TrimSpace(authSubjectByIndex[authIndex]); subjectID != "" {
 			return subjectID
 		}
-		if subjectID := strings.TrimSpace(authSubjectByIndex[authIndex]); subjectID != "" {
+		if subjectID := strings.TrimSpace(option.AuthSubjectID); subjectID != "" {
 			return subjectID
 		}
 		if value := strings.TrimSpace(option.Value); looksLikeAuthSubjectID(value) {
