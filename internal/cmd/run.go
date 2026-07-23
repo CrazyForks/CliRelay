@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/contentmoderation"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/enduser"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
 	settingsstore "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/store"
@@ -45,6 +46,7 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 		WithConfig(cfg).
 		WithConfigPath(configPath).
 		WithCoreAuthHook(usage.NewAIAccountBindingHook()).
+		WithRequestModerator(contentmoderation.NewRequestModerator(contentmoderation.NewStore(usage.RuntimeDB()), contentmoderation.NewEvaluator(nil))).
 		WithHooks(runtimeDataStackPostStartHooks(defaultRuntimeDataStackMaintenanceOps())).
 		WithLocalManagementPassword(localPassword)
 
@@ -89,6 +91,7 @@ func StartServiceBackground(cfg *config.Config, configPath string, localPassword
 		WithConfig(cfg).
 		WithConfigPath(configPath).
 		WithCoreAuthHook(usage.NewAIAccountBindingHook()).
+		WithRequestModerator(contentmoderation.NewRequestModerator(contentmoderation.NewStore(usage.RuntimeDB()), contentmoderation.NewEvaluator(nil))).
 		WithHooks(runtimeDataStackPostStartHooks(defaultRuntimeDataStackMaintenanceOps())).
 		WithLocalManagementPassword(localPassword)
 

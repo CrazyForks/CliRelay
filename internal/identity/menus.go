@@ -89,6 +89,7 @@ var MenuCatalog = []MenuSeed{
 	{Code: "runtime.monitor", ParentCode: "group.runtime", Type: "menu", Path: "/runtime/monitor", Component: "monitor", LabelKey: "shell.nav_monitor", Icon: "activity", PermissionCode: "monitor.read", SortOrder: 10},
 	{Code: "runtime.request-logs", ParentCode: "group.runtime", Type: "menu", Path: "/runtime/request-logs", Component: "request-logs", LabelKey: "shell.nav_request_logs", Icon: "scroll-text", PermissionCode: "request_logs.read", SortOrder: 20},
 	{Code: "runtime.logs", ParentCode: "group.runtime", Type: "menu", Path: "/runtime/logs", Component: "logs", LabelKey: "shell.nav_logs", Icon: "file-text", PermissionCode: "system.logs.read", SortOrder: 30},
+	{Code: "runtime.content-moderation", ParentCode: "group.runtime", Type: "menu", Path: "/runtime/content-moderation", Component: "content-moderation", LabelKey: "shell.nav_content_moderation", Icon: "shield-alert", PermissionCode: "content_moderation.read", SortOrder: 40},
 	// Access & credentials (upstream AI + client keys)
 	{Code: "access.providers", ParentCode: "group.access", Type: "menu", Path: "/access/ai-providers", Component: "providers", LabelKey: "shell.nav_ai_providers", Icon: "bot", PermissionCode: "providers.read", SortOrder: 10},
 	// Stable code kept for role/menu bindings; path lives under /access as AI OAuth accounts.

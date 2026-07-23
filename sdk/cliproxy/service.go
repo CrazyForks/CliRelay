@@ -121,6 +121,8 @@ type Builder struct {
 	// coreAuthHook observes credential lifecycle without entering request hot paths.
 	coreAuthHook coreauth.Hook
 
+	requestModerator coreauth.RequestModerator
+
 	// serverOptions contains additional server configuration options.
 	serverOptions []api.ServerOption
 }
@@ -201,6 +203,13 @@ func (b *Builder) WithCoreAuthManager(mgr *coreauth.Manager) *Builder {
 // WithCoreAuthHook configures lifecycle callbacks for bindings and related read models.
 func (b *Builder) WithCoreAuthHook(hook coreauth.Hook) *Builder {
 	b.coreAuthHook = hook
+	return b
+}
+
+// WithRequestModerator injects request-time content moderation without coupling
+// the SDK to the host's persistence implementation.
+func (b *Builder) WithRequestModerator(moderator coreauth.RequestModerator) *Builder {
+	b.requestModerator = moderator
 	return b
 }
 
@@ -293,6 +302,7 @@ func (b *Builder) Build() (*Service, error) {
 	if b.coreAuthHook != nil {
 		coreManager.SetHook(b.coreAuthHook)
 	}
+	coreManager.SetRequestModerator(b.requestModerator)
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
 	coreManager.SetConfig(b.cfg)

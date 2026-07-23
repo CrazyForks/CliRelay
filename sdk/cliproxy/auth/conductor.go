@@ -186,6 +186,8 @@ type Manager struct {
 
 	modelRegistry ModelRegistry
 
+	requestModerator RequestModerator
+
 	// Auto refresh state
 	refreshCancel    context.CancelFunc
 	refreshSemaphore chan struct{}

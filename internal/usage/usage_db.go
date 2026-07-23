@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/contentmoderation"
 	postgresstore "github.com/router-for-me/CLIProxyAPI/v6/internal/storage/postgres"
 	log "github.com/sirupsen/logrus"
 	_ "modernc.org/sqlite"
@@ -813,6 +814,12 @@ func initOpenedDBLocked(db, readDB *sql.DB, dbPath, driver string, storageCfg co
 	initRuntimeSettingsTable(db)
 	log.Debugf("usage: initializing identity_fingerprints table")
 	initIdentityFingerprintsTable(db)
+	log.Debugf("usage: initializing content moderation tables")
+	if err := contentmoderation.InitTables(db); err != nil {
+		_ = db.Close()
+		usageDB, usageReadDB = nil, nil
+		return err
+	}
 	startRequestLogMaintenance(db, driver)
 	startRequestLogContentSessionIDBackfill(db)
 	log.Infof("usage: %s database initialised at %s", driver, dbPath)

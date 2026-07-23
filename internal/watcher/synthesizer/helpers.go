@@ -142,3 +142,15 @@ func addConfigHeadersToAttrs(headers map[string]string, attrs map[string]string)
 		attrs["header:"+key] = val
 	}
 }
+
+func addProviderBindingAttrs(attrs map[string]string, providerConfigID, providerKeyID string) {
+	if attrs == nil {
+		return
+	}
+	if id := strings.TrimSpace(providerConfigID); id != "" {
+		attrs["provider_config_id"] = id
+	}
+	if id := strings.TrimSpace(providerKeyID); id != "" {
+		attrs["provider_key_id"] = id
+	}
+}

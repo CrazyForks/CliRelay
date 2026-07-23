@@ -35,7 +35,9 @@ func (s *Service) ReplaceOpenAICompatibility(entries []config.OpenAICompatibilit
 		}
 	}
 	prev := append([]config.OpenAICompatibility(nil), s.cfg.OpenAICompatibility...)
-	s.cfg.OpenAICompatibility = filtered
+	next := &config.Config{OpenAICompatibility: filtered}
+	prepareProviderStableIDs(&config.Config{OpenAICompatibility: prev}, next)
+	s.cfg.OpenAICompatibility = next.OpenAICompatibility
 	s.cfg.SanitizeOpenAICompatibility()
 	if err := s.runValidator(); err != nil {
 		s.cfg.OpenAICompatibility = prev
@@ -85,7 +87,10 @@ func (s *Service) PatchOpenAICompatibility(index *int, name *string, patch OpenA
 		entry.BaseURL = trimmed
 	}
 	if patch.APIKeyEntries != nil {
-		entry.APIKeyEntries = append([]config.OpenAICompatibilityAPIKey(nil), (*patch.APIKeyEntries)...)
+		next := &config.Config{OpenAICompatibility: []config.OpenAICompatibility{{APIKeyEntries: append([]config.OpenAICompatibilityAPIKey(nil), (*patch.APIKeyEntries)...)}}}
+		previous := &config.Config{OpenAICompatibility: []config.OpenAICompatibility{{APIKeyEntries: entry.APIKeyEntries}}}
+		prepareProviderStableIDs(previous, next)
+		entry.APIKeyEntries = next.OpenAICompatibility[0].APIKeyEntries
 	}
 	if patch.Models != nil {
 		entry.Models = append([]config.OpenAICompatibilityModel(nil), (*patch.Models)...)
@@ -151,7 +156,10 @@ func (s *Service) ReplaceVertexCompatKeys(entries []config.VertexCompatKey) {
 	for i := range entries {
 		NormalizeVertexCompatKey(&entries[i])
 	}
-	s.cfg.VertexCompatAPIKey = entries
+	prev := append([]config.VertexCompatKey(nil), s.cfg.VertexCompatAPIKey...)
+	next := &config.Config{VertexCompatAPIKey: entries}
+	prepareProviderStableIDs(&config.Config{VertexCompatAPIKey: prev}, next)
+	s.cfg.VertexCompatAPIKey = next.VertexCompatAPIKey
 	s.cfg.SanitizeVertexCompatKeys()
 }
 

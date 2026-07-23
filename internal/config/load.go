@@ -109,6 +109,14 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
+	// Provider IDs are a versioned one-time migration because moderation bindings
+	// reference them across credential rotation and process restarts.
+	if migrateProviderStableIDsV1(&cfg) && !optional && strings.TrimSpace(configFile) != "" {
+		if err = SaveConfigPreserveComments(configFile, &cfg); err != nil {
+			return nil, fmt.Errorf("failed to persist provider stable ID migration: %w", err)
+		}
+	}
+
 	// Detect legacy keys but intentionally do not migrate/persist on startup.
 	// var legacy legacyConfigData
 	// if err = yaml.Unmarshal(data, &legacy); err == nil {

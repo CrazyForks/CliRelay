@@ -127,6 +127,9 @@ func (s cooldownService) shouldRetryAfterError(err error, attempt int, providers
 	if isRequestInvalidError(err) {
 		return 0, false
 	}
+	if isContentPolicyViolation(err) {
+		return 0, false
+	}
 	wait, found := s.closestWait(providers, model, attempt)
 	if !found || wait > maxWait {
 		return 0, false

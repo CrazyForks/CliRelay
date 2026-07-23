@@ -28,7 +28,9 @@ func (s *Service) ReplaceGeminiKeys(entries []config.GeminiKey) error {
 		return nil
 	}
 	prev := append([]config.GeminiKey(nil), s.cfg.GeminiKey...)
-	s.cfg.GeminiKey = append([]config.GeminiKey(nil), entries...)
+	next := &config.Config{GeminiKey: append([]config.GeminiKey(nil), entries...)}
+	prepareProviderStableIDs(&config.Config{GeminiKey: prev}, next)
+	s.cfg.GeminiKey = next.GeminiKey
 	s.cfg.SanitizeGeminiKeys()
 	if err := s.runValidator(); err != nil {
 		s.cfg.GeminiKey = prev
@@ -156,7 +158,9 @@ func (s *Service) ReplaceClaudeKeys(entries []config.ClaudeKey) error {
 		NormalizeClaudeKey(&normalized[i])
 	}
 	prev := append([]config.ClaudeKey(nil), s.cfg.ClaudeKey...)
-	s.cfg.ClaudeKey = normalized
+	next := &config.Config{ClaudeKey: normalized}
+	prepareProviderStableIDs(&config.Config{ClaudeKey: prev}, next)
+	s.cfg.ClaudeKey = next.ClaudeKey
 	s.cfg.SanitizeClaudeKeys()
 	if err := s.runValidator(); err != nil {
 		s.cfg.ClaudeKey = prev
@@ -280,7 +284,9 @@ func (s *Service) ReplaceCodexKeys(entries []config.CodexKey) error {
 		filtered = append(filtered, entry)
 	}
 	prev := append([]config.CodexKey(nil), s.cfg.CodexKey...)
-	s.cfg.CodexKey = filtered
+	next := &config.Config{CodexKey: filtered}
+	prepareProviderStableIDs(&config.Config{CodexKey: prev}, next)
+	s.cfg.CodexKey = next.CodexKey
 	s.cfg.SanitizeCodexKeys()
 	if err := s.runValidator(); err != nil {
 		s.cfg.CodexKey = prev

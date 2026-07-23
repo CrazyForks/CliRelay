@@ -53,6 +53,9 @@ func runExecutionWithRetry[T any](
 	executeOnce func(context.Context, []string, cliproxyexecutor.Request, cliproxyexecutor.Options) (T, error),
 ) (T, error) {
 	var zero T
+	if opts.Metadata == nil {
+		opts.Metadata = make(map[string]any)
+	}
 
 	normalized := manager.normalizeProviders(providers)
 	if len(normalized) == 0 {
@@ -93,6 +96,9 @@ func (s executionService) executeMixedOnce(ctx context.Context, providers []stri
 		candidate, errPick := s.nextMixedCandidate(ctx, &scope, req)
 		if errPick != nil {
 			return cliproxyexecutor.Response{}, resolveMixedPickError(lastErr, errPick)
+		}
+		if errModeration := s.manager.moderateRequest(candidate.execCtx, candidate.auth, scope.opts); errModeration != nil {
+			return cliproxyexecutor.Response{}, errModeration
 		}
 
 		resp, errExec := candidate.executor.Execute(candidate.execCtx, candidate.auth, candidate.execReq, scope.opts)
@@ -137,6 +143,9 @@ func (s executionService) executeCountMixedOnce(ctx context.Context, providers [
 		if errPick != nil {
 			return cliproxyexecutor.Response{}, resolveMixedPickError(lastErr, errPick)
 		}
+		if errModeration := s.manager.moderateRequest(candidate.execCtx, candidate.auth, scope.opts); errModeration != nil {
+			return cliproxyexecutor.Response{}, errModeration
+		}
 
 		resp, errExec := candidate.executor.CountTokens(candidate.execCtx, candidate.auth, candidate.execReq, scope.opts)
 		if errExec != nil {
@@ -165,6 +174,9 @@ func (s executionService) executeStreamMixedOnce(ctx context.Context, providers 
 		candidate, errPick := s.nextMixedCandidate(ctx, &scope, req)
 		if errPick != nil {
 			return nil, resolveMixedPickError(lastErr, errPick)
+		}
+		if errModeration := s.manager.moderateRequest(candidate.execCtx, candidate.auth, scope.opts); errModeration != nil {
+			return nil, errModeration
 		}
 
 		streamResult, errStream := candidate.executor.ExecuteStream(candidate.execCtx, candidate.auth, candidate.execReq, scope.opts)

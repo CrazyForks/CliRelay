@@ -35,6 +35,7 @@ func providerSettingsService(h *ProviderKeysHandler, c *gin.Context) *providerse
 		return providersettings.NewService(nil, nil)
 	}
 	cfg := h.providerConfigForTenant(c)
+	captureProviderModerationBindingSnapshot(c, cfg)
 	tenantID := effectiveTenantID(c)
 	return providersettings.NewService(cfg, func() error {
 		var auths []*coreauth.Auth
@@ -67,10 +68,26 @@ func (h *Handler) providerConfigForTenant(c *gin.Context) *config.Config {
 
 func (h *ProviderKeysHandler) persistProviderSettings(c *gin.Context) bool {
 	tenantID := effectiveTenantID(c)
-	if tenantID == identity.SystemTenantID {
-		return h.persist(c)
-	}
 	cfg := h.providerConfigForTenant(c)
+	if tenantID == identity.SystemTenantID {
+		h.mu.Lock()
+		err := settingsstore.SaveConfig(h.cfg, h.configFilePath)
+		mutated := h.onConfigMutated
+		h.mu.Unlock()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
+			return false
+		}
+		payload := gin.H{"status": "ok"}
+		if errCleanup := h.cleanupRemovedProviderModerationBindings(c.Request.Context(), c, tenantID, cfg); errCleanup != nil {
+			payload["warning"] = fmt.Sprintf("provider saved but content moderation binding cleanup failed: %v", errCleanup)
+		}
+		c.JSON(http.StatusOK, payload)
+		if mutated != nil {
+			mutated(h.cfg)
+		}
+		return true
+	}
 	key, value := providerRuntimeSetting(c.Request.URL.Path, cfg)
 	if key == "" {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "unsupported provider setting"})
@@ -83,7 +100,11 @@ func (h *ProviderKeysHandler) persistProviderSettings(c *gin.Context) bool {
 	if h.authManager != nil {
 		serviceapp.SyncConfigDerivedAuthsForTenant(h.cfg, h.authManager, tenantID)
 	}
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	payload := gin.H{"status": "ok"}
+	if errCleanup := h.cleanupRemovedProviderModerationBindings(c.Request.Context(), c, tenantID, cfg); errCleanup != nil {
+		payload["warning"] = fmt.Sprintf("provider saved but content moderation binding cleanup failed: %v", errCleanup)
+	}
+	c.JSON(http.StatusOK, payload)
 	return true
 }
 

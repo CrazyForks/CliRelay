@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/bodyutil"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/contentmoderation"
 	managementauthfiles "github.com/router-for-me/CLIProxyAPI/v6/internal/management/authfiles"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
@@ -198,6 +199,9 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 		Repository: h.authFileRepository(),
 		RemoveChannels: func(channels []string) error {
 			return h.removeChannelReferencesForTenant(effectiveTenantID(c), channels)
+		},
+		RemoveAuthBindings: func(authIDs []string) error {
+			return h.deleteContentModerationBindings(ctx, effectiveTenantID(c), contentmoderation.ChannelTypeAuthFile, authIDs)
 		},
 	}
 	if managementauthfiles.IsDeleteAllValue(c.Query("all")) {
