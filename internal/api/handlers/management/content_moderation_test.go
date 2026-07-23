@@ -77,6 +77,36 @@ func TestContentModerationProfileUsesPrincipalTenantAndHidesSecret(t *testing.T)
 	}
 }
 
+func TestContentModerationProfileTestEvaluatesDisabledProfile(t *testing.T) {
+	h, tenantID := setupContentModerationHandlerTest(t)
+	profile, err := contentmoderation.NewProfile(tenantID, "profile-disabled-test", contentmoderation.CreateProfileInput{
+		Name:            "disabled test",
+		Mode:            contentmoderation.ModeOff,
+		KeywordMode:     contentmoderation.KeywordModeKeywordOnly,
+		BlockedKeywords: []string{"blocked"},
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("NewProfile: %v", err)
+	}
+	if err = h.contentModerationStore().CreateProfile(context.Background(), profile); err != nil {
+		t.Fatalf("CreateProfile: %v", err)
+	}
+
+	c, rec := moderationContext(tenantID, http.MethodPost, "/v0/management/content-moderation/profiles/"+profile.ID+"/test", `{"input":"contains BLOCKED text"}`)
+	c.Params = gin.Params{{Key: "id", Value: profile.ID}}
+	h.PostContentModerationProfileTest(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST test status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var decision contentmoderation.Decision
+	if err = json.Unmarshal(rec.Body.Bytes(), &decision); err != nil {
+		t.Fatalf("decode decision: %v", err)
+	}
+	if !decision.WouldBlock || decision.Action != contentmoderation.ActionKeywordBlock || decision.MatchedKeyword != "blocked" {
+		t.Fatalf("decision = %#v", decision)
+	}
+}
+
 func TestContentModerationChannelsArePagedAndSecretFree(t *testing.T) {
 	h, tenantID := setupContentModerationHandlerTest(t)
 	c, rec := moderationContext(tenantID, http.MethodGet, "/v0/management/content-moderation/channels?page=1&page_size=1", "")
