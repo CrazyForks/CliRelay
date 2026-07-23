@@ -357,36 +357,113 @@ func modelPricingLookupModelIDs(modelID string) []string {
 	if modelID == "" {
 		return nil
 	}
-	prefix, _, found := strings.Cut(modelID, "/")
-	providerlessID := openRouterProviderlessModelID(modelID)
-	if !found || strings.TrimSpace(prefix) == "" || providerlessID == "" || providerlessID == modelID {
-		return []string{modelID}
+	lookupIDs := []string{modelID}
+	add := func(candidate string) {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" || candidate == modelID {
+			return
+		}
+		for _, existing := range lookupIDs {
+			if existing == candidate {
+				return
+			}
+		}
+		lookupIDs = append(lookupIDs, candidate)
 	}
-	return []string{modelID, providerlessID}
+
+	if prefix, _, found := strings.Cut(modelID, "/"); found {
+		if strings.TrimSpace(prefix) != "" {
+			add(openRouterProviderlessModelID(modelID))
+		}
+		return lookupIDs
+	}
+	if prefix, suffix, found := strings.Cut(modelID, "-"); found && strings.TrimSpace(prefix) != "" {
+		add(suffix)
+	}
+	return lookupIDs
 }
 
-// resolveModelPricingRowForTenant resolves exact pricing first, then retries once
-// without the first provider segment. Each candidate preserves tenant-over-system
-// inheritance and ModelConfigRow-over-legacy-pricing precedence.
+func hasEffectiveModelPricing(row ModelConfigRow) bool {
+	if normalizePricingMode(row.PricingMode) == "call" {
+		return row.PricePerCall > 0
+	}
+	return row.InputPricePerMillion > 0 ||
+		row.OutputPricePerMillion > 0 ||
+		row.CachedPricePerMillion > 0 ||
+		row.CacheReadPricePerMillion > 0 ||
+		row.CacheWritePricePerMillion > 0
+}
+
+func modelConfigRowFromLegacyPricing(pricing ModelPricingRow) ModelConfigRow {
+	return ModelConfigRow{
+		ModelID:                   pricing.ModelID,
+		Enabled:                   true,
+		PricingMode:               "token",
+		InputPricePerMillion:      pricing.InputPricePerMillion,
+		OutputPricePerMillion:     pricing.OutputPricePerMillion,
+		CachedPricePerMillion:     pricing.CachedPricePerMillion,
+		CacheReadPricePerMillion:  pricing.CacheReadPricePerMillion,
+		CacheWritePricePerMillion: pricing.CacheWritePricePerMillion,
+	}
+}
+
+func resolveModelPricingRow(modelID string, lookup func(string) (ModelConfigRow, bool)) (ModelConfigRow, bool) {
+	var firstFound ModelConfigRow
+	foundAny := false
+	exactEnabled := true
+	exactExists := false
+	for i, lookupID := range modelPricingLookupModelIDs(modelID) {
+		row, ok := lookup(lookupID)
+		if !ok {
+			continue
+		}
+		if !foundAny {
+			firstFound = row
+			foundAny = true
+		}
+		if i == 0 {
+			exactEnabled = row.Enabled
+			exactExists = true
+		}
+		if hasEffectiveModelPricing(row) {
+			if exactExists && i > 0 {
+				row.Enabled = row.Enabled && exactEnabled
+			}
+			return row, true
+		}
+	}
+	return firstFound, foundAny
+}
+
+// ResolveModelPricingRow resolves exact pricing first, then a single inherited
+// base candidate for slash- or dash-prefixed runtime model IDs. Config rows take
+// precedence over legacy pricing for each candidate; unpriced rows do not block
+// a later priced base candidate. Map keys must be normalized to lowercase IDs.
+func ResolveModelPricingRow(modelID string, configByID map[string]ModelConfigRow, pricingByID map[string]ModelPricingRow) (ModelConfigRow, bool) {
+	return resolveModelPricingRow(modelID, func(lookupID string) (ModelConfigRow, bool) {
+		key := strings.ToLower(strings.TrimSpace(lookupID))
+		if row, ok := configByID[key]; ok {
+			return row, true
+		}
+		if pricing, ok := pricingByID[key]; ok {
+			return modelConfigRowFromLegacyPricing(pricing), true
+		}
+		return ModelConfigRow{}, false
+	})
+}
+
+// resolveModelPricingRowForTenant preserves tenant-over-system inheritance and
+// ModelConfigRow-over-legacy-pricing precedence for every lookup candidate.
 func resolveModelPricingRowForTenant(tenantID, modelID string) (ModelConfigRow, bool) {
-	for _, lookupID := range modelPricingLookupModelIDs(modelID) {
+	return resolveModelPricingRow(modelID, func(lookupID string) (ModelConfigRow, bool) {
 		if row, ok := GetModelConfigForTenant(tenantID, lookupID); ok {
 			return row, true
 		}
 		if pricing, ok := GetModelPricingForTenant(tenantID, lookupID); ok {
-			return ModelConfigRow{
-				ModelID:                   pricing.ModelID,
-				Enabled:                   true,
-				PricingMode:               "token",
-				InputPricePerMillion:      pricing.InputPricePerMillion,
-				OutputPricePerMillion:     pricing.OutputPricePerMillion,
-				CachedPricePerMillion:     pricing.CachedPricePerMillion,
-				CacheReadPricePerMillion:  pricing.CacheReadPricePerMillion,
-				CacheWritePricePerMillion: pricing.CacheWritePricePerMillion,
-			}, true
+			return modelConfigRowFromLegacyPricing(pricing), true
 		}
-	}
-	return ModelConfigRow{}, false
+		return ModelConfigRow{}, false
+	})
 }
 
 // resolveModelPricing returns the effective pricing for a model from either
