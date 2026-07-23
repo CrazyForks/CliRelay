@@ -187,6 +187,20 @@ func TestMenuCatalogReferencesExistingParents(t *testing.T) {
 	if plaza.PermissionCode != "system.status.read" {
 		t.Fatalf("models.plaza permission = %q, want system.status.read", plaza.PermissionCode)
 	}
+	// Content moderation is an access/credential concern, while its stable code preserves existing references.
+	moderation, ok := seen[ContentModerationMenuCode]
+	if !ok {
+		t.Fatalf("%s menu is missing", ContentModerationMenuCode)
+	}
+	if moderation.ParentCode != "group.access" {
+		t.Fatalf("%s parent = %q, want group.access", ContentModerationMenuCode, moderation.ParentCode)
+	}
+	if moderation.Path != "/access/content-moderation" {
+		t.Fatalf("%s path = %q, want /access/content-moderation", ContentModerationMenuCode, moderation.Path)
+	}
+	if moderation.PermissionCode != "content_moderation.read" {
+		t.Fatalf("%s permission = %q, want content_moderation.read", ContentModerationMenuCode, moderation.PermissionCode)
+	}
 }
 
 func TestGeneratedIdentifier(t *testing.T) {
@@ -219,11 +233,12 @@ func TestMenuCodeForPermission(t *testing.T) {
 		menuCodes[menu.Code] = true
 	}
 	tests := map[string]string{
-		"tenant.users.update":   "governance.users",
-		"request_logs.delete":   "runtime.request-logs",
-		"system.logs.delete":    "runtime.logs",
-		"platform.menus.update": MenuManagementCode,
-		"proxies.test":          "models.proxies",
+		"tenant.users.update":     "governance.users",
+		"request_logs.delete":     "runtime.request-logs",
+		"system.logs.delete":      "runtime.logs",
+		"platform.menus.update":   MenuManagementCode,
+		"content_moderation.read": ContentModerationMenuCode,
+		"proxies.test":            "models.proxies",
 	}
 	for _, permission := range PermissionCatalog {
 		got := menuCodeForPermission(permission)

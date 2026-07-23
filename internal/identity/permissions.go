@@ -102,7 +102,7 @@ func menuCodeForPermission(permission PermissionSeed) string {
 	case "request_logs":
 		return "runtime.request-logs"
 	case "content_moderation":
-		return "runtime.content-moderation"
+		return ContentModerationMenuCode
 	case "providers":
 		return "access.providers"
 	case "auth_files":
