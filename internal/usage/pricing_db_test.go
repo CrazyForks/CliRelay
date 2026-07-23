@@ -260,6 +260,101 @@ func TestCalculateCostV2FallbackLegacyWithModelPricingTable(t *testing.T) {
 	}
 }
 
+func TestCalculateCostFallsBackToProviderlessModelPricing(t *testing.T) {
+	initModelConfigTestDB(t)
+
+	if err := UpsertModelConfig(ModelConfigRow{
+		ModelID:                  "deepseek-v4-flash",
+		Enabled:                  true,
+		PricingMode:              "token",
+		InputPricePerMillion:     0.3,
+		OutputPricePerMillion:    1.2,
+		CacheReadPricePerMillion: 0.03,
+		Source:                   "openrouter",
+	}); err != nil {
+		t.Fatalf("UpsertModelConfig() error = %v", err)
+	}
+
+	const modelID = "ollama/deepseek-v4-flash"
+	legacyCost := CalculateCost(modelID, 1_000_000, 1_000_000, 0)
+	if legacyCost != 1.5 {
+		t.Fatalf("CalculateCost(%q) = %v, want 1.5", modelID, legacyCost)
+	}
+
+	v2Cost := CalculateCostV2(modelID, TokenStats{InputTokens: 1_000_000, OutputTokens: 1_000_000})
+	if v2Cost != 1.5 {
+		t.Fatalf("CalculateCostV2(%q) = %v, want 1.5", modelID, v2Cost)
+	}
+
+	if err := UpsertModelConfigForTenant(businessTenantID, ModelConfigRow{
+		ModelID:               "deepseek-v4-flash",
+		Enabled:               true,
+		PricingMode:           "token",
+		InputPricePerMillion:  3,
+		OutputPricePerMillion: 12,
+		Source:                "user",
+	}); err != nil {
+		t.Fatalf("UpsertModelConfigForTenant() error = %v", err)
+	}
+	tenantCost := CalculateCostV2ForTenant(businessTenantID, "ollama/deepseek-v4-flash", TokenStats{InputTokens: 1_000_000, OutputTokens: 1_000_000})
+	if tenantCost != 15 {
+		t.Fatalf("tenant providerless override cost = %v, want 15", tenantCost)
+	}
+}
+
+func TestCalculateCostProviderlessFallbackPreservesExactCustomPricing(t *testing.T) {
+	initModelConfigTestDB(t)
+
+	if err := UpsertModelConfigForTenant(systemTenantID, ModelConfigRow{
+		ModelID:               "deepseek-v4-flash",
+		Enabled:               true,
+		PricingMode:           "token",
+		InputPricePerMillion:  0.3,
+		OutputPricePerMillion: 1.2,
+		Source:                "openrouter",
+	}); err != nil {
+		t.Fatalf("UpsertModelConfigForTenant(base) error = %v", err)
+	}
+	if err := UpsertModelConfigForTenant(businessTenantID, ModelConfigRow{
+		ModelID:               "ollama/deepseek-v4-flash",
+		Enabled:               true,
+		PricingMode:           "token",
+		InputPricePerMillion:  3,
+		OutputPricePerMillion: 12,
+		Source:                "user",
+	}); err != nil {
+		t.Fatalf("UpsertModelConfigForTenant(exact) error = %v", err)
+	}
+
+	cost := CalculateCostV2ForTenant(businessTenantID, "ollama/deepseek-v4-flash", TokenStats{InputTokens: 1_000_000, OutputTokens: 1_000_000})
+	if cost != 15 {
+		t.Fatalf("exact custom pricing cost = %v, want 15", cost)
+	}
+}
+
+func TestCalculateCostProviderlessFallbackSupportsCallPricing(t *testing.T) {
+	initModelConfigTestDB(t)
+
+	if err := UpsertModelConfig(ModelConfigRow{
+		ModelID:      "image-call-base",
+		Enabled:      true,
+		PricingMode:  "call",
+		PricePerCall: 0.04,
+		Source:       "openrouter",
+	}); err != nil {
+		t.Fatalf("UpsertModelConfig() error = %v", err)
+	}
+
+	for name, cost := range map[string]float64{
+		"legacy": CalculateCost("ollama/image-call-base", 0, 0, 0),
+		"v2":     CalculateCostV2("ollama/image-call-base", TokenStats{}),
+	} {
+		if cost != 0.04 {
+			t.Fatalf("%s call cost = %v, want 0.04", name, cost)
+		}
+	}
+}
+
 func TestQueryTodayCostByKeyResetsDaily(t *testing.T) {
 	initModelConfigTestDB(t)
 	db := getDB()
