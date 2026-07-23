@@ -114,6 +114,84 @@ func TestContentModerationMetricsUseLiveRuntime(t *testing.T) {
 	}
 }
 
+func TestContentModerationMetricsAreTenantScoped(t *testing.T) {
+	const tenantA = "tenant-metrics-a"
+	const tenantB = "tenant-metrics-b"
+	profileA, err := contentmoderation.NewProfile(tenantA, "profile-a", contentmoderation.CreateProfileInput{
+		Name:        "a",
+		Mode:        contentmoderation.ModePreBlock,
+		KeywordMode: contentmoderation.KeywordModeKeywordOnly,
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("NewProfile A: %v", err)
+	}
+	profileB, err := contentmoderation.NewProfile(tenantB, "profile-b", contentmoderation.CreateProfileInput{
+		Name:        "b",
+		Mode:        contentmoderation.ModePreBlock,
+		KeywordMode: contentmoderation.KeywordModeKeywordOnly,
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("NewProfile B: %v", err)
+	}
+	runtime := contentmoderation.NewRequestModerator(tenantAwareMetricsResolver{
+		profiles: map[string]contentmoderation.Profile{
+			tenantA: profileA,
+			tenantB: profileB,
+		},
+	}, managementMetricsEvaluator{})
+	previous := contentmoderation.Runtime()
+	contentmoderation.SetRuntime(runtime)
+	t.Cleanup(func() { contentmoderation.SetRuntime(previous) })
+
+	body, _ := json.Marshal(map[string]any{"messages": []map[string]any{{"role": "user", "content": "safe"}}})
+	for i := 0; i < 3; i++ {
+		runtime.Moderate(context.Background(), &coreauth.Auth{
+			ID: "auth-a", TenantID: tenantA, Attributes: map[string]string{"provider_key_id": "key-a"},
+		}, cliproxyexecutor.Options{
+			OriginalRequest: body, SourceFormat: sdktranslator.FormatOpenAI,
+			Metadata: map[string]any{cliproxyexecutor.TenantMetadataKey: tenantA},
+		})
+	}
+	runtime.Moderate(context.Background(), &coreauth.Auth{
+		ID: "auth-b", TenantID: tenantB, Attributes: map[string]string{"provider_key_id": "key-b"},
+	}, cliproxyexecutor.Options{
+		OriginalRequest: body, SourceFormat: sdktranslator.FormatOpenAI,
+		Metadata: map[string]any{cliproxyexecutor.TenantMetadataKey: tenantB},
+	})
+
+	h := &Handler{}
+	cA, recA := moderationContext(tenantA, http.MethodGet, "/v0/management/content-moderation/metrics", "")
+	h.GetContentModerationMetrics(cA)
+	cB, recB := moderationContext(tenantB, http.MethodGet, "/v0/management/content-moderation/metrics", "")
+	h.GetContentModerationMetrics(cB)
+
+	var metricsA, metricsB contentmoderation.ModerationMetrics
+	if err := json.Unmarshal(recA.Body.Bytes(), &metricsA); err != nil {
+		t.Fatalf("decode A: %v", err)
+	}
+	if err := json.Unmarshal(recB.Body.Bytes(), &metricsB); err != nil {
+		t.Fatalf("decode B: %v", err)
+	}
+	if metricsA.Requests != 3 || metricsA.Allows != 3 {
+		t.Fatalf("tenant A metrics = %#v, want requests/allows=3", metricsA)
+	}
+	if metricsB.Requests != 1 || metricsB.Allows != 1 {
+		t.Fatalf("tenant B metrics = %#v, want requests/allows=1", metricsB)
+	}
+}
+
+type tenantAwareMetricsResolver struct {
+	profiles map[string]contentmoderation.Profile
+}
+
+func (r tenantAwareMetricsResolver) ResolveProfile(_ context.Context, tenantID, _, _, _ string) (contentmoderation.Profile, string, error) {
+	profile, ok := r.profiles[tenantID]
+	if !ok {
+		return contentmoderation.Profile{}, "", contentmoderation.ErrNotFound
+	}
+	return profile, contentmoderation.ChannelTypeProviderKey, nil
+}
+
 func TestContentModerationProfileUsesPrincipalTenantAndHidesSecret(t *testing.T) {
 	h, tenantID := setupContentModerationHandlerTest(t)
 	body := `{"tenant_id":"attacker-tenant","name":"primary","mode":"pre_block","keyword_mode":"api_only","api_key":"moderation-secret"}`
