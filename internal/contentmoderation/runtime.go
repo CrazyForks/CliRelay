@@ -31,6 +31,11 @@ type RuntimeModerator struct {
 	lastGoodMu sync.RWMutex
 	lastGood   map[resolutionKey]resolvedProfile
 
+	// Per-tenant process-local counters. Management metrics must never cross tenants.
+	tenantMetrics sync.Map // map[string]*tenantMetricCounters
+}
+
+type tenantMetricCounters struct {
 	requests       atomic.Uint64
 	allows         atomic.Uint64
 	blocks         atomic.Uint64
@@ -93,19 +98,35 @@ func NewRequestModerator(resolver ProfileResolver, evaluator DecisionEvaluator) 
 	}
 }
 
-func (m *RuntimeModerator) Metrics() ModerationMetrics {
+func (m *RuntimeModerator) counters(tenantID string) *tenantMetricCounters {
 	if m == nil {
+		return &tenantMetricCounters{}
+	}
+	key := coreauth.NormalizedTenantID(tenantID)
+	if key == "" {
+		key = "unknown"
+	}
+	if existing, ok := m.tenantMetrics.Load(key); ok {
+		return existing.(*tenantMetricCounters)
+	}
+	created := &tenantMetricCounters{}
+	actual, _ := m.tenantMetrics.LoadOrStore(key, created)
+	return actual.(*tenantMetricCounters)
+}
+
+func snapshotMetrics(c *tenantMetricCounters) ModerationMetrics {
+	if c == nil {
 		return ModerationMetrics{}
 	}
-	latencyTotalMS := m.latencyTotalMS.Load()
-	latencySamples := m.latencySamples.Load()
+	latencyTotalMS := c.latencyTotalMS.Load()
+	latencySamples := c.latencySamples.Load()
 	metrics := ModerationMetrics{
-		Requests:       m.requests.Load(),
-		Allows:         m.allows.Load(),
-		Blocks:         m.blocks.Load(),
-		Errors:         m.errors.Load(),
-		CacheHits:      m.cacheHits.Load(),
-		InFlight:       m.inFlight.Load(),
+		Requests:       c.requests.Load(),
+		Allows:         c.allows.Load(),
+		Blocks:         c.blocks.Load(),
+		Errors:         c.errors.Load(),
+		CacheHits:      c.cacheHits.Load(),
+		InFlight:       c.inFlight.Load(),
 		LatencyTotalMS: latencyTotalMS,
 		LatencySamples: latencySamples,
 	}
@@ -115,12 +136,53 @@ func (m *RuntimeModerator) Metrics() ModerationMetrics {
 	return metrics
 }
 
+// MetricsForTenant returns process-local counters for one tenant only.
+func (m *RuntimeModerator) MetricsForTenant(tenantID string) ModerationMetrics {
+	if m == nil {
+		return ModerationMetrics{}
+	}
+	key := coreauth.NormalizedTenantID(tenantID)
+	if key == "" {
+		return ModerationMetrics{}
+	}
+	existing, ok := m.tenantMetrics.Load(key)
+	if !ok {
+		return ModerationMetrics{}
+	}
+	return snapshotMetrics(existing.(*tenantMetricCounters))
+}
+
+// Metrics is retained for tests that inspect a single-tenant moderator instance.
+func (m *RuntimeModerator) Metrics() ModerationMetrics {
+	if m == nil {
+		return ModerationMetrics{}
+	}
+	var out ModerationMetrics
+	m.tenantMetrics.Range(func(_, value any) bool {
+		part := snapshotMetrics(value.(*tenantMetricCounters))
+		out.Requests += part.Requests
+		out.Allows += part.Allows
+		out.Blocks += part.Blocks
+		out.Errors += part.Errors
+		out.CacheHits += part.CacheHits
+		out.InFlight += part.InFlight
+		out.LatencyTotalMS += part.LatencyTotalMS
+		out.LatencySamples += part.LatencySamples
+		return true
+	})
+	if out.LatencySamples > 0 {
+		out.AvgLatencyMS = float64(out.LatencyTotalMS) / float64(out.LatencySamples)
+	}
+	return out
+}
+
 func (m *RuntimeModerator) Moderate(ctx context.Context, auth *coreauth.Auth, opts cliproxyexecutor.Options) coreauth.RequestModerationResult {
 	if m == nil || auth == nil || m.resolver == nil || m.evaluator == nil {
 		return coreauth.RequestModerationResult{}
 	}
-	m.requests.Add(1)
 	tenantID := coreauth.NormalizedTenantID(metadataString(opts.Metadata, cliproxyexecutor.TenantMetadataKey))
+	counters := m.counters(tenantID)
+	counters.requests.Add(1)
 	if coreauth.NormalizedTenantID(auth.TenantID) != tenantID {
 		m.recordError(tenantID, auth, "", Profile{}, "tenant_mismatch", 0, false)
 		return coreauth.RequestModerationResult{}
@@ -130,7 +192,7 @@ func (m *RuntimeModerator) Moderate(ctx context.Context, auth *coreauth.Auth, op
 	key := resolutionKey{tenantID: tenantID, authFileID: authFileID, providerKeyID: providerKeyID, providerID: providerID}
 	resolved, usedLastGood, err := m.resolve(ctx, key)
 	if errors.Is(err, ErrNotFound) {
-		m.allows.Add(1)
+		counters.allows.Add(1)
 		return coreauth.RequestModerationResult{}
 	}
 	if err != nil {
@@ -142,7 +204,7 @@ func (m *RuntimeModerator) Moderate(ctx context.Context, auth *coreauth.Auth, op
 	}
 	profile := resolved.profile
 	if profile.Mode == ModeOff {
-		m.allows.Add(1)
+		counters.allows.Add(1)
 		decision := Decision{Action: ActionAllow}
 		m.setSnapshot(ctx, auth, resolved.source, profile, decision, false, false)
 		m.logDecision(tenantID, auth, resolved.source, profile, decision, false)
@@ -151,7 +213,7 @@ func (m *RuntimeModerator) Moderate(ctx context.Context, auth *coreauth.Auth, op
 
 	input := ExtractLastUserText(opts.SourceFormat, opts.OriginalRequest)
 	if input == "" {
-		m.allows.Add(1)
+		counters.allows.Add(1)
 		decision := Decision{Action: ActionAllow}
 		m.setSnapshot(ctx, auth, resolved.source, profile, decision, false, false)
 		m.logDecision(tenantID, auth, resolved.source, profile, decision, false)
@@ -162,20 +224,20 @@ func (m *RuntimeModerator) Moderate(ctx context.Context, auth *coreauth.Auth, op
 	cache := decisionCacheFromMetadata(opts.Metadata)
 	if cache != nil {
 		if decision, ok := cache.get(cacheKey); ok {
-			m.cacheHits.Add(1)
+			counters.cacheHits.Add(1)
 			return m.resultForDecision(ctx, tenantID, auth, resolved.source, profile, decision, true)
 		}
 	}
 	apiPath := moderationAPIPath(profile, input)
 	if apiPath {
-		m.inFlight.Add(1)
+		counters.inFlight.Add(1)
 	}
 	decision := m.evaluator.Evaluate(ctx, profile, input)
 	if apiPath {
-		m.inFlight.Add(-1)
+		counters.inFlight.Add(-1)
 		if decision.LatencyMS >= 0 {
-			m.latencyTotalMS.Add(uint64(decision.LatencyMS))
-			m.latencySamples.Add(1)
+			counters.latencyTotalMS.Add(uint64(decision.LatencyMS))
+			counters.latencySamples.Add(1)
 		}
 	}
 	if cache != nil {
@@ -209,8 +271,9 @@ func (m *RuntimeModerator) resolve(ctx context.Context, key resolutionKey) (reso
 }
 
 func (m *RuntimeModerator) resultForDecision(ctx context.Context, tenantID string, auth *coreauth.Auth, source string, profile Profile, decision Decision, cached bool) coreauth.RequestModerationResult {
+	counters := m.counters(tenantID)
 	if decision.Action == ActionAPIError {
-		m.allows.Add(1)
+		counters.allows.Add(1)
 		errorClass := moderationErrorClass(decision.ModerationError)
 		m.setSnapshot(ctx, auth, source, profile, decision, true, cached)
 		m.recordError(tenantID, auth, source, profile, errorClass, decision.LatencyMS, cached)
@@ -218,17 +281,17 @@ func (m *RuntimeModerator) resultForDecision(ctx context.Context, tenantID strin
 	}
 	m.setSnapshot(ctx, auth, source, profile, decision, true, cached)
 	if decision.WouldBlock {
-		m.blocks.Add(1)
+		counters.blocks.Add(1)
 		m.logDecision(tenantID, auth, source, profile, decision, cached)
 		return coreauth.RequestModerationResult{Blocked: true, Message: profile.BlockMessage, HTTPStatus: profile.BlockHTTPStatus}
 	}
-	m.allows.Add(1)
+	counters.allows.Add(1)
 	m.logDecision(tenantID, auth, source, profile, decision, cached)
 	return coreauth.RequestModerationResult{}
 }
 
 func (m *RuntimeModerator) recordError(tenantID string, auth *coreauth.Auth, source string, profile Profile, errorClass string, latencyMS int64, cached bool) {
-	m.errors.Add(1)
+	m.counters(tenantID).errors.Add(1)
 	fields := moderationLogFields(tenantID, auth, source, profile)
 	fields["action"] = ActionAPIError
 	fields["error_class"] = errorClass

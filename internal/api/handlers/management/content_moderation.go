@@ -48,7 +48,8 @@ func (h *Handler) GetContentModerationMetrics(c *gin.Context) {
 		c.JSON(http.StatusOK, contentmoderation.ModerationMetrics{})
 		return
 	}
-	c.JSON(http.StatusOK, runtime.Metrics())
+	// Tenant-scoped only: never expose process-wide counters across tenants.
+	c.JSON(http.StatusOK, runtime.MetricsForTenant(effectiveTenantID(c)))
 }
 
 func (h *Handler) GetContentModerationProfiles(c *gin.Context) {

@@ -195,6 +195,56 @@ func TestRuntimeModeratorTenantMismatchNeverQueriesResolver(t *testing.T) {
 	}
 }
 
+func TestRuntimeModeratorMetricsAreTenantScoped(t *testing.T) {
+	profileA, err := NewProfile("tenant-a", "profile-a", CreateProfileInput{
+		Name: "a", Mode: ModePreBlock, KeywordMode: KeywordModeKeywordOnly,
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("NewProfile A: %v", err)
+	}
+	profileB, err := NewProfile("tenant-b", "profile-b", CreateProfileInput{
+		Name: "b", Mode: ModePreBlock, KeywordMode: KeywordModeKeywordOnly,
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("NewProfile B: %v", err)
+	}
+	moderator := NewRequestModerator(tenantMetricsResolver{profiles: map[string]Profile{
+		"tenant-a": profileA,
+		"tenant-b": profileB,
+	}}, &runtimeEvaluatorStub{decision: Decision{Action: ActionAllow}})
+
+	for i := 0; i < 2; i++ {
+		moderator.Moderate(context.Background(), &coreauth.Auth{
+			ID: "a", TenantID: "tenant-a", Attributes: map[string]string{"provider_key_id": "k-a"},
+		}, runtimeOptions("tenant-a", "safe"))
+	}
+	moderator.Moderate(context.Background(), &coreauth.Auth{
+		ID: "b", TenantID: "tenant-b", Attributes: map[string]string{"provider_key_id": "k-b"},
+	}, runtimeOptions("tenant-b", "safe"))
+
+	if got := moderator.MetricsForTenant("tenant-a"); got.Requests != 2 || got.Allows != 2 {
+		t.Fatalf("tenant-a metrics = %#v", got)
+	}
+	if got := moderator.MetricsForTenant("tenant-b"); got.Requests != 1 || got.Allows != 1 {
+		t.Fatalf("tenant-b metrics = %#v", got)
+	}
+	if got := moderator.MetricsForTenant("tenant-missing"); got.Requests != 0 {
+		t.Fatalf("missing tenant metrics = %#v", got)
+	}
+}
+
+type tenantMetricsResolver struct {
+	profiles map[string]Profile
+}
+
+func (r tenantMetricsResolver) ResolveProfile(_ context.Context, tenantID, _, _, _ string) (Profile, string, error) {
+	profile, ok := r.profiles[tenantID]
+	if !ok {
+		return Profile{}, "", ErrNotFound
+	}
+	return profile, ChannelTypeProviderKey, nil
+}
+
 func TestRuntimeModeratorMetricsTrackAPILatencyAndInFlight(t *testing.T) {
 	const tenantID = "tenant-metrics"
 	profile, err := NewProfile(tenantID, "profile-metrics", CreateProfileInput{
