@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/contentmoderation"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/diagnostics"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -129,6 +130,9 @@ func buildRequestDetailContent(ctx context.Context, includeBodies ...bool) strin
 		if snapshot := diagnostic.Snapshot(); !snapshot.IsZero() {
 			detail["diagnostic"] = snapshot
 		}
+	}
+	if moderation, ok := contentmoderation.RuntimeSnapshotFromGin(ginCtx); ok {
+		detail["moderation"] = moderation
 	}
 
 	data, err := json.Marshal(detail)

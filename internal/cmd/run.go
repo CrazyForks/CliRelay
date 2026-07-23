@@ -42,11 +42,13 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 	usage.InitRedis(cfg.Redis)
 	defer usage.StopRedis()
 
+	moderator := contentmoderation.NewRequestModerator(contentmoderation.NewStore(usage.RuntimeDB()), contentmoderation.NewEvaluator(nil))
+	contentmoderation.SetRuntime(moderator)
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
 		WithCoreAuthHook(usage.NewAIAccountBindingHook()).
-		WithRequestModerator(contentmoderation.NewRequestModerator(contentmoderation.NewStore(usage.RuntimeDB()), contentmoderation.NewEvaluator(nil))).
+		WithRequestModerator(moderator).
 		WithHooks(runtimeDataStackPostStartHooks(defaultRuntimeDataStackMaintenanceOps())).
 		WithLocalManagementPassword(localPassword)
 
@@ -87,11 +89,13 @@ func StartServiceBackground(cfg *config.Config, configPath string, localPassword
 	}
 	usage.InitRedis(cfg.Redis)
 
+	moderator := contentmoderation.NewRequestModerator(contentmoderation.NewStore(usage.RuntimeDB()), contentmoderation.NewEvaluator(nil))
+	contentmoderation.SetRuntime(moderator)
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
 		WithCoreAuthHook(usage.NewAIAccountBindingHook()).
-		WithRequestModerator(contentmoderation.NewRequestModerator(contentmoderation.NewStore(usage.RuntimeDB()), contentmoderation.NewEvaluator(nil))).
+		WithRequestModerator(moderator).
 		WithHooks(runtimeDataStackPostStartHooks(defaultRuntimeDataStackMaintenanceOps())).
 		WithLocalManagementPassword(localPassword)
 

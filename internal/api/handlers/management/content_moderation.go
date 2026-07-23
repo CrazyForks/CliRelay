@@ -42,6 +42,15 @@ func (h *Handler) deleteContentModerationBindings(ctx context.Context, tenantID,
 	return h.contentModerationStore().PatchBindings(ctx, tenantID, false, operations)
 }
 
+func (h *Handler) GetContentModerationMetrics(c *gin.Context) {
+	runtime := contentmoderation.Runtime()
+	if runtime == nil {
+		c.JSON(http.StatusOK, contentmoderation.ModerationMetrics{})
+		return
+	}
+	c.JSON(http.StatusOK, runtime.Metrics())
+}
+
 func (h *Handler) GetContentModerationProfiles(c *gin.Context) {
 	tenantID := effectiveTenantID(c)
 	profiles, err := h.contentModerationStore().ListProfiles(c.Request.Context(), tenantID)

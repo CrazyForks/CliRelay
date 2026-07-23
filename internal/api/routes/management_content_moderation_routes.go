@@ -6,6 +6,7 @@ import (
 )
 
 func registerManagementContentModerationRoutes(group *gin.RouterGroup, h *managementhandlers.Handler) {
+	group.GET("/content-moderation/metrics", h.GetContentModerationMetrics)
 	group.GET("/content-moderation/profiles", h.GetContentModerationProfiles)
 	group.POST("/content-moderation/profiles", h.PostContentModerationProfile)
 	group.GET("/content-moderation/profiles/:id", h.GetContentModerationProfile)

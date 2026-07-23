@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/contentmoderation"
 	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 )
@@ -192,6 +193,43 @@ func TestRequestDetailsCaptureUpstreamLogsWhenOnlyContentStorageEnabled(t *testi
 	}
 	if !strings.Contains(detail.Response.UpstreamLog, `{"id":"resp-test"}`) {
 		t.Fatalf("upstream response log missing body: %q", detail.Response.UpstreamLog)
+	}
+}
+
+func TestRequestDetailsIncludeModerationSnapshot(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"not persisted"}`))
+	ginCtx.Request = req
+	ctx := context.WithValue(req.Context(), util.ContextKeyGin, ginCtx)
+	highestScore := 0.91
+	contentmoderation.SetRuntimeSnapshot(ctx, contentmoderation.RuntimeSnapshot{
+		Evaluated:        true,
+		ProfileID:        "profile-1",
+		ProfileName:      "Strict prompts",
+		ProfileVersion:   3,
+		ResolutionSource: contentmoderation.ChannelTypeProviderKey,
+		ChannelType:      contentmoderation.ChannelTypeProviderKey,
+		ChannelID:        "provider-key-1",
+		Action:           contentmoderation.ActionAPIBlock,
+		WouldBlock:       true,
+		HighestCategory:  "violence",
+		HighestScore:     &highestScore,
+		LatencyMS:        18,
+		CacheHit:         false,
+	})
+
+	var detail struct {
+		Moderation contentmoderation.RuntimeSnapshot `json:"moderation"`
+	}
+	if err := json.Unmarshal([]byte(buildRequestDetailContent(ctx, false)), &detail); err != nil {
+		t.Fatalf("unmarshal request details: %v", err)
+	}
+	if detail.Moderation.ProfileID != "profile-1" || detail.Moderation.ChannelID != "provider-key-1" || detail.Moderation.Action != contentmoderation.ActionAPIBlock {
+		t.Fatalf("moderation detail = %#v", detail.Moderation)
+	}
+	if detail.Moderation.HighestScore == nil || *detail.Moderation.HighestScore != highestScore {
+		t.Fatalf("moderation highest score = %#v", detail.Moderation.HighestScore)
 	}
 }
 
