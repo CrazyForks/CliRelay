@@ -375,10 +375,15 @@ func modelPricingLookupModelIDs(modelID string) []string {
 		if strings.TrimSpace(prefix) != "" {
 			add(openRouterProviderlessModelID(modelID))
 		}
-		return lookupIDs
 	}
-	if prefix, suffix, found := strings.Cut(modelID, "-"); found && strings.TrimSpace(prefix) != "" {
-		add(suffix)
+	if variantSeparator := strings.LastIndex(modelID, ":"); variantSeparator > 0 {
+		add(modelID[:variantSeparator])
+	}
+	if !strings.Contains(modelID, "/") {
+		prefix, suffix, found := strings.Cut(modelID, "-")
+		if found && strings.TrimSpace(prefix) != "" {
+			add(suffix)
+		}
 	}
 	return lookupIDs
 }
@@ -435,10 +440,11 @@ func resolveModelPricingRow(modelID string, lookup func(string) (ModelConfigRow,
 	return firstFound, foundAny
 }
 
-// ResolveModelPricingRow resolves exact pricing first, then a single inherited
-// base candidate for slash- or dash-prefixed runtime model IDs. Config rows take
-// precedence over legacy pricing for each candidate; unpriced rows do not block
-// a later priced base candidate. Map keys must be normalized to lowercase IDs.
+// ResolveModelPricingRow resolves exact pricing first, then inherited base
+// candidates for provider-prefixed, tagged, or dash-prefixed runtime model IDs.
+// Config rows take precedence over legacy pricing for each candidate; unpriced
+// rows do not block a later priced base candidate. Map keys must be normalized
+// to lowercase IDs.
 func ResolveModelPricingRow(modelID string, configByID map[string]ModelConfigRow, pricingByID map[string]ModelPricingRow) (ModelConfigRow, bool) {
 	return resolveModelPricingRow(modelID, func(lookupID string) (ModelConfigRow, bool) {
 		key := strings.ToLower(strings.TrimSpace(lookupID))
