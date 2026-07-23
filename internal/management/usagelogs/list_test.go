@@ -484,6 +484,37 @@ func TestEnrichChannelFilterOptionsCollapsesByAuthSubject(t *testing.T) {
 	}
 }
 
+func TestEnrichChannelFilterOptionsCollapsesHistoricalSubjectRekeyByAuthIndex(t *testing.T) {
+	t.Parallel()
+
+	authIndex := "14c5636b41002b25"
+	oldSubject := "authsub_1111111111111111"
+	currentSubject := "authsub_2222222222222222"
+	label := "account@example.com"
+
+	options := []usage.ChannelFilterOption{
+		{Value: oldSubject, Label: label, AuthIndex: authIndex, AuthSubjectID: oldSubject},
+		{Value: currentSubject, Label: label, AuthIndex: authIndex, AuthSubjectID: currentSubject},
+	}
+	authMeta := authChannelMeta{label: label, provider: "codex", authType: "oauth"}
+
+	got := enrichChannelFilterOptions(
+		options,
+		nil,
+		map[string]string{authIndex: label},
+		map[string]authChannelMeta{authIndex: authMeta},
+		nil,
+		map[string]string{authIndex: currentSubject},
+		map[string]authChannelMeta{currentSubject: authMeta},
+	)
+	if len(got) != 1 {
+		t.Fatalf("options = %#v, want one current-subject option", got)
+	}
+	if got[0].Value != currentSubject || got[0].AuthSubjectID != currentSubject || got[0].AuthIndex != authIndex {
+		t.Fatalf("option = %#v, want current subject %q with auth index %q", got[0], currentSubject, authIndex)
+	}
+}
+
 func TestEnrichChannelFilterOptionsInfersProviderAuthTypeWithoutLiveMeta(t *testing.T) {
 	t.Parallel()
 
