@@ -338,6 +338,72 @@ func TestCalculateCostFallsBackPastExactUnpricedConfig(t *testing.T) {
 	}
 }
 
+func TestCalculateCostFallsBackPastUnpricedVariant(t *testing.T) {
+	initModelConfigTestDB(t)
+
+	if err := UpsertModelConfig(ModelConfigRow{
+		ModelID:               "deepseek-v4-flash",
+		Enabled:               true,
+		PricingMode:           "token",
+		InputPricePerMillion:  0.098,
+		OutputPricePerMillion: 0.196,
+		Source:                "openrouter",
+	}); err != nil {
+		t.Fatalf("UpsertModelConfig(base) error = %v", err)
+	}
+	if err := UpsertModelConfig(ModelConfigRow{
+		ModelID:     "deepseek-v4-flash:free",
+		Enabled:     true,
+		PricingMode: "token",
+		Source:      "openrouter",
+	}); err != nil {
+		t.Fatalf("UpsertModelConfig(variant) error = %v", err)
+	}
+
+	row, ok := resolveModelPricingRowForTenant(systemTenantID, "deepseek-v4-flash:free")
+	if !ok || row.InputPricePerMillion != 0.098 || row.OutputPricePerMillion != 0.196 {
+		t.Fatalf("resolved variant pricing = %+v ok=%v, want base pricing", row, ok)
+	}
+	wantCost := 0.098 + 0.196
+	for name, cost := range map[string]float64{
+		"legacy": CalculateCost("deepseek-v4-flash:free", 1_000_000, 1_000_000, 0),
+		"v2":     CalculateCostV2("deepseek-v4-flash:free", TokenStats{InputTokens: 1_000_000, OutputTokens: 1_000_000}),
+	} {
+		if math.Abs(cost-wantCost) > 1e-12 {
+			t.Fatalf("%s variant fallback cost = %v, want %v", name, cost, wantCost)
+		}
+	}
+}
+
+func TestCalculateCostVariantPreservesExactCustomPricing(t *testing.T) {
+	initModelConfigTestDB(t)
+
+	if err := UpsertModelConfig(ModelConfigRow{
+		ModelID:               "deepseek-v4-flash",
+		Enabled:               true,
+		PricingMode:           "token",
+		InputPricePerMillion:  0.098,
+		OutputPricePerMillion: 0.196,
+		Source:                "openrouter",
+	}); err != nil {
+		t.Fatalf("UpsertModelConfig(base) error = %v", err)
+	}
+	if err := UpsertModelConfig(ModelConfigRow{
+		ModelID:               "deepseek-v4-flash:free",
+		Enabled:               true,
+		PricingMode:           "token",
+		InputPricePerMillion:  3,
+		OutputPricePerMillion: 12,
+		Source:                "user",
+	}); err != nil {
+		t.Fatalf("UpsertModelConfig(variant) error = %v", err)
+	}
+
+	if cost := CalculateCostV2("deepseek-v4-flash:free", TokenStats{InputTokens: 1_000_000, OutputTokens: 1_000_000}); cost != 15 {
+		t.Fatalf("exact variant custom pricing cost = %v, want 15", cost)
+	}
+}
+
 func TestCalculateCostInheritedPricingRespectsExactDisabled(t *testing.T) {
 	initModelConfigTestDB(t)
 
