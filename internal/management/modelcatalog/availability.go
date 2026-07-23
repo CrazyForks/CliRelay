@@ -77,11 +77,7 @@ func (s *Service) ConfiguredAvailability(allowedChannelsRaw, allowedGroupsRaw st
 		allModels = s.filterModelsByRoutingAllowedModels(allModels, allowedGroupsRaw)
 	}
 
-	allConfigRows := modelconfigsettings.ListAllConfigsForTenant(s.tenantID)
-	configByID := make(map[string]usage.ModelConfigRow, len(allConfigRows))
-	for _, row := range allConfigRows {
-		configByID[strings.ToLower(strings.TrimSpace(row.ModelID))] = row
-	}
+	configByID, pricingByID := pricingLookupMapsForTenant(s.tenantID)
 	data := make([]map[string]any, 0, len(allModels))
 	activeMetadata := make([]map[string]any, 0, len(allModels))
 	for _, model := range allModels {
@@ -111,15 +107,6 @@ func (s *Service) ConfiguredAvailability(allowedChannelsRaw, allowedGroupsRaw st
 		}
 		if row, ok := configByID[strings.ToLower(id)]; ok {
 			attachModelConfigCapabilities(entry, row)
-			entry["pricing"] = map[string]any{
-				"mode":                          row.PricingMode,
-				"input_price_per_million":       row.InputPricePerMillion,
-				"output_price_per_million":      row.OutputPricePerMillion,
-				"cached_price_per_million":      row.CachedPricePerMillion,
-				"cache_read_price_per_million":  row.CacheReadPricePerMillion,
-				"cache_write_price_per_million": row.CacheWritePricePerMillion,
-				"price_per_call":                row.PricePerCall,
-			}
 			if row.Description != "" {
 				entry["description"] = row.Description
 			}
@@ -134,6 +121,9 @@ func (s *Service) ConfiguredAvailability(allowedChannelsRaw, allowedGroupsRaw st
 					"enabled":  row.Enabled,
 				})
 			}
+		}
+		if pricing, ok := usage.ResolveModelPricingRow(id, configByID, pricingByID); ok {
+			entry["pricing"] = modelPricingPayload(pricing)
 		}
 		data = append(data, entry)
 	}
@@ -169,7 +159,7 @@ func (s *Service) Models(allowedChannelsRaw, allowedGroupsRaw string, opts ...Av
 		allModels = s.filterModelsByRoutingAllowedModels(allModels, allowedGroupsRaw)
 	}
 
-	pricingMap := usage.GetAllModelPricingForTenant(s.tenantID)
+	configByID, pricingByID := pricingLookupMapsForTenant(s.tenantID)
 	filteredModels := make([]map[string]any, len(allModels))
 	for i, model := range allModels {
 		filteredModel := map[string]any{
@@ -183,10 +173,10 @@ func (s *Service) Models(allowedChannelsRaw, allowedGroupsRaw string, opts ...Av
 			filteredModel["owned_by"] = ownedBy
 		}
 		if modelID, ok := model["id"].(string); ok {
-			if row, exists := modelconfigsettings.GetConfigForTenant(s.tenantID, modelID); exists {
+			if row, exists := configByID[strings.ToLower(strings.TrimSpace(modelID))]; exists {
 				attachModelConfigCapabilities(filteredModel, row)
 			}
-			if pricing, exists := pricingMap[modelID]; exists {
+			if pricing, exists := usage.ResolveModelPricingRow(modelID, configByID, pricingByID); exists {
 				filteredModel["pricing"] = map[string]any{
 					"input_price_per_million":  pricing.InputPricePerMillion,
 					"output_price_per_million": pricing.OutputPricePerMillion,
