@@ -352,21 +352,53 @@ func calculateTokenCostV2(inputTokens, outputTokens, cacheReadTokens, cacheWrite
 	return total
 }
 
+func modelPricingLookupModelIDs(modelID string) []string {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return nil
+	}
+	prefix, _, found := strings.Cut(modelID, "/")
+	providerlessID := openRouterProviderlessModelID(modelID)
+	if !found || strings.TrimSpace(prefix) == "" || providerlessID == "" || providerlessID == modelID {
+		return []string{modelID}
+	}
+	return []string{modelID, providerlessID}
+}
+
+// resolveModelPricingRowForTenant resolves exact pricing first, then retries once
+// without the first provider segment. Each candidate preserves tenant-over-system
+// inheritance and ModelConfigRow-over-legacy-pricing precedence.
+func resolveModelPricingRowForTenant(tenantID, modelID string) (ModelConfigRow, bool) {
+	for _, lookupID := range modelPricingLookupModelIDs(modelID) {
+		if row, ok := GetModelConfigForTenant(tenantID, lookupID); ok {
+			return row, true
+		}
+		if pricing, ok := GetModelPricingForTenant(tenantID, lookupID); ok {
+			return ModelConfigRow{
+				ModelID:                   pricing.ModelID,
+				Enabled:                   true,
+				PricingMode:               "token",
+				InputPricePerMillion:      pricing.InputPricePerMillion,
+				OutputPricePerMillion:     pricing.OutputPricePerMillion,
+				CachedPricePerMillion:     pricing.CachedPricePerMillion,
+				CacheReadPricePerMillion:  pricing.CacheReadPricePerMillion,
+				CacheWritePricePerMillion: pricing.CacheWritePricePerMillion,
+			}, true
+		}
+	}
+	return ModelConfigRow{}, false
+}
+
 // resolveModelPricing returns the effective pricing for a model from either
 // ModelConfigRow cache or ModelPricingRow cache, along with a boolean indicating
 // whether the model is enabled (or found at all).
 // Both lookups inherit system-tenant catalog prices when the business tenant has no override.
 func resolveModelPricingForTenant(tenantID, modelID string) (inputPrice, outputPrice, cachedPrice, cacheReadPrice, cacheWritePrice float64, enabled bool) {
-	if row, ok := GetModelConfigForTenant(tenantID, modelID); ok {
-		enabled = row.Enabled
-		return row.InputPricePerMillion, row.OutputPricePerMillion, row.CachedPricePerMillion, row.CacheReadPricePerMillion, row.CacheWritePricePerMillion, enabled
-	}
-
-	row, ok := GetModelPricingForTenant(tenantID, modelID)
+	row, ok := resolveModelPricingRowForTenant(tenantID, modelID)
 	if !ok {
 		return 0, 0, 0, 0, 0, false
 	}
-	return row.InputPricePerMillion, row.OutputPricePerMillion, row.CachedPricePerMillion, row.CacheReadPricePerMillion, row.CacheWritePricePerMillion, true
+	return row.InputPricePerMillion, row.OutputPricePerMillion, row.CachedPricePerMillion, row.CacheReadPricePerMillion, row.CacheWritePricePerMillion, row.Enabled
 }
 
 // CalculateCost computes the cost for a request based on the model's pricing.
@@ -376,19 +408,12 @@ func CalculateCost(modelID string, inputTokens, outputTokens, cachedTokens int64
 	return CalculateCostForTenant(systemTenantID, modelID, inputTokens, outputTokens, cachedTokens)
 }
 func CalculateCostForTenant(tenantID, modelID string, inputTokens, outputTokens, cachedTokens int64) float64 {
-	if row, ok := GetModelConfigForTenant(tenantID, modelID); ok {
-		if !row.Enabled {
-			return 0
-		}
-		if normalizePricingMode(row.PricingMode) == "call" {
-			return row.PricePerCall
-		}
-		return calculateTokenCost(inputTokens, outputTokens, cachedTokens, row.InputPricePerMillion, row.OutputPricePerMillion, row.CachedPricePerMillion)
-	}
-
-	row, ok := GetModelPricingForTenant(tenantID, modelID)
-	if !ok {
+	row, ok := resolveModelPricingRowForTenant(tenantID, modelID)
+	if !ok || !row.Enabled {
 		return 0
+	}
+	if normalizePricingMode(row.PricingMode) == "call" {
+		return row.PricePerCall
 	}
 	return calculateTokenCost(inputTokens, outputTokens, cachedTokens, row.InputPricePerMillion, row.OutputPricePerMillion, row.CachedPricePerMillion)
 }
@@ -397,7 +422,7 @@ func CalculateCostForTenant(tenantID, modelID string, inputTokens, outputTokens,
 // the per-call price if so, along with a boolean. This avoids re-checking the
 // model config cache directly in CalculateCostV2.
 func resolveCallPricingForTenant(tenantID, modelID string) (pricePerCall float64, isCall bool) {
-	if row, ok := GetModelConfigForTenant(tenantID, modelID); ok && row.Enabled && normalizePricingMode(row.PricingMode) == "call" {
+	if row, ok := resolveModelPricingRowForTenant(tenantID, modelID); ok && row.Enabled && normalizePricingMode(row.PricingMode) == "call" {
 		return row.PricePerCall, true
 	}
 	return 0, false
