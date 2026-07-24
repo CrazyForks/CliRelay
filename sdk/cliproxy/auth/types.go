@@ -101,6 +101,9 @@ type Auth struct {
 type QuotaState struct {
 	// Exceeded indicates the credential recently hit a quota error.
 	Exceeded bool `json:"exceeded"`
+	// RecoveryRequired keeps a confirmed quota window exhausted until an
+	// upstream probe or successful request confirms recovery.
+	RecoveryRequired bool `json:"recovery_required,omitempty"`
 	// Reason provides an optional provider specific human readable description.
 	Reason string `json:"reason,omitempty"`
 	// Window identifies the provider quota window that was exhausted, such as

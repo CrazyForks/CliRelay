@@ -29,6 +29,7 @@ func (s persistenceService) save(ctx context.Context, auth *Auth) error {
 	if !s.shouldPersist(ctx, auth) {
 		return nil
 	}
+	syncPersistedQuotaRuntime(auth)
 	_, err := s.manager.store.Save(ctx, auth)
 	return err
 }
@@ -47,7 +48,14 @@ func (s persistenceService) list(ctx context.Context) ([]*Auth, error) {
 	if s.manager == nil || s.manager.store == nil {
 		return nil, nil
 	}
-	return s.manager.store.List(ctx)
+	auths, err := s.manager.store.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, auth := range auths {
+		restorePersistedQuotaRuntime(auth)
+	}
+	return auths, nil
 }
 
 func (s persistenceService) shouldPersist(ctx context.Context, auth *Auth) bool {

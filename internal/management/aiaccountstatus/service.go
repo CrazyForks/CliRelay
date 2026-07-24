@@ -323,12 +323,18 @@ func needsRuntimeQuotaReconcile(auth *coreauth.Auth) bool {
 		return false
 	}
 	now := time.Now()
+	if auth.Quota.Exceeded && auth.Quota.RecoveryRequired {
+		return true
+	}
 	if auth.Unavailable && auth.Quota.Exceeded && auth.NextRetryAfter.After(now) {
 		return true
 	}
 	for _, state := range auth.ModelStates {
 		if state == nil {
 			continue
+		}
+		if state.Quota.Exceeded && state.Quota.RecoveryRequired {
+			return true
 		}
 		if state.Unavailable && state.Quota.Exceeded && state.NextRetryAfter.After(now) {
 			return true
@@ -499,6 +505,7 @@ func (s *Service) refreshOne(jobID, tenantID string, auth *coreauth.Auth, subjec
 		})
 		return
 	}
+	s.applyRuntimeQuotaProbe(ctx, auth, probe)
 
 	healthStatus := strings.TrimSpace(probe.Health)
 	if healthStatus == "" {
@@ -641,6 +648,32 @@ func (s *Service) refreshOne(jobID, tenantID string, auth *coreauth.Auth, subjec
 		r.UpdatedAt = checked
 		r.Result = view
 	})
+}
+
+func (s *Service) applyRuntimeQuotaProbe(ctx context.Context, auth *coreauth.Auth, probe ProbeResult) {
+	if s == nil || s.authManager == nil || auth == nil || strings.TrimSpace(auth.ID) == "" {
+		return
+	}
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if provider != "xai" && provider != "x-ai" && provider != "grok" {
+		return
+	}
+	for _, quota := range probe.Quotas {
+		if quota.QuotaKey != "weekly_limit" || quota.Percent == nil {
+			continue
+		}
+		result := &coreauth.QuotaProbeResult{
+			Recovered:       *quota.Percent > 0,
+			WindowExhausted: *quota.Percent <= 0,
+			Window:          "week",
+			WindowMinutes:   10080,
+		}
+		if quota.ResetAt != nil && quota.ResetAt.After(time.Now()) {
+			result.NextRecoverAt = *quota.ResetAt
+		}
+		_, _ = s.authManager.UpdateQuotaFromProbe(ctx, auth.ID, result)
+		return
+	}
 }
 
 func (s *Service) loadLegacyPersistedStatus(tenantID, subjectID string) (*usage.AIAccountStatusRecord, error) {

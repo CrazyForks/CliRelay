@@ -78,6 +78,9 @@ func TestXAIExecutorProbeQuotaRecovery(t *testing.T) {
 			if result.Recovered != test.wantRecovered {
 				t.Fatalf("Recovered = %v, want %v", result.Recovered, test.wantRecovered)
 			}
+			if !test.wantRecovered && (!result.WindowExhausted || result.Window != "week" || result.WindowMinutes != 10080) {
+				t.Fatalf("quota window = exhausted:%v %q/%d, want weekly exhausted", result.WindowExhausted, result.Window, result.WindowMinutes)
+			}
 			if test.wantNextRecover {
 				if !result.NextRecoverAt.Equal(resetAt) {
 					t.Fatalf("NextRecoverAt = %v, want %v", result.NextRecoverAt, resetAt)
