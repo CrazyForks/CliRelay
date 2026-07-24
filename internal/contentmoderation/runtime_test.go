@@ -195,6 +195,36 @@ func TestRuntimeModeratorTenantMismatchNeverQueriesResolver(t *testing.T) {
 	}
 }
 
+func TestRuntimeModeratorBlocksOpenAIImagePrompt(t *testing.T) {
+	const tenantID = "tenant-image-prompt"
+	store := newTestStore(t)
+	profile := createRuntimeProfile(t, store, tenantID, "profile-image-prompt", CreateProfileInput{
+		Name:            "image prompt block",
+		Mode:            ModePreBlock,
+		KeywordMode:     KeywordModeKeywordOnly,
+		BlockedKeywords: []string{"bad word"},
+	})
+	bindRuntimeChannel(t, store, tenantID, ChannelTypeProviderKey, "image-key", profile.ID)
+	moderator := NewRequestModerator(store, NewEvaluator(nil))
+	auth := &coreauth.Auth{
+		ID:       "image-auth",
+		TenantID: tenantID,
+		Provider: "moderation-runtime",
+		Attributes: map[string]string{
+			"provider_key_id": "image-key",
+		},
+	}
+	opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"model":"gpt-image-2","prompt":"bad word"}`),
+		SourceFormat:    sdktranslator.FormatOpenAI,
+		Metadata:        map[string]any{cliproxyexecutor.TenantMetadataKey: tenantID},
+	}
+
+	if result := moderator.Moderate(context.Background(), auth, opts); !result.Blocked {
+		t.Fatal("images-style prompt was not blocked")
+	}
+}
+
 func TestRuntimeModeratorMetricsAreTenantScoped(t *testing.T) {
 	profileA, err := NewProfile("tenant-a", "profile-a", CreateProfileInput{
 		Name: "a", Mode: ModePreBlock, KeywordMode: KeywordModeKeywordOnly,
