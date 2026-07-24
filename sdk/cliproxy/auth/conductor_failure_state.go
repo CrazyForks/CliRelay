@@ -5,8 +5,6 @@ import (
 	"time"
 )
 
-const xaiWeekExhaustedDefaultCooldown = 6 * time.Hour
-
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
 	if auth == nil {
 		return
@@ -63,6 +61,7 @@ func applyAuthQuotaFailureState(auth *Auth, resultErr *Error, retryAfter *time.D
 		auth.StatusMessage = "quota exhausted"
 	}
 	auth.Quota.Exceeded = true
+	auth.Quota.RecoveryRequired = isXAIWeekBalanceExhaustedError(resultErr)
 	auth.Quota.Reason = "quota"
 	if resultErr != nil {
 		auth.Quota.Window = resultErr.QuotaWindow
@@ -86,7 +85,7 @@ func quotaFailureCooldown(resultErr *Error, retryAfter *time.Duration, prevLevel
 		return 0, prevLevel
 	}
 	if isXAIWeekBalanceExhaustedError(resultErr) {
-		return xaiWeekExhaustedDefaultCooldown, prevLevel
+		return 0, prevLevel
 	}
 	return nextQuotaCooldown(prevLevel, false)
 }

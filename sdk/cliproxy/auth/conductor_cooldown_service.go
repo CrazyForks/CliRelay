@@ -153,6 +153,13 @@ func (s cooldownService) markResult(ctx context.Context, result Result) {
 
 	s.applyRegistryEffects(result, effects)
 	s.manager.hook.OnResult(ctx, result)
+	if !result.Success && result.RetryAfter == nil && isXAIWeekBalanceExhaustedError(result.Error) {
+		probeCtx := context.Background()
+		if ctx != nil {
+			probeCtx = context.WithoutCancel(ctx)
+		}
+		go s.manager.probeQuotaRecoveryWithLimit(probeCtx, result.AuthID, false)
+	}
 }
 
 func (s cooldownService) applyResultLocked(auth *Auth, result Result, now time.Time) resultStateEffects {
@@ -172,7 +179,7 @@ func (s cooldownService) applySuccessLocked(auth *Auth, result Result, now time.
 	markClaudeOAuthHealthSuccessLocked(auth, result, now)
 	if result.Model != "" {
 		state := ensureModelState(auth, result.Model)
-		if activeModelQuotaCooldown(state, now) {
+		if activeModelQuotaCooldown(state, now) && !quotaNeedsConfirmedRecovery(state.Quota) {
 			updateAggregatedAvailability(auth, now)
 			auth.UpdatedAt = now
 			return
@@ -189,7 +196,7 @@ func (s cooldownService) applySuccessLocked(auth *Auth, result Result, now time.
 		effects.clearModelQuota = true
 		return
 	}
-	if activeAuthQuotaCooldown(auth, now) {
+	if activeAuthQuotaCooldown(auth, now) && !quotaNeedsConfirmedRecovery(auth.Quota) {
 		updateAggregatedAvailability(auth, now)
 		auth.UpdatedAt = now
 		return
@@ -303,12 +310,13 @@ func applyModelQuotaFailureLocked(auth *Auth, state *ModelState, result Result, 
 	}
 	state.NextRetryAfter = next
 	state.Quota = QuotaState{
-		Exceeded:      true,
-		Reason:        "quota",
-		Window:        window,
-		WindowMinutes: windowMinutes,
-		NextRecoverAt: next,
-		BackoffLevel:  backoffLevel,
+		Exceeded:         true,
+		RecoveryRequired: isXAIWeekBalanceExhaustedError(result.Error),
+		Reason:           "quota",
+		Window:           window,
+		WindowMinutes:    windowMinutes,
+		NextRecoverAt:    next,
+		BackoffLevel:     backoffLevel,
 	}
 	if result.Error != nil && result.Error.Message != "" {
 		state.StatusMessage = result.Error.Message

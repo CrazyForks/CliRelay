@@ -13,6 +13,7 @@ import (
 	managementapitools "github.com/router-for-me/CLIProxyAPI/v6/internal/management/apitools"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	_ "modernc.org/sqlite"
 )
 
@@ -573,6 +574,52 @@ func TestNeedsRuntimeQuotaReconcile(t *testing.T) {
 	}
 	if !needsRuntimeQuotaReconcile(cool) {
 		t.Fatal("cooldown should reconcile")
+	}
+}
+
+func TestApplyRuntimeQuotaProbe_XAIWeeklyZeroBlocksUntilRecovered(t *testing.T) {
+	t.Parallel()
+
+	auth := &coreauth.Auth{
+		ID:       "xai-weekly-zero",
+		Provider: "xai",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"type": "xai", "sub": "xai-user"},
+	}
+	manager := newTestManager(t, "tenant-xai", auth)
+	svc := New(&config.Config{}, manager, nil, nil)
+	zero := 0.0
+	svc.applyRuntimeQuotaProbe(context.Background(), auth, ProbeResult{Quotas: []usage.QuotaWindowDTO{{
+		QuotaKey: "weekly_limit",
+		Percent:  &zero,
+	}}})
+
+	got, ok := manager.GetByID(auth.ID)
+	if !ok || got == nil {
+		t.Fatal("updated auth missing")
+	}
+	if !got.Quota.Exceeded || !got.Quota.RecoveryRequired || got.Quota.Window != "week" {
+		t.Fatalf("quota = %#v, want weekly confirmed-recovery gate", got.Quota)
+	}
+	selector := &coreauth.RoundRobinSelector{}
+	if picked, err := selector.Pick(context.Background(), "xai", "grok-4.5", cliproxyexecutor.Options{}, []*coreauth.Auth{got}); err == nil || picked != nil {
+		t.Fatalf("Pick() = %#v, %v; want blocked auth", picked, err)
+	}
+
+	remaining := 25.0
+	svc.applyRuntimeQuotaProbe(context.Background(), auth, ProbeResult{Quotas: []usage.QuotaWindowDTO{{
+		QuotaKey: "weekly_limit",
+		Percent:  &remaining,
+	}}})
+	got, _ = manager.GetByID(auth.ID)
+	if got.Quota.Exceeded || got.Quota.RecoveryRequired {
+		t.Fatalf("quota = %#v, want recovered", got.Quota)
+	}
+	if _, exists := got.Metadata["_cli_proxy_runtime_quota"]; exists {
+		t.Fatal("recovered auth retained persisted quota runtime metadata")
+	}
+	if picked, err := selector.Pick(context.Background(), "xai", "grok-4.5", cliproxyexecutor.Options{}, []*coreauth.Auth{got}); err != nil || picked == nil {
+		t.Fatalf("Pick() = %#v, %v; want recovered auth", picked, err)
 	}
 }
 

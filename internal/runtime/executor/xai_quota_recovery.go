@@ -69,7 +69,12 @@ func parseXAIQuotaProbe(body []byte, now time.Time) *cliproxyauth.QuotaProbeResu
 	if weekly.RemainingPercent > 0 {
 		return &cliproxyauth.QuotaProbeResult{Recovered: true}
 	}
-	result := &cliproxyauth.QuotaProbeResult{Recovered: false}
+	result := &cliproxyauth.QuotaProbeResult{
+		Recovered:       false,
+		WindowExhausted: true,
+		Window:          xaiWeeklyWindowLabel,
+		WindowMinutes:   xaiWeeklyWindowMinutes,
+	}
 	if weekly.ResetAt.After(now) {
 		result.NextRecoverAt = weekly.ResetAt
 	}
