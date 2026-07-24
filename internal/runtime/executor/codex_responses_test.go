@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"net/http"
 	"strings"
 	"testing"
@@ -22,6 +23,46 @@ func TestSanitizeCodexResponsesRequestStripsUnsupportedTokenLimitFields(t *testi
 	}
 	if !gjson.GetBytes(got, "stream").Bool() {
 		t.Fatalf("stream should be preserved; payload=%s", got)
+	}
+}
+
+func TestSanitizeCodexResponsesRequestStripsStoredHistoryItemIDsWhenStoreFalse(t *testing.T) {
+	input := []byte(`{
+		"model":"gpt-5.4",
+		"store":false,
+		"input":[
+			{"type":"message","id":"msg_previous","role":"assistant","content":[{"type":"output_text","text":"done"}]},
+			{"type":"function_call","id":"fc_previous","call_id":"call_previous","name":"lookup","arguments":"{\"q\":\"x\"}","status":"completed"},
+			{"type":"reasoning","id":"rs_previous","encrypted_content":"encrypted","summary":[]}
+		]
+	}`)
+
+	got := sanitizeCodexResponsesRequest(input)
+	for _, id := range []string{"msg_previous", "fc_previous", "rs_previous"} {
+		if bytes.Contains(got, []byte(`"`+id+`"`)) {
+			t.Fatalf("stored item id %q should be stripped; payload=%s", id, got)
+		}
+	}
+	if text := gjson.GetBytes(got, "input.0.content.0.text").String(); text != "done" {
+		t.Fatalf("message content = %q, want done; payload=%s", text, got)
+	}
+	if callID := gjson.GetBytes(got, "input.1.call_id").String(); callID != "call_previous" {
+		t.Fatalf("function call_id = %q, want call_previous; payload=%s", callID, got)
+	}
+	if arguments := gjson.GetBytes(got, "input.1.arguments").String(); arguments != `{"q":"x"}` {
+		t.Fatalf("function arguments = %q; payload=%s", arguments, got)
+	}
+	if encrypted := gjson.GetBytes(got, "input.2.encrypted_content").String(); encrypted != "encrypted" {
+		t.Fatalf("reasoning encrypted_content = %q; payload=%s", encrypted, got)
+	}
+}
+
+func TestSanitizeCodexResponsesRequestKeepsStoredHistoryItemIDsWhenStoreTrue(t *testing.T) {
+	input := []byte(`{"store":true,"input":[{"type":"message","id":"msg_persisted","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}`)
+
+	got := sanitizeCodexResponsesRequest(input)
+	if id := gjson.GetBytes(got, "input.0.id").String(); id != "msg_persisted" {
+		t.Fatalf("stored item id = %q, want msg_persisted; payload=%s", id, got)
 	}
 }
 
