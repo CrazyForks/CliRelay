@@ -21,6 +21,12 @@ func ExtractLastUserText(format sdktranslator.Format, payload []byte) string {
 		collectLastGeminiContent(gjson.GetBytes(payload, "contents"), &parts)
 	default:
 		collectLastRoleContent(gjson.GetBytes(payload, "messages"), "user", &parts, false)
+		if len(parts) == 0 {
+			prompt := gjson.GetBytes(payload, "prompt")
+			if prompt.Type == gjson.String {
+				addText(&parts, prompt.String(), false)
+			}
+		}
 	}
 	return strings.Join(strings.Fields(strings.Join(parts, "\n")), " ")
 }
