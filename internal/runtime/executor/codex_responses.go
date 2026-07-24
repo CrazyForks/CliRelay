@@ -29,8 +29,49 @@ func sanitizeCodexResponsesRequest(body []byte) []byte {
 	})
 	body = stripCodexResponsesImageGenerationSize(body)
 	// History hygiene: never forward multi-MB data:image blobs from Desktop session replay.
-	body = stripCodexHistoryDataURLImages(body)
+	// With store=false, also remove server item IDs so upstream treats retained history as
+	// inline content instead of looking up items that were never persisted.
+	store := gjson.GetBytes(body, "store")
+	body = stripCodexHistoryDataURLImagesForStore(body, store.Exists() && !store.Bool())
 	return body
+}
+
+func stripCodexStoredHistoryItemReference(itemRaw string) (string, bool, bool) {
+	item := gjson.Parse(itemRaw)
+	hadStoredID := strings.TrimSpace(item.Get("id").String()) != ""
+	changed := false
+	if hadStoredID {
+		if next, err := sjson.Delete(itemRaw, "id"); err == nil {
+			itemRaw = next
+			item = gjson.Parse(itemRaw)
+			changed = true
+		}
+	}
+
+	// Once result pixels are removed, an image_generation_call has no inline meaning and
+	// cannot be resolved by ID when store=false. The image is reattached to the latest user
+	// turn when it fits the existing size cap.
+	if strings.TrimSpace(item.Get("type").String()) == "image_generation_call" && strings.TrimSpace(item.Get("result").String()) == "" {
+		return "", true, true
+	}
+	if hadStoredID && codexHistoryItemIsReferenceOnly(item) {
+		return "", true, true
+	}
+	return itemRaw, changed, false
+}
+
+func codexHistoryItemIsReferenceOnly(item gjson.Result) bool {
+	referenceOnly := true
+	item.ForEach(func(key, _ gjson.Result) bool {
+		switch key.String() {
+		case "type", "status", "role", "name", "call_id":
+			return true
+		default:
+			referenceOnly = false
+			return false
+		}
+	})
+	return referenceOnly
 }
 
 func stripCodexResponsesImageGenerationSize(body []byte) []byte {

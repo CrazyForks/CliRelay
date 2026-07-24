@@ -879,24 +879,34 @@ func maybeWrapSSEData(hadSSEPrefix bool, body []byte) []byte {
 // stripCodexHistoryDataURLImages removes multi-MB data:image payloads from request history
 // before upstream. Desktop keeps outbound data-url markdown for display, then re-sends it
 // on the next turn as text — that blows the model context (context_length_exceeded).
+func stripCodexHistoryDataURLImages(body []byte) []byte {
+	store := gjson.GetBytes(body, "store")
+	return stripCodexHistoryDataURLImagesForStore(body, store.Exists() && !store.Bool())
+}
+
+// stripCodexHistoryDataURLImagesForStore also strips server-issued history item IDs when
+// store is disabled. Those IDs otherwise make upstream attempt to resolve items that were
+// never persisted, while the remaining inline payload is sufficient for stateless replay.
 //
 // Strategy (no server storage / no global cache):
 //  1. Replace huge data URLs in history text with short cliproxy-image:N placeholders
 //  2. Re-attach at most the last extracted image as a structured input_image on the latest
 //     user turn so the model can re-identify / edit without keeping base64-as-text history
-//  3. All image bytes come from the current request body and die with the request
+//  3. With store=false, strip top-level item IDs and drop reference-only history shells
+//  4. All image bytes come from the current request body and die with the request
 //
 // Implementation rebuilds the input array once. Never call sjson.Set/Delete on the full
 // multi-MB body for each history item — that was the production RSS spike path.
-func stripCodexHistoryDataURLImages(body []byte) []byte {
+func stripCodexHistoryDataURLImagesForStore(body []byte, stripStoredItemIDs bool) []byte {
 	if len(body) == 0 {
 		return body
 	}
 	// Fast path: nothing to do when payload has neither markdown data URLs nor a large
-	// image_generation_call.result (Desktop usually only re-sends markdown data URLs).
+	// image_generation_call.result nor stored history item IDs.
 	hasDataURL := bytes.Contains(body, []byte("data:image/"))
 	hasIGResult := bytes.Contains(body, []byte(`"image_generation_call"`)) && bytes.Contains(body, []byte(`"result"`))
-	if !hasDataURL && !hasIGResult {
+	hasStoredItemID := stripStoredItemIDs && bytes.Contains(body, []byte(`"id"`))
+	if !hasDataURL && !hasIGResult && !hasStoredItemID {
 		return body
 	}
 	seq := 0
@@ -934,11 +944,18 @@ func stripCodexHistoryDataURLImages(body []byte) []byte {
 	}
 	items := input.Array()
 	// Keep original raw strings for unchanged fragments; only allocate rewritten ones.
-	itemRaws := make([]string, len(items))
+	itemRaws := make([]string, 0, len(items))
 	changed := false
 	outLen := 2 // []
-	for itemIndex, item := range items {
-		itemRaws[itemIndex] = item.Raw
+	appendItem := func(raw string) {
+		if len(itemRaws) > 0 {
+			outLen++
+		}
+		itemRaws = append(itemRaws, raw)
+		outLen += len(raw)
+	}
+	for _, item := range items {
+		itemRaw := item.Raw
 		// Drop base64 from any re-sent image_generation_call history items; remember last.
 		if strings.TrimSpace(item.Get("type").String()) == "image_generation_call" {
 			if result := item.Get("result"); result.Exists() {
@@ -950,84 +967,72 @@ func stripCodexHistoryDataURLImages(body []byte) []byte {
 						remember(fmt.Sprintf("data:%s;base64,%s", mime, resultStr))
 					}
 					if next, err := sjson.Delete(item.Raw, "result"); err == nil {
-						itemRaws[itemIndex] = next
+						itemRaw = next
 						changed = true
 					}
 				}
 			}
-			if itemIndex > 0 {
-				outLen++
-			}
-			outLen += len(itemRaws[itemIndex])
-			continue
-		}
-		if !hasDataURL {
-			if itemIndex > 0 {
-				outLen++
-			}
-			outLen += len(itemRaws[itemIndex])
-			continue
-		}
-		// message / content text fields
-		if content := item.Get("content"); content.Type == gjson.String {
-			if next, ok := replaceCodexDataURLImagesInText(content.String(), nextPlaceholder, remember); ok {
-				if rewritten, err := sjson.Set(item.Raw, "content", next); err == nil {
-					itemRaws[itemIndex] = rewritten
-					changed = true
+		} else if hasDataURL {
+			// message / content text fields
+			if content := item.Get("content"); content.Type == gjson.String {
+				if next, ok := replaceCodexDataURLImagesInText(content.String(), nextPlaceholder, remember); ok {
+					if rewritten, err := sjson.Set(itemRaw, "content", next); err == nil {
+						itemRaw = rewritten
+						changed = true
+					}
 				}
-			}
-			if itemIndex > 0 {
-				outLen++
-			}
-			outLen += len(itemRaws[itemIndex])
-			continue
-		}
-		if content := item.Get("content"); content.IsArray() {
-			parts := content.Array()
-			partRaws := make([]string, len(parts))
-			partChanged := false
-			partOutLen := 2
-			for partIndex, part := range parts {
-				partRaws[partIndex] = part.Raw
-				partType := strings.TrimSpace(part.Get("type").String())
-				// Only rewrite text parts. Do not touch structured input_image (user uploads /
-				// vision) — those are intentional pixels, not Desktop session replay of our
-				// outbound markdown data URLs.
-				if partType == "input_text" || partType == "output_text" || partType == "text" {
-					text := part.Get("text").String()
-					if next, ok := replaceCodexDataURLImagesInText(text, nextPlaceholder, remember); ok {
-						if rewritten, err := sjson.Set(part.Raw, "text", next); err == nil {
-							partRaws[partIndex] = rewritten
-							partChanged = true
+			} else if content.IsArray() {
+				parts := content.Array()
+				partRaws := make([]string, len(parts))
+				partChanged := false
+				partOutLen := 2
+				for partIndex, part := range parts {
+					partRaws[partIndex] = part.Raw
+					partType := strings.TrimSpace(part.Get("type").String())
+					// Only rewrite text parts. Do not touch structured input_image (user uploads /
+					// vision) — those are intentional pixels, not Desktop session replay of our
+					// outbound markdown data URLs.
+					if partType == "input_text" || partType == "output_text" || partType == "text" {
+						text := part.Get("text").String()
+						if next, ok := replaceCodexDataURLImagesInText(text, nextPlaceholder, remember); ok {
+							if rewritten, err := sjson.Set(part.Raw, "text", next); err == nil {
+								partRaws[partIndex] = rewritten
+								partChanged = true
+							}
 						}
 					}
-				}
-				if partIndex > 0 {
-					partOutLen++
-				}
-				partOutLen += len(partRaws[partIndex])
-			}
-			if partChanged {
-				var contentBuf bytes.Buffer
-				contentBuf.Grow(partOutLen)
-				contentBuf.WriteByte('[')
-				for i, p := range partRaws {
-					if i > 0 {
-						contentBuf.WriteByte(',')
+					if partIndex > 0 {
+						partOutLen++
 					}
-					contentBuf.WriteString(p)
+					partOutLen += len(partRaws[partIndex])
 				}
-				contentBuf.WriteByte(']')
-				if rewritten, err := sjson.SetRaw(item.Raw, "content", contentBuf.String()); err == nil {
-					itemRaws[itemIndex] = rewritten
-					changed = true
+				if partChanged {
+					var contentBuf bytes.Buffer
+					contentBuf.Grow(partOutLen)
+					contentBuf.WriteByte('[')
+					for i, p := range partRaws {
+						if i > 0 {
+							contentBuf.WriteByte(',')
+						}
+						contentBuf.WriteString(p)
+					}
+					contentBuf.WriteByte(']')
+					if rewritten, err := sjson.SetRaw(itemRaw, "content", contentBuf.String()); err == nil {
+						itemRaw = rewritten
+						changed = true
+					}
 				}
 			}
 		}
-		if itemIndex > 0 {
-			outLen++
+		if stripStoredItemIDs {
+			var itemChanged, drop bool
+			itemRaw, itemChanged, drop = stripCodexStoredHistoryItemReference(itemRaw)
+			changed = changed || itemChanged
+			if drop {
+				continue
+			}
 		}
-		outLen += len(itemRaws[itemIndex])
+		appendItem(itemRaw)
 	}
 
 	// Re-identify / edit: move last history image into structured input_image (not text tokens).
