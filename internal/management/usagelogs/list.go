@@ -17,6 +17,7 @@ import (
 
 func (s *Service) ManagementLogs(input ManagementLogQueryInput) (map[string]any, error) {
 	maps := s.buildNameMaps()
+	apiKeys := expandManagementAPIKeyFilters(s.tenantID, input.APIKeys)
 	authSubjectIDs, authIndexes, channelNames, authIndexChannelNames := channelFilterSelectors(
 		input.Channels,
 		maps.channelNameMap,
@@ -34,7 +35,7 @@ func (s *Service) ManagementLogs(input ManagementLogQueryInput) (map[string]any,
 		Page:                  input.Page,
 		Size:                  input.Size,
 		Days:                  input.Days,
-		APIKeys:               input.APIKeys,
+		APIKeys:               apiKeys,
 		Models:                input.Models,
 		Statuses:              input.Statuses,
 		MatchNoAPIKeys:        input.MatchNoAPIKeys,

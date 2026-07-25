@@ -3,14 +3,107 @@ package usagelogs
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
+
+func TestManagementLogsExpandsOwnedAPIKeyFilterIncludingSoftDeletedKeys(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.db")
+	if err := usage.InitDB(dbPath, config.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	t.Cleanup(usage.CloseDB)
+
+	tenantID := "00000000-0000-0000-0000-0000000000ac"
+	endUserID := "00000000-0000-0000-0000-0000000000bd"
+	now := time.Now().UTC().Format(time.RFC3339)
+	rows := []usage.APIKeyRow{
+		{TenantID: tenantID, ID: "00000000-0000-0000-0000-0000000000a2", Key: "sk-owned-log-a", Name: "Laptop", EndUserID: endUserID, CreatedAt: now, UpdatedAt: now},
+		{TenantID: tenantID, ID: "00000000-0000-0000-0000-0000000000b2", Key: "sk-owned-log-b", Name: "Automation", EndUserID: endUserID, IsDefault: true, CreatedAt: now, UpdatedAt: now},
+		{TenantID: tenantID, ID: "00000000-0000-0000-0000-0000000000c2", Key: "sk-standalone", Name: "Standalone", CreatedAt: now, UpdatedAt: now},
+	}
+	for _, row := range rows {
+		if err := usage.UpsertAPIKeyForTenant(tenantID, row); err != nil {
+			t.Fatalf("UpsertAPIKeyForTenant(%s): %v", row.Key, err)
+		}
+	}
+
+	logTime := time.Now().UTC()
+	usage.InsertLog("sk-owned-log-a", "Laptop", "gpt-test", "test", "channel", "auth-owned", false, logTime, 1, 0, usage.TokenStats{TotalTokens: 1}, "", "")
+	usage.InsertLog("sk-owned-log-a", "Laptop", "gpt-test", "test", "channel", "auth-owned", false, logTime.Add(time.Second), 1, 0, usage.TokenStats{TotalTokens: 1}, "", "")
+	usage.InsertLog("sk-standalone", "Standalone", "gpt-test", "test", "channel", "auth-standalone", false, logTime, 1, 0, usage.TokenStats{TotalTokens: 1}, "", "")
+	if err := usage.DeleteAPIKeyByIDForTenant(tenantID, rows[0].ID); err != nil {
+		t.Fatalf("DeleteAPIKeyByIDForTenant(%s): %v", rows[0].ID, err)
+	}
+
+	expanded := expandManagementAPIKeyFilters(tenantID, []string{
+		" sk-owned-log-b ", "sk-owned-log-b", " __system__ ", "__system__",
+	})
+	hasTombstone := false
+	for _, key := range expanded {
+		if strings.HasPrefix(key, "sk-deleted-") {
+			hasTombstone = true
+			break
+		}
+	}
+	if len(expanded) != 3 || !hasTombstone ||
+		!slices.Contains(expanded, "sk-owned-log-b") || !slices.Contains(expanded, "__system__") {
+		t.Fatalf("expanded filters = %#v, want active, soft-deleted, and system selectors", expanded)
+	}
+
+	service := NewForTenant(tenantID, &config.Config{}, nil)
+	unfiltered, err := service.ManagementLogs(ManagementLogQueryInput{Days: 1, Page: 1, Size: 50})
+	if err != nil {
+		t.Fatalf("ManagementLogs(unfiltered): %v", err)
+	}
+	filters := unfiltered["filters"].(usage.FilterOptions)
+	if !slices.Contains(filters.APIKeys, "sk-owned-log-b") {
+		t.Fatalf("filters.APIKeys = %#v, want representative sk-owned-log-b", filters.APIKeys)
+	}
+	if filters.APIKeyCounts["sk-owned-log-b"] != 2 {
+		t.Fatalf("filters.APIKeyCounts[sk-owned-log-b] = %d, want 2 account requests", filters.APIKeyCounts["sk-owned-log-b"])
+	}
+
+	owned, err := service.ManagementLogs(ManagementLogQueryInput{
+		Days: 1, Page: 1, Size: 50, APIKeys: []string{"sk-owned-log-b"},
+	})
+	if err != nil {
+		t.Fatalf("ManagementLogs(owned representative): %v", err)
+	}
+	if total := owned["total"].(int64); total != 2 {
+		t.Fatalf("owned total = %d, want 2 account requests", total)
+	}
+	ownedItems := owned["items"].([]usage.LogRow)
+	if len(ownedItems) != 2 || ownedItems[0].APIKey != "sk-owned-log-a" || ownedItems[1].APIKey != "sk-owned-log-a" {
+		t.Fatalf("owned items = %#v, want two sk-owned-log-a requests", ownedItems)
+	}
+	if stats := owned["stats"].(usage.LogStats); stats.Total != 2 {
+		t.Fatalf("owned stats total = %d, want 2", stats.Total)
+	}
+
+	standalone, err := service.ManagementLogs(ManagementLogQueryInput{
+		Days: 1, Page: 1, Size: 50, APIKeys: []string{"sk-standalone"},
+	})
+	if err != nil {
+		t.Fatalf("ManagementLogs(standalone): %v", err)
+	}
+	if total := standalone["total"].(int64); total != 1 {
+		t.Fatalf("standalone total = %d, want 1", total)
+	}
+	standaloneItems := standalone["items"].([]usage.LogRow)
+	if len(standaloneItems) != 1 || standaloneItems[0].APIKey != "sk-standalone" {
+		t.Fatalf("standalone items = %#v, want only sk-standalone", standaloneItems)
+	}
+}
 
 func TestLooksLikeAuthIndex(t *testing.T) {
 	t.Parallel()
