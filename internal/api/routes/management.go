@@ -44,6 +44,7 @@ func RegisterManagement(engine *gin.Engine, h *managementhandlers.Handler, opts 
 	registerManagementModelRoutes(mgmt, h)
 	registerManagementUsageRoutes(mgmt, h)
 	registerManagementSettingsRoutes(mgmt, h)
+	registerManagementContentModerationRoutes(mgmt, h)
 	registerManagementAPIKeyRoutes(mgmt, h)
 	registerManagementLogRoutes(mgmt, h)
 	registerManagementAmpRoutes(mgmt, h)

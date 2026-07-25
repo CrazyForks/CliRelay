@@ -21,13 +21,14 @@ import (
 )
 
 type managementImageExecutor struct {
-	alt      string
-	model    string
-	payload  string
-	payloads []string
-	metadata map[string]any
-	calls    int
-	err      error
+	alt             string
+	model           string
+	payload         string
+	payloads        []string
+	originalRequest string
+	metadata        map[string]any
+	calls           int
+	err             error
 }
 
 type managementUpstreamStatusError struct {
@@ -50,6 +51,7 @@ func (e *managementImageExecutor) Execute(ctx context.Context, auth *coreauth.Au
 	e.model = req.Model
 	e.payload = string(req.Payload)
 	e.payloads = append(e.payloads, e.payload)
+	e.originalRequest = string(opts.OriginalRequest)
 	e.metadata = opts.Metadata
 	if e.err != nil {
 		return coreexecutor.Response{}, e.err
@@ -224,6 +226,9 @@ func TestPostImageGenerationTestExecutesCodexImageAlt(t *testing.T) {
 	}
 	if executor.metadata[coreexecutor.SinglePickMetadataKey] != true {
 		t.Fatalf("single-pick metadata = %#v, want true", executor.metadata[coreexecutor.SinglePickMetadataKey])
+	}
+	if executor.originalRequest != `{"model":"gpt-image-2","prompt":"test prompt"}` {
+		t.Fatalf("original request = %q, want image request payload", executor.originalRequest)
 	}
 }
 

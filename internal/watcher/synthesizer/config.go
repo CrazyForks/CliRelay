@@ -84,6 +84,7 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*corea
 		if label == "" {
 			label = "gemini-apikey"
 		}
+		addProviderBindingAttrs(attrs, "", entry.ID)
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "gemini",
@@ -142,6 +143,7 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		if label == "" {
 			label = "claude-apikey"
 		}
+		addProviderBindingAttrs(attrs, "", ck.ID)
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "claude",
@@ -227,6 +229,7 @@ func (s *ConfigSynthesizer) synthesizeBedrockKeys(ctx *SynthesisContext) []*core
 			attrs["models_hash"] = hash
 		}
 		addConfigHeadersToAttrs(entry.Headers, attrs)
+		addProviderBindingAttrs(attrs, "", entry.ID)
 		id, token := idGen.Next("bedrock:apikey", idParts...)
 		attrs["source"] = fmt.Sprintf("config:bedrock[%s]", token)
 		label := strings.TrimSpace(entry.Name)
@@ -290,6 +293,7 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 		if label == "" {
 			label = "codex-apikey"
 		}
+		addProviderBindingAttrs(attrs, "", ck.ID)
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "codex",
@@ -344,6 +348,7 @@ func (s *ConfigSynthesizer) synthesizeOpenCodeGoKeys(ctx *SynthesisContext) []*c
 		if label == "" {
 			label = "opencode-go-apikey"
 		}
+		addProviderBindingAttrs(attrs, "", entry.ID)
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "opencode-go",
@@ -406,6 +411,7 @@ func (s *ConfigSynthesizer) synthesizeClineKeys(ctx *SynthesisContext) []*coreau
 		if label == "" {
 			label = "cline-apikey"
 		}
+		addProviderBindingAttrs(attrs, "", entry.ID)
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "cline",
@@ -468,6 +474,7 @@ func (s *ConfigSynthesizer) synthesizeOllamaCloudKeys(ctx *SynthesisContext) []*
 		if label == "" {
 			label = "ollama-cloud-apikey"
 		}
+		addProviderBindingAttrs(attrs, "", entry.ID)
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "ollama-cloud",
@@ -534,6 +541,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				attrs["models_hash"] = hash
 			}
 			addConfigHeadersToAttrs(compat.Headers, attrs)
+			addProviderBindingAttrs(attrs, compat.ID, entry.ID)
 			a := &coreauth.Auth{
 				ID:         id,
 				Provider:   providerName,
@@ -565,6 +573,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				attrs["models_hash"] = hash
 			}
 			addConfigHeadersToAttrs(compat.Headers, attrs)
+			addProviderBindingAttrs(attrs, compat.ID, "")
 			a := &coreauth.Auth{
 				ID:         id,
 				Provider:   providerName,
@@ -614,6 +623,7 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 			attrs["models_hash"] = hash
 		}
 		addConfigHeadersToAttrs(compat.Headers, attrs)
+		addProviderBindingAttrs(attrs, "", compat.ID)
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   providerName,

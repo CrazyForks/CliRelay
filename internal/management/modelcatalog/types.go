@@ -82,23 +82,15 @@ type configuredModelPathRoute struct {
 	Group string
 }
 
-func modelConfigResponse(row usage.ModelConfigRow) map[string]any {
+func modelConfigResponse(row, pricing usage.ModelConfigRow) map[string]any {
 	response := map[string]any{
 		"id":          row.ModelID,
 		"owned_by":    row.OwnedBy,
 		"description": row.Description,
 		"enabled":     row.Enabled,
-		"pricing": map[string]any{
-			"mode":                          row.PricingMode,
-			"input_price_per_million":       row.InputPricePerMillion,
-			"output_price_per_million":      row.OutputPricePerMillion,
-			"cached_price_per_million":      row.CachedPricePerMillion,
-			"cache_read_price_per_million":  row.CacheReadPricePerMillion,
-			"cache_write_price_per_million": row.CacheWritePricePerMillion,
-			"price_per_call":                row.PricePerCall,
-		},
-		"source":     row.Source,
-		"updated_at": row.UpdatedAt,
+		"pricing":     modelPricingPayload(pricing),
+		"source":      row.Source,
+		"updated_at":  row.UpdatedAt,
 	}
 	if row.DisplayName != "" {
 		response["display_name"] = row.DisplayName

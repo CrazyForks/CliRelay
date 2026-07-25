@@ -22,6 +22,73 @@ func initModelCatalogTestDB(t *testing.T) {
 	t.Cleanup(usage.CloseDB)
 }
 
+func TestRuntimePrefixedModelInheritsBasePricing(t *testing.T) {
+	initModelCatalogTestDB(t)
+
+	const (
+		baseModelID    = "deepseek-v4-flash"
+		runtimeModelID = "ollama/deepseek-v4-flash"
+		clientID       = "pricing-fallback-ollama"
+	)
+	if err := usage.UpsertModelConfig(usage.ModelConfigRow{
+		ModelID:               baseModelID,
+		Enabled:               true,
+		PricingMode:           "token",
+		InputPricePerMillion:  0.3,
+		OutputPricePerMillion: 1.2,
+		Source:                "openrouter",
+	}); err != nil {
+		t.Fatalf("UpsertModelConfig() error = %v", err)
+	}
+
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(clientID)
+	modelRegistry.RegisterClient(clientID, "ollama-cloud", []*registry.ModelInfo{{
+		ID:      runtimeModelID,
+		Object:  "model",
+		OwnedBy: "ollama",
+	}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+
+	service := New(&config.Config{}, nil)
+	assertInheritedPricing := func(stage string) {
+		t.Helper()
+		for name, result := range map[string]map[string]any{
+			"configured availability": service.ConfiguredAvailability("", ""),
+			"models":                  service.Models("", ""),
+		} {
+			data, ok := result["data"].([]map[string]any)
+			if !ok {
+				t.Fatalf("%s %s data = %#v, want []map[string]any", stage, name, result["data"])
+			}
+			var pricing map[string]any
+			for _, item := range data {
+				if item["id"] == runtimeModelID {
+					pricing, _ = item["pricing"].(map[string]any)
+					break
+				}
+			}
+			if pricing == nil {
+				t.Fatalf("%s %s missing inherited pricing for %q", stage, name, runtimeModelID)
+			}
+			if pricing["input_price_per_million"] != 0.3 || pricing["output_price_per_million"] != 1.2 {
+				t.Fatalf("%s %s pricing = %#v, want input=0.3 output=1.2", stage, name, pricing)
+			}
+		}
+	}
+
+	assertInheritedPricing("missing exact row")
+	if err := usage.UpsertModelConfig(usage.ModelConfigRow{
+		ModelID:     runtimeModelID,
+		Enabled:     true,
+		PricingMode: "token",
+		Source:      "user",
+	}); err != nil {
+		t.Fatalf("UpsertModelConfig(exact zero price) error = %v", err)
+	}
+	assertInheritedPricing("unpriced exact row")
+}
+
 func TestConfiguredAvailabilityIncludesModelSources(t *testing.T) {
 	const modelID = "source-test-model"
 	const codexClientID = "source-test-codex"

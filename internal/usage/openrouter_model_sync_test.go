@@ -304,6 +304,67 @@ func TestSyncOpenRouterModelsUpdatesExistingClinePassWrapperFromCanonicalModel(t
 	}
 }
 
+func TestSyncOpenRouterModelsUpdatesExistingOllamaWrapperFromCanonicalModel(t *testing.T) {
+	initModelConfigTestDB(t)
+
+	if err := UpsertModelConfig(ModelConfigRow{
+		ModelID:     "ollama/deepseek-v4-flash",
+		OwnedBy:     "ollama",
+		Description: "",
+		Enabled:     true,
+		PricingMode: "token",
+		Source:      "user",
+		InputModalities: []string{
+			"text",
+		},
+		OutputModalities: []string{
+			"text",
+		},
+	}); err != nil {
+		t.Fatalf("UpsertModelConfig() error = %v", err)
+	}
+
+	result, err := SyncOpenRouterModelList(context.Background(), []OpenRouterRemoteModel{
+		{
+			ID:          "deepseek/deepseek-v4-flash",
+			Description: "DeepSeek V4 Flash from OpenRouter",
+			Architecture: OpenRouterRemoteArchitecture{
+				Modality:         "text+image->text",
+				InputModalities:  []string{"text", "image"},
+				OutputModalities: []string{"text"},
+			},
+			Pricing: OpenRouterRemotePricing{
+				Prompt:         "0.0000003",
+				Completion:     "0.0000012",
+				InputCacheRead: "0.00000003",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("SyncOpenRouterModelList() error = %v", err)
+	}
+	if result.Seen != 1 || result.Skipped != 0 {
+		t.Fatalf("unexpected sync result: %+v", result)
+	}
+
+	model, ok := GetModelConfig("ollama/deepseek-v4-flash")
+	if !ok {
+		t.Fatal("expected existing ollama wrapper to remain configured")
+	}
+	if model.OwnedBy != "ollama" || model.Source != "user" {
+		t.Fatalf("ollama wrapper identity should be preserved: %+v", model)
+	}
+	if model.Description != "DeepSeek V4 Flash from OpenRouter" {
+		t.Fatalf("ollama wrapper should inherit remote description, got %q", model.Description)
+	}
+	if model.InputPricePerMillion != 0.3 || model.OutputPricePerMillion != 1.2 || model.CachedPricePerMillion != 0.03 {
+		t.Fatalf("ollama wrapper should inherit canonical pricing: %+v", model)
+	}
+	if strings.Join(model.InputModalities, ",") != "text,image" || strings.Join(model.OutputModalities, ",") != "text" {
+		t.Fatalf("ollama wrapper should inherit canonical modalities: %+v -> %+v", model.InputModalities, model.OutputModalities)
+	}
+}
+
 func TestSyncOpenRouterModelsUpdatesExistingOpenRouterDescription(t *testing.T) {
 	initModelConfigTestDB(t)
 

@@ -7,7 +7,10 @@ import (
 	"strings"
 )
 
-const MenuManagementCode = "system.menus"
+const (
+	MenuManagementCode        = "system.menus"
+	ContentModerationMenuCode = "runtime.content-moderation"
+)
 
 type Menu struct {
 	Code            string `json:"code"`
@@ -99,6 +102,8 @@ var MenuCatalog = []MenuSeed{
 	{Code: "access.end-users", ParentCode: "group.access", Type: "menu", Path: "/access/end-users", Component: "end-users", LabelKey: "shell.nav_end_users", Icon: "user-round", PermissionCode: "end_users.read", SortOrder: 25},
 	// Stable code kept; API Key permission profiles belong with client credentials.
 	{Code: "system.api-key-permissions", ParentCode: "group.access", Type: "menu", Path: "/access/api-key-permissions", Component: "api-key-permissions", LabelKey: "shell.nav_api_key_permissions", Icon: "shield-check", PermissionCode: "api_key_profiles.read", SortOrder: 40},
+	// Stable code kept for existing menu references; content moderation belongs with access credentials.
+	{Code: ContentModerationMenuCode, ParentCode: "group.access", Type: "menu", Path: "/access/content-moderation", Component: "content-moderation", LabelKey: "shell.nav_content_moderation", Icon: "shield-alert", PermissionCode: "content_moderation.read", SortOrder: 45},
 	// Tenant-scoped: matches /ccswitch-import-configs API auth (routing.read/write).
 	// Must not use platform system.config.read, or ordinary tenants never see this menu.
 	{Code: "access.ccswitch", ParentCode: "group.access", Type: "menu", Path: "/access/ccswitch-import-settings", Component: "ccswitch-import-settings", LabelKey: "shell.nav_ccswitch_import_settings", Icon: "arrow-down-to-line", PermissionCode: "routing.read", SortOrder: 50},

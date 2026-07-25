@@ -154,6 +154,16 @@ func enrichOpenAIModelsWithCatalog(tenantID string, models []map[string]interfac
 	if len(models) == 0 {
 		return
 	}
+	configRows := modelconfigsettings.ListAllConfigsForTenant(tenantID)
+	configByID := make(map[string]usage.ModelConfigRow, len(configRows))
+	for _, row := range configRows {
+		configByID[strings.ToLower(strings.TrimSpace(row.ModelID))] = row
+	}
+	pricingRows := usage.GetAllModelPricingForTenant(tenantID)
+	pricingByID := make(map[string]usage.ModelPricingRow, len(pricingRows))
+	for modelID, row := range pricingRows {
+		pricingByID[strings.ToLower(strings.TrimSpace(modelID))] = row
+	}
 	for _, model := range models {
 		if model == nil {
 			continue
@@ -163,7 +173,7 @@ func enrichOpenAIModelsWithCatalog(tenantID string, models []map[string]interfac
 		if id == "" {
 			continue
 		}
-		if row, ok := modelconfigsettings.GetConfigForTenant(tenantID, id); ok {
+		if row, ok := configByID[strings.ToLower(id)]; ok {
 			if ownedBy := strings.TrimSpace(row.OwnedBy); ownedBy != "" {
 				if existing, _ := model["owned_by"].(string); strings.TrimSpace(existing) == "" {
 					model["owned_by"] = ownedBy
@@ -191,27 +201,16 @@ func enrichOpenAIModelsWithCatalog(tenantID string, models []map[string]interfac
 				}
 			}
 			model["supports_vision"] = supportsVision
-			model["pricing"] = map[string]any{
-				"mode":                          row.PricingMode,
-				"input_price_per_million":       row.InputPricePerMillion,
-				"output_price_per_million":      row.OutputPricePerMillion,
-				"cached_price_per_million":      row.CachedPricePerMillion,
-				"cache_read_price_per_million":  row.CacheReadPricePerMillion,
-				"cache_write_price_per_million": row.CacheWritePricePerMillion,
-				"price_per_call":                row.PricePerCall,
-			}
-			continue
 		}
-		// Fallback: legacy model_pricing table when no model_config row exists.
-		if pricing, ok := usage.GetModelPricingForTenant(tenantID, id); ok {
+		if pricing, ok := usage.ResolveModelPricingRow(id, configByID, pricingByID); ok {
 			model["pricing"] = map[string]any{
-				"mode":                          "token",
+				"mode":                          pricing.PricingMode,
 				"input_price_per_million":       pricing.InputPricePerMillion,
 				"output_price_per_million":      pricing.OutputPricePerMillion,
 				"cached_price_per_million":      pricing.CachedPricePerMillion,
 				"cache_read_price_per_million":  pricing.CacheReadPricePerMillion,
 				"cache_write_price_per_million": pricing.CacheWritePricePerMillion,
-				"price_per_call":                0,
+				"price_per_call":                pricing.PricePerCall,
 			}
 		}
 	}

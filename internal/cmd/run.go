@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/contentmoderation"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/enduser"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
 	settingsstore "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/store"
@@ -41,10 +42,13 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 	usage.InitRedis(cfg.Redis)
 	defer usage.StopRedis()
 
+	moderator := contentmoderation.NewRequestModerator(contentmoderation.NewStore(usage.RuntimeDB()), contentmoderation.NewEvaluator(nil))
+	contentmoderation.SetRuntime(moderator)
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
 		WithCoreAuthHook(usage.NewAIAccountBindingHook()).
+		WithRequestModerator(moderator).
 		WithHooks(runtimeDataStackPostStartHooks(defaultRuntimeDataStackMaintenanceOps())).
 		WithLocalManagementPassword(localPassword)
 
@@ -85,10 +89,13 @@ func StartServiceBackground(cfg *config.Config, configPath string, localPassword
 	}
 	usage.InitRedis(cfg.Redis)
 
+	moderator := contentmoderation.NewRequestModerator(contentmoderation.NewStore(usage.RuntimeDB()), contentmoderation.NewEvaluator(nil))
+	contentmoderation.SetRuntime(moderator)
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
 		WithCoreAuthHook(usage.NewAIAccountBindingHook()).
+		WithRequestModerator(moderator).
 		WithHooks(runtimeDataStackPostStartHooks(defaultRuntimeDataStackMaintenanceOps())).
 		WithLocalManagementPassword(localPassword)
 
@@ -196,8 +203,10 @@ type runtimeDataStackMaintenanceOps struct {
 func defaultRuntimeDataStackMaintenanceOps() runtimeDataStackMaintenanceOps {
 	return runtimeDataStackMaintenanceOps{
 		runAIAccountSharedSubjectBackfill: func() error {
-			_, err := usage.RunAIAccountSharedSubjectBackfillAtInit()
-			return err
+			if _, err := usage.RunAIAccountSharedSubjectBackfillAtInit(); err != nil {
+				return err
+			}
+			return usage.RunAIAccountSubjectUsageTokensBackfillAtInit()
 		},
 		scheduleUsageRollupCatchup: usage.ScheduleUsageRollupBlueGreenCatchup,
 	}

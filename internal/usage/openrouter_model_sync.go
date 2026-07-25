@@ -749,7 +749,12 @@ func openRouterSyncExistingWrapperRows(tenantID, baseModelID string, model OpenR
 		if !exists {
 			continue
 		}
-		existing.OwnedBy = "cline"
+		switch {
+		case strings.HasPrefix(wrapperID, "cline-pass/"):
+			existing.OwnedBy = "cline"
+		case strings.HasPrefix(wrapperID, "ollama/"):
+			existing.OwnedBy = "ollama"
+		}
 		if description := openRouterModelDescription(model); description != "" && openRouterShouldSyncDescription(existing) {
 			existing.Description = description
 		}
@@ -766,7 +771,10 @@ func openRouterWrapperModelIDs(baseModelID string) []string {
 	if baseModelID == "" || strings.Contains(baseModelID, "/") {
 		return nil
 	}
-	return []string{"cline-pass/" + baseModelID}
+	return []string{
+		"cline-pass/" + baseModelID,
+		"ollama/" + baseModelID,
+	}
 }
 
 func openRouterStaticBaseModelRow(modelID string) (ModelConfigRow, bool) {

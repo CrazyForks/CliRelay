@@ -377,13 +377,32 @@ func TestSanitizeCodexResponsesRequestStripsHistoryDataURL(t *testing.T) {
 
 func TestStripCodexHistoryDataURLImagesDropsImageGenerationCallResult(t *testing.T) {
 	b64 := strings.Repeat("C", 400)
-	body := []byte(`{"input":[{"type":"image_generation_call","id":"ig_1","result":"` + b64 + `","status":"completed"}]}`)
+	body := []byte(`{"store":false,"input":[{"type":"image_generation_call","id":"ig_1","result":"` + b64 + `","status":"completed"}]}`)
 	out := stripCodexHistoryDataURLImages(body)
-	if gjson.GetBytes(out, "input.0.result").Exists() {
-		t.Fatalf("image_generation_call.result should be deleted; payload=%s", out)
+	for _, item := range gjson.GetBytes(out, "input").Array() {
+		if item.Get("result").Exists() {
+			t.Fatalf("image_generation_call.result should be deleted; payload=%s", out)
+		}
 	}
-	if got := gjson.GetBytes(out, "input.0.id").String(); got != "ig_1" {
-		t.Fatalf("id should remain, got %q", got)
+	if bytes.Contains(out, []byte(`"ig_1"`)) {
+		t.Fatalf("stored image_generation_call id should not be forwarded when store=false; payload=%s", out)
+	}
+	if got := gjson.GetBytes(out, "input.#").Int(); got != 0 {
+		t.Fatalf("image_generation_call without result should be dropped, got %d items; payload=%s", got, out)
+	}
+}
+
+func TestStripCodexHistoryDataURLImagesDropsImageGenerationCallReferenceOnlyItem(t *testing.T) {
+	body := []byte(`{"store":false,"input":[{"type":"image_generation_call","id":"ig_reference_only","status":"completed"},{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}]}`)
+	out := stripCodexHistoryDataURLImages(body)
+	if bytes.Contains(out, []byte(`"ig_reference_only"`)) {
+		t.Fatalf("reference-only image_generation_call should not be forwarded when store=false; payload=%s", out)
+	}
+	if got := gjson.GetBytes(out, "input.#").Int(); got != 1 {
+		t.Fatalf("input item count = %d, want 1; payload=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "input.0.content.0.text").String(); got != "continue" {
+		t.Fatalf("remaining user message changed: %q; payload=%s", got, out)
 	}
 }
 
@@ -391,14 +410,24 @@ func TestStripCodexHistoryDataURLImagesReattachesLastAsInputImage(t *testing.T) 
 	// Follow-up "描述一下" must still see pixels via structured input_image, not text base64.
 	b64 := strings.Repeat("D", 400)
 	body := []byte(`{
+		"store":false,
 		"model":"gpt-5.4",
 		"input":[
 			{"type":"message","role":"user","content":[{"type":"input_text","text":"画小鱼"}]},
+			{"type":"image_generation_call","id":"ig_previous","result":"` + b64 + `","status":"completed","output_format":"png"},
 			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"好了\n\n![generated image](data:image/png;base64,` + b64 + `)"}]},
 			{"type":"message","role":"user","content":[{"type":"input_text","text":"你画的是啥，详细描述"}]}
 		]
 	}`)
 	out := stripCodexHistoryDataURLImages(body)
+	if bytes.Contains(out, []byte(`"ig_previous"`)) {
+		t.Fatalf("stored image generation history should be removed; payload=%s", out)
+	}
+	for _, item := range gjson.GetBytes(out, "input").Array() {
+		if item.Get("result").Exists() {
+			t.Fatalf("stored image generation result should be removed; payload=%s", out)
+		}
+	}
 	asst := gjson.GetBytes(out, "input.1.content.0.text").String()
 	if strings.Contains(asst, "base64,") {
 		t.Fatalf("assistant text still has base64")

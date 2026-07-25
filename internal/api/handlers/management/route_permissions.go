@@ -157,6 +157,14 @@ func permissionForManagementRequest(method, path string) string {
 			return "models.write"
 		}
 		return "models.read"
+	case strings.HasPrefix(relative, "/content-moderation"):
+		if strings.HasSuffix(relative, "/test") {
+			return "content_moderation.test"
+		}
+		if write {
+			return "content_moderation.write"
+		}
+		return "content_moderation.read"
 	case strings.HasPrefix(relative, "/image-generation"):
 		if strings.Contains(relative, "/test") {
 			return "image_generation.test"

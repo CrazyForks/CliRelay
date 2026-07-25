@@ -47,6 +47,9 @@ func TestManagerUpdatePreservesRuntimeQuotaState(t *testing.T) {
 	if beforeState == nil || !beforeState.Quota.Exceeded {
 		t.Fatalf("test setup failed: expected model quota to be exceeded")
 	}
+	if beforeState.Quota.RecoveryRequired {
+		t.Fatal("ordinary 429 unexpectedly requires confirmed recovery")
+	}
 
 	updated, err := m.Update(ctx, &Auth{
 		ID:       "auth-1",

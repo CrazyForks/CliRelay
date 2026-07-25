@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -13,6 +15,7 @@ import (
 	managementauthfiles "github.com/router-for-me/CLIProxyAPI/v6/internal/management/authfiles"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	internalrouting "github.com/router-for-me/CLIProxyAPI/v6/internal/routing"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/openai"
@@ -224,6 +227,38 @@ func TestEnrichOpenAIModelsWithCatalogLeavesUnknownModels(t *testing.T) {
 	}
 	if _, hasDesc := models[0]["description"]; hasDesc {
 		t.Fatal("unexpected description for unknown model")
+	}
+}
+
+func TestEnrichOpenAIModelsWithCatalogInheritsPrefixedPricing(t *testing.T) {
+	usage.CloseDB()
+	if err := usage.InitDB(filepath.Join(t.TempDir(), "usage.db"), config.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("usage.InitDB() error = %v", err)
+	}
+	t.Cleanup(usage.CloseDB)
+
+	if err := usage.UpsertModelConfig(usage.ModelConfigRow{
+		ModelID:               "deepseek-v4-flash",
+		Enabled:               true,
+		PricingMode:           "token",
+		InputPricePerMillion:  0.3,
+		OutputPricePerMillion: 1.2,
+		Source:                "openrouter",
+	}); err != nil {
+		t.Fatalf("UpsertModelConfig() error = %v", err)
+	}
+
+	models := []map[string]interface{}{{
+		"id":     "ollama/deepseek-v4-flash",
+		"object": "model",
+	}}
+	enrichOpenAIModelsWithCatalog("", models)
+	pricing, ok := models[0]["pricing"].(map[string]any)
+	if !ok {
+		t.Fatalf("pricing = %#v, want inherited pricing map", models[0]["pricing"])
+	}
+	if pricing["input_price_per_million"] != 0.3 || pricing["output_price_per_million"] != 1.2 {
+		t.Fatalf("pricing = %#v, want input=0.3 output=1.2", pricing)
 	}
 }
 

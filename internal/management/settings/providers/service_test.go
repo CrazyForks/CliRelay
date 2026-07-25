@@ -685,3 +685,45 @@ func TestModelAccessProviderGetHidesStaleModelsWhenAllAccessDisabled(t *testing.
 func stringPtr(value string) *string {
 	return &value
 }
+
+func TestPatchProviderAPIKeyKeepsStableID(t *testing.T) {
+	cfg := &config.Config{}
+	svc := NewService(cfg, nil)
+	if err := svc.ReplaceGeminiKeys([]config.GeminiKey{{APIKey: "old-secret"}}); err != nil {
+		t.Fatalf("ReplaceGeminiKeys: %v", err)
+	}
+	id := cfg.GeminiKey[0].ID
+	rotated := "new-secret"
+	index := 0
+	if err := svc.PatchGeminiKey(&index, nil, GeminiKeyPatch{APIKey: &rotated}); err != nil {
+		t.Fatalf("PatchGeminiKey: %v", err)
+	}
+	if cfg.GeminiKey[0].ID != id {
+		t.Fatalf("stable ID changed after API key rotation: before=%q after=%q", id, cfg.GeminiKey[0].ID)
+	}
+}
+
+func TestReplaceOpenAICompatibilityPreservesMissingIDs(t *testing.T) {
+	cfg := &config.Config{}
+	svc := NewService(cfg, nil)
+	initial := []config.OpenAICompatibility{{
+		Name:    "compat",
+		BaseURL: "https://compat.example",
+		APIKeyEntries: []config.OpenAICompatibilityAPIKey{{
+			APIKey: "old-secret",
+		}},
+	}}
+	if err := svc.ReplaceOpenAICompatibility(initial); err != nil {
+		t.Fatalf("ReplaceOpenAICompatibility(initial): %v", err)
+	}
+	providerID := cfg.OpenAICompatibility[0].ID
+	keyID := cfg.OpenAICompatibility[0].APIKeyEntries[0].ID
+
+	initial[0].APIKeyEntries[0].APIKey = "new-secret"
+	if err := svc.ReplaceOpenAICompatibility(initial); err != nil {
+		t.Fatalf("ReplaceOpenAICompatibility(rotated): %v", err)
+	}
+	if cfg.OpenAICompatibility[0].ID != providerID || cfg.OpenAICompatibility[0].APIKeyEntries[0].ID != keyID {
+		t.Fatalf("IDs changed after legacy PUT rotation: provider=%q/%q key=%q/%q", providerID, cfg.OpenAICompatibility[0].ID, keyID, cfg.OpenAICompatibility[0].APIKeyEntries[0].ID)
+	}
+}

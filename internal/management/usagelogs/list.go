@@ -17,6 +17,7 @@ import (
 
 func (s *Service) ManagementLogs(input ManagementLogQueryInput) (map[string]any, error) {
 	maps := s.buildNameMaps()
+	apiKeys := expandManagementAPIKeyFilters(s.tenantID, input.APIKeys)
 	authSubjectIDs, authIndexes, channelNames, authIndexChannelNames := channelFilterSelectors(
 		input.Channels,
 		maps.channelNameMap,
@@ -34,7 +35,7 @@ func (s *Service) ManagementLogs(input ManagementLogQueryInput) (map[string]any,
 		Page:                  input.Page,
 		Size:                  input.Size,
 		Days:                  input.Days,
-		APIKeys:               input.APIKeys,
+		APIKeys:               apiKeys,
 		Models:                input.Models,
 		Statuses:              input.Statuses,
 		MatchNoAPIKeys:        input.MatchNoAPIKeys,
@@ -595,28 +596,21 @@ func enrichChannelFilterOptions(
 		return make([]usage.ChannelFilterOption, 0)
 	}
 
-	// Prefer one option per auth_subject_id. Fall back to auth_index for orphans.
+	// Prefer one option per live auth_subject_id. When multiple facet rows share
+	// one canonical auth_index but no live subject mapping, use the auth_index as
+	// the option identity so selecting it matches every historical subject row.
 	// Collapse pure name-only rows when the same label already has auth-backed options.
 	out := make([]usage.ChannelFilterOption, 0, len(options))
 	seenValue := make(map[string]struct{}, len(options))
 	authBackedLabels := make(map[string]struct{})
 
-	canonicalAuthIndex := func(authIndex string) string {
-		authIndex = strings.TrimSpace(authIndex)
-		if authIndex == "" {
-			return ""
-		}
-		if group := authIndexGroup[authIndex]; len(group) > 0 {
-			// buildNameMaps stores the live EnsureIndex() first.
-			return strings.TrimSpace(group[0])
-		}
-		return authIndex
-	}
 	resolveSubject := func(option usage.ChannelFilterOption, authIndex string) string {
-		if subjectID := strings.TrimSpace(option.AuthSubjectID); subjectID != "" {
+		// Live auth metadata is the canonical subject. Persisted request-log rows
+		// may still carry an older subject ID after the identity seed changes.
+		if subjectID := strings.TrimSpace(authSubjectByIndex[authIndex]); subjectID != "" {
 			return subjectID
 		}
-		if subjectID := strings.TrimSpace(authSubjectByIndex[authIndex]); subjectID != "" {
+		if subjectID := strings.TrimSpace(option.AuthSubjectID); subjectID != "" {
 			return subjectID
 		}
 		if value := strings.TrimSpace(option.Value); looksLikeAuthSubjectID(value) {
@@ -625,12 +619,14 @@ func enrichChannelFilterOptions(
 		return ""
 	}
 
+	facetIdentitiesByAuthIndex := channelFacetIdentitiesByAuthIndex(options, authIndexGroup)
+
 	for _, option := range options {
 		authIndex := strings.TrimSpace(option.AuthIndex)
 		if authIndex == "" && !looksLikeAuthSubjectID(option.Value) {
 			authIndex = strings.TrimSpace(option.Value)
 		}
-		authIndex = canonicalAuthIndex(authIndex)
+		authIndex = canonicalChannelAuthIndex(authIndex, authIndexGroup)
 		subjectID := resolveSubject(option, authIndex)
 		if subjectID != "" {
 			if meta, ok := authMetaBySubject[subjectID]; ok && meta.label != "" {
@@ -653,7 +649,7 @@ func enrichChannelFilterOptions(
 		if authIndex == "" && !looksLikeAuthSubjectID(option.Value) {
 			authIndex = strings.TrimSpace(option.Value)
 		}
-		authIndex = canonicalAuthIndex(authIndex)
+		authIndex = canonicalChannelAuthIndex(authIndex, authIndexGroup)
 		subjectID := resolveSubject(option, authIndex)
 
 		if label == "" && authIndex != "" {
@@ -682,6 +678,12 @@ func enrichChannelFilterOptions(
 		authType := strings.TrimSpace(option.AuthType)
 		value := strings.TrimSpace(option.Value)
 		hasLiveMeta := false
+
+		// Without a live canonical subject, a repeated canonical auth_index is the
+		// only selector that covers every historical subject produced by the facet.
+		if authIndex != "" && strings.TrimSpace(authSubjectByIndex[authIndex]) == "" && len(facetIdentitiesByAuthIndex[authIndex]) > 1 {
+			subjectID = ""
+		}
 
 		if subjectID != "" {
 			value = subjectID

@@ -55,16 +55,17 @@ func (a rollupAgg) toDashboardKPI() DashboardKPI {
 }
 
 type rollupFilter struct {
-	TenantID      string
-	BucketKind    string
-	BucketFrom    string // inclusive day/hour/minute key; empty = no lower bound
-	BucketTo      string // exclusive optional
-	APIKeyIDs     []string
-	EndUserID     string
-	AuthSubjectID string
-	Models        []string
-	Sources       []string
-	ChannelNames  []string
+	TenantID       string
+	BucketKind     string
+	BucketFrom     string // inclusive day/hour/minute key; empty = no lower bound
+	BucketTo       string // exclusive optional
+	APIKeyIDs      []string
+	EndUserID      string
+	AuthSubjectID  string
+	AuthSubjectIDs []string
+	Models         []string
+	Sources        []string
+	ChannelNames   []string
 }
 
 func queryRollupAgg(filter rollupFilter) (rollupAgg, error) {
@@ -115,9 +116,18 @@ func queryRollupAgg(filter rollupFilter) (rollupAgg, error) {
 		b.WriteString(` AND end_user_id = ?`)
 		args = append(args, eu)
 	}
+	subjects := append([]string{}, filter.AuthSubjectIDs...)
 	if sub := strings.TrimSpace(filter.AuthSubjectID); sub != "" {
+		subjects = append(subjects, sub)
+	}
+	if subjects = dedupeExactStrings(subjects); len(subjects) == 1 {
 		b.WriteString(` AND auth_subject_id = ?`)
-		args = append(args, sub)
+		args = append(args, subjects[0])
+	} else if len(subjects) > 1 {
+		b.WriteString(` AND auth_subject_id IN (` + placeholders(len(subjects)) + `)`)
+		for _, subject := range subjects {
+			args = append(args, subject)
+		}
 	}
 	if models := dedupeExactStrings(filter.Models); len(models) > 0 {
 		b.WriteString(` AND model IN (` + placeholders(len(models)) + `)`)
@@ -131,10 +141,10 @@ func queryRollupAgg(filter rollupFilter) (rollupAgg, error) {
 			args = append(args, s)
 		}
 	}
-	if channels := dedupeExactStrings(filter.ChannelNames); len(channels) > 0 {
-		b.WriteString(` AND channel_name IN (` + placeholders(len(channels)) + `)`)
-		for _, c := range channels {
-			args = append(args, c)
+	if channels := dedupeLowerTrimmedStrings(filter.ChannelNames); len(channels) > 0 {
+		b.WriteString(` AND lower(trim(channel_name)) IN (` + placeholders(len(channels)) + `)`)
+		for _, channel := range channels {
+			args = append(args, channel)
 		}
 	}
 
@@ -211,10 +221,8 @@ func rollupIdentityFilter(params LogQueryParams) (rollupFilter, bool) {
 	if tenantID == "" {
 		tenantID = systemTenantID
 	}
-	authSubjectID := ""
-	if len(params.AuthSubjectIDs) == 1 {
-		authSubjectID = strings.TrimSpace(params.AuthSubjectIDs[0])
-	}
+	authSubjectIDs := dedupeExactStrings(params.AuthSubjectIDs)
+	channelNames := dedupeLowerTrimmedStrings(params.ChannelNames)
 	keyIDs := resolveAPIKeyIDsForStats(params)
 	keysRequested := len(requestedAPIKeys(params)) > 0 || len(params.APIKeyIDs) > 0
 	endUserID := strings.TrimSpace(params.EndUserID)
@@ -222,27 +230,40 @@ func rollupIdentityFilter(params LogQueryParams) (rollupFilter, bool) {
 	if keysRequested && len(keyIDs) == 0 && endUserID == "" {
 		return rollupFilter{}, false
 	}
-	// Multi auth subjects are not modeled as OR on rollup yet; fail closed.
-	if len(params.AuthSubjectIDs) > 1 {
+	// A requested rollup-supported channel selector with no usable values must
+	// not widen to tenant-wide aggregates. Unsupported selectors use details.
+	if (len(params.AuthSubjectIDs) > 0 || len(params.ChannelNames) > 0) &&
+		len(authSubjectIDs) == 0 && len(channelNames) == 0 &&
+		len(params.AuthIndexes) == 0 && len(params.AuthIndexChannelNames) == 0 {
 		return rollupFilter{}, false
 	}
-	return rollupFilter{
-		TenantID:      tenantID,
-		BucketKind:    rollupBucketDay,
-		APIKeyIDs:     keyIDs,
-		EndUserID:     endUserID,
-		AuthSubjectID: authSubjectID,
-		Models:        params.Models,
-	}, true
+	filter := rollupFilter{
+		TenantID:       tenantID,
+		BucketKind:     rollupBucketDay,
+		APIKeyIDs:      keyIDs,
+		EndUserID:      endUserID,
+		AuthSubjectIDs: authSubjectIDs,
+		Models:         params.Models,
+		ChannelNames:   channelNames,
+	}
+	if len(authSubjectIDs) == 1 {
+		filter.AuthSubjectID = authSubjectIDs[0]
+		filter.AuthSubjectIDs = nil
+	}
+	return filter, true
 }
 
 func queryStatsFromRollup(params LogQueryParams) (LogStats, error) {
-	if params.Days < 1 {
-		params.Days = 7
-	}
 	filter, ok := rollupIdentityFilter(params)
 	if !ok {
 		return LogStats{CacheRate: 0}, nil
+	}
+	return queryStatsFromRollupFilter(params, filter)
+}
+
+func queryStatsFromRollupFilter(params LogQueryParams, filter rollupFilter) (LogStats, error) {
+	if params.Days < 1 {
+		params.Days = 7
 	}
 	filter.BucketFrom = dayBucketFromDays(params.Days)
 	agg, err := queryRollupAgg(filter)

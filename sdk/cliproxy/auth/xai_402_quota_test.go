@@ -35,6 +35,7 @@ func (e *retryAfterQuotaErrorStub) RetryAfter() *time.Duration {
 type xaiQuotaExecutor struct {
 	err     error
 	execute func(*Auth) (cliproxyexecutor.Response, error)
+	probe   func(context.Context, *Auth) (*QuotaProbeResult, error)
 }
 
 func (e *xaiQuotaExecutor) Identifier() string { return "xai" }
@@ -54,7 +55,10 @@ func (e *xaiQuotaExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.
 func (e *xaiQuotaExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
 	return nil, e.err
 }
-func (e *xaiQuotaExecutor) ProbeQuotaRecovery(context.Context, *Auth) (*QuotaProbeResult, error) {
+func (e *xaiQuotaExecutor) ProbeQuotaRecovery(ctx context.Context, auth *Auth) (*QuotaProbeResult, error) {
+	if e.probe != nil {
+		return e.probe(ctx, auth)
+	}
 	return &QuotaProbeResult{Recovered: false}, nil
 }
 
@@ -103,7 +107,7 @@ func TestManagerMarkResult_XAI402BalanceExhaustedUsesExplicitRetryAfter(t *testi
 	if state == nil {
 		t.Fatal("model state missing")
 	}
-	if !state.Quota.Exceeded || state.Quota.Reason != "quota" {
+	if !state.Quota.Exceeded || !state.Quota.RecoveryRequired || state.Quota.Reason != "quota" {
 		t.Fatalf("quota = %#v, want exceeded quota", state.Quota)
 	}
 	if state.Quota.Window != "week" || state.Quota.WindowMinutes != 10080 {
@@ -119,7 +123,7 @@ func TestManagerMarkResult_XAI402BalanceExhaustedUsesExplicitRetryAfter(t *testi
 	}
 }
 
-func TestManagerMarkResult_XAI402BalanceExhaustedWithoutRetryUsesDefaultCooldown(t *testing.T) {
+func TestManagerMarkResult_XAI402BalanceExhaustedWithoutRetryUsesRecoveryGate(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -165,16 +169,18 @@ func TestManagerMarkResult_XAI402BalanceExhaustedWithoutRetryUsesDefaultCooldown
 	if !state.Quota.Exceeded || state.Quota.Window != "week" {
 		t.Fatalf("quota = %#v, want week exceeded", state.Quota)
 	}
-	minExpected := before.Add(xaiWeekExhaustedDefaultCooldown - time.Minute)
-	maxExpected := before.Add(xaiWeekExhaustedDefaultCooldown + time.Minute)
-	if state.NextRetryAfter.Before(minExpected) || state.NextRetryAfter.After(maxExpected) {
-		t.Fatalf("NextRetryAfter = %v, want ~%v", state.NextRetryAfter, before.Add(xaiWeekExhaustedDefaultCooldown))
+	if !state.NextRetryAfter.IsZero() {
+		t.Fatalf("NextRetryAfter = %v, want zero without upstream reset", state.NextRetryAfter)
 	}
-	if !state.Quota.NextRecoverAt.Equal(state.NextRetryAfter) {
-		t.Fatalf("NextRecoverAt = %v, want %v", state.Quota.NextRecoverAt, state.NextRetryAfter)
+	if !state.Quota.NextRecoverAt.IsZero() {
+		t.Fatalf("NextRecoverAt = %v, want zero without upstream reset", state.Quota.NextRecoverAt)
 	}
-	if !got.Quota.Exceeded || got.Quota.NextRecoverAt.IsZero() {
-		t.Fatalf("aggregated auth quota = %#v, want exceeded with recovery time", got.Quota)
+	if !got.Quota.Exceeded || !got.Quota.RecoveryRequired {
+		t.Fatalf("aggregated auth quota = %#v, want confirmed-recovery gate", got.Quota)
+	}
+	blocked, _, _ := isAuthBlockedForModel(got, model, before.Add(7*time.Hour))
+	if !blocked {
+		t.Fatal("week-exhausted auth became selectable after the old 6h cooldown")
 	}
 }
 
@@ -229,15 +235,15 @@ func TestManagerExecute_XAIWeekExhaustedSkipsAuthForHealthyPeer(t *testing.T) {
 		t.Fatal("exhausted auth missing")
 	}
 	now := time.Now()
-	if !exhausted.Quota.Exceeded || !exhausted.Quota.NextRecoverAt.After(now.Add(time.Hour)) {
-		t.Fatalf("exhausted quota = %#v, want active long cooldown", exhausted.Quota)
+	if !exhausted.Quota.Exceeded || !exhausted.Quota.RecoveryRequired {
+		t.Fatalf("exhausted quota = %#v, want confirmed-recovery gate", exhausted.Quota)
 	}
-	if !manager.shouldProbeQuota(exhausted, now) {
-		t.Fatal("shouldProbeQuota() = false, want xAI cooldown eligible for recovery probe")
+	if !authHasActiveQuotaCooldown(exhausted, now) {
+		t.Fatal("authHasActiveQuotaCooldown() = false, want xAI gate eligible for recovery probes")
 	}
 	nextProbe := nextQuotaProbeTime(exhausted, now)
-	if !nextProbe.After(now) || !nextProbe.Before(exhausted.Quota.NextRecoverAt) {
-		t.Fatalf("nextQuotaProbeTime() = %v, want before cooldown recovery %v", nextProbe, exhausted.Quota.NextRecoverAt)
+	if !nextProbe.After(now) || nextProbe.After(now.Add(2*quotaProbeMinInterval)) {
+		t.Fatalf("nextQuotaProbeTime() = %v, want prompt follow-up probe", nextProbe)
 	}
 }
 
@@ -314,7 +320,7 @@ func TestApplyAuthFailureState_XAI402BalanceExhausted(t *testing.T) {
 	}
 }
 
-func TestApplyAuthFailureState_XAI402WithoutRetryUsesDefaultCooldown(t *testing.T) {
+func TestApplyAuthFailureState_XAI402WithoutRetryUsesRecoveryGate(t *testing.T) {
 	t.Parallel()
 
 	now := time.Unix(1_700_000_000, 0)
@@ -326,13 +332,125 @@ func TestApplyAuthFailureState_XAI402WithoutRetryUsesDefaultCooldown(t *testing.
 		QuotaWindowMinutes: 10080,
 	}, nil, now)
 
-	if !auth.Quota.Exceeded || auth.Quota.Window != "week" {
+	if !auth.Quota.Exceeded || !auth.Quota.RecoveryRequired || auth.Quota.Window != "week" {
 		t.Fatalf("quota = %#v, want week exceeded", auth.Quota)
 	}
-	if !auth.NextRetryAfter.Equal(now.Add(xaiWeekExhaustedDefaultCooldown)) {
-		t.Fatalf("NextRetryAfter = %v, want %v", auth.NextRetryAfter, now.Add(xaiWeekExhaustedDefaultCooldown))
+	if !auth.NextRetryAfter.IsZero() {
+		t.Fatalf("NextRetryAfter = %v, want zero without upstream reset", auth.NextRetryAfter)
 	}
-	if !auth.Quota.NextRecoverAt.Equal(auth.NextRetryAfter) {
-		t.Fatalf("NextRecoverAt = %v, want %v", auth.Quota.NextRecoverAt, auth.NextRetryAfter)
+	if !auth.Quota.NextRecoverAt.IsZero() {
+		t.Fatalf("NextRecoverAt = %v, want zero without upstream reset", auth.Quota.NextRecoverAt)
+	}
+}
+
+func TestManagerMarkResult_XAIWeekExhaustedProbesImmediately(t *testing.T) {
+	t.Parallel()
+
+	probed := make(chan struct{}, 1)
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	manager.RegisterExecutor(&xaiQuotaExecutor{
+		err: &retryAfterQuotaErrorStub{
+			message:      `{"error":"Grok Build usage balance exhausted"}`,
+			status:       http.StatusPaymentRequired,
+			quotaWindow:  "week",
+			quotaMinutes: 10080,
+		},
+		probe: func(context.Context, *Auth) (*QuotaProbeResult, error) {
+			probed <- struct{}{}
+			return &QuotaProbeResult{Recovered: false}, nil
+		},
+	})
+	if _, err := manager.Register(context.Background(), &Auth{ID: "xai-probe", Provider: "xai", Status: StatusActive}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	_, _ = manager.Execute(context.Background(), []string{"xai"}, cliproxyexecutor.Request{Model: "grok-4.5"}, cliproxyexecutor.Options{
+		Metadata: map[string]any{cliproxyexecutor.SinglePickMetadataKey: true},
+	})
+
+	select {
+	case <-probed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("billing recovery probe was not started after week-exhausted 402")
+	}
+}
+
+func TestManagerMarkResult_XAIWeekExhaustedProbePinsBillingReset(t *testing.T) {
+	t.Parallel()
+
+	resetAt := time.Now().Add(3 * time.Hour).Round(time.Second)
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	manager.RegisterExecutor(&xaiQuotaExecutor{
+		err: &retryAfterQuotaErrorStub{
+			message:      `{"error":"Grok Build usage balance exhausted"}`,
+			status:       http.StatusPaymentRequired,
+			quotaWindow:  "week",
+			quotaMinutes: 10080,
+		},
+		probe: func(context.Context, *Auth) (*QuotaProbeResult, error) {
+			return &QuotaProbeResult{
+				Recovered:       false,
+				WindowExhausted: true,
+				Window:          "week",
+				WindowMinutes:   10080,
+				NextRecoverAt:   resetAt,
+			}, nil
+		},
+	})
+	auth := &Auth{ID: "xai-reset", Provider: "xai", Status: StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	_, _ = manager.Execute(context.Background(), []string{"xai"}, cliproxyexecutor.Request{Model: "grok-4.5"}, cliproxyexecutor.Options{
+		Metadata: map[string]any{cliproxyexecutor.SinglePickMetadataKey: true},
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		got, _ := manager.GetByID(auth.ID)
+		if got != nil {
+			if state := got.ModelStates["grok-4.5"]; state != nil && state.Quota.NextRecoverAt.Equal(resetAt) {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	got, _ := manager.GetByID(auth.ID)
+	t.Fatalf("billing reset was not applied: %#v", got)
+}
+
+func TestManagerMarkResult_SuccessClearsWindowExhaustedGate(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "xai-success", Provider: "xai", Status: StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    "grok-4.5",
+		Error: &Error{
+			Message:            `{"error":"Grok Build usage balance exhausted"}`,
+			HTTPStatus:         http.StatusPaymentRequired,
+			QuotaWindow:        "week",
+			QuotaWindowMinutes: 10080,
+		},
+	})
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    "grok-4.5",
+		Success:  true,
+	})
+
+	got, _ := manager.GetByID(auth.ID)
+	if got.Quota.Exceeded || got.Quota.RecoveryRequired {
+		t.Fatalf("quota = %#v, want success-confirmed recovery", got.Quota)
+	}
+	if state := got.ModelStates["grok-4.5"]; state == nil || state.Quota.Exceeded || state.Unavailable {
+		t.Fatalf("model state = %#v, want recovered", state)
 	}
 }

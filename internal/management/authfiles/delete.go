@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
@@ -13,11 +14,12 @@ import (
 var ErrAuthFileNotFound = errors.New("auth file not found")
 
 type DeleteService struct {
-	AuthDir        string
-	TenantID       string
-	Manager        *coreauth.Manager
-	Repository     Repository
-	RemoveChannels func([]string) error
+	AuthDir            string
+	TenantID           string
+	Manager            *coreauth.Manager
+	Repository         Repository
+	RemoveChannels     func([]string) error
+	RemoveAuthBindings func([]string) error
 }
 
 type DeleteResult struct {
@@ -101,11 +103,15 @@ func (s DeleteService) DeleteOne(ctx context.Context, name string) (DeleteResult
 	}
 
 	deletedChannels := DeletedChannelIdentifiers(target)
+	deletedAuthIDs := deletedAuthBindingIdentifiers(target)
 	if target != nil && s.Manager != nil {
 		_, _ = s.Manager.Delete(coreauth.WithSkipPersist(ctx), target.ID)
 	}
 	result := DeleteResult{Deleted: 1}
-	if errCleanup := s.removeChannelReferences(deletedChannels); errCleanup != nil {
+	if errCleanup := errors.Join(
+		s.removeChannelReferences(deletedChannels),
+		s.removeAuthBindingReferences(deletedAuthIDs),
+	); errCleanup != nil {
 		// The credential is already durably deleted. Preserve that outcome so the
 		// caller can remove stale UI state while surfacing the cleanup warning.
 		return result, fmt.Errorf("auth file deleted but channel reference cleanup failed: %w", errCleanup)
@@ -113,9 +119,29 @@ func (s DeleteService) DeleteOne(ctx context.Context, name string) (DeleteResult
 	return result, nil
 }
 
+func deletedAuthBindingIdentifiers(auth *coreauth.Auth) []string {
+	if auth == nil {
+		return nil
+	}
+	if parent := strings.TrimSpace(Attribute(auth, "gemini_virtual_parent")); parent != "" {
+		return []string{parent}
+	}
+	if id := strings.TrimSpace(auth.ID); id != "" {
+		return []string{id}
+	}
+	return nil
+}
+
 func (s DeleteService) removeChannelReferences(channels []string) error {
 	if len(channels) == 0 || s.RemoveChannels == nil {
 		return nil
 	}
 	return s.RemoveChannels(channels)
+}
+
+func (s DeleteService) removeAuthBindingReferences(authIDs []string) error {
+	if len(authIDs) == 0 || s.RemoveAuthBindings == nil {
+		return nil
+	}
+	return s.RemoveAuthBindings(authIDs)
 }

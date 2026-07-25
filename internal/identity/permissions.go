@@ -48,6 +48,9 @@ var PermissionCatalog = []PermissionSeed{
 	{Code: "request_logs.read", Name: "Read request logs", Scope: "tenant", Resource: "request_logs", Action: "read"},
 	{Code: "request_logs.content.read", Name: "Read request content", Scope: "tenant", Resource: "request_logs", Action: "read_content", Sensitive: true},
 	{Code: "request_logs.delete", Name: "Delete request logs", Scope: "tenant", Resource: "request_logs", Action: "delete", Sensitive: true},
+	{Code: "content_moderation.read", Name: "Read content moderation", Scope: "tenant", Resource: "content_moderation", Action: "read"},
+	{Code: "content_moderation.write", Name: "Write content moderation", Scope: "tenant", Resource: "content_moderation", Action: "write", Sensitive: true},
+	{Code: "content_moderation.test", Name: "Test content moderation", Scope: "tenant", Resource: "content_moderation", Action: "test", Sensitive: true},
 	{Code: "providers.read", Name: "Read providers", Scope: "tenant", Resource: "providers", Action: "read"},
 	{Code: "providers.write", Name: "Write providers", Scope: "tenant", Resource: "providers", Action: "write", Sensitive: true},
 	{Code: "providers.test", Name: "Test providers", Scope: "tenant", Resource: "providers", Action: "test", Sensitive: true},
@@ -98,6 +101,8 @@ func menuCodeForPermission(permission PermissionSeed) string {
 		return "runtime.monitor"
 	case "request_logs":
 		return "runtime.request-logs"
+	case "content_moderation":
+		return ContentModerationMenuCode
 	case "providers":
 		return "access.providers"
 	case "auth_files":

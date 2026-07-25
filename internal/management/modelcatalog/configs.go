@@ -18,9 +18,14 @@ var ErrAuthGroupRequired = errors.New("auth group is required")
 // - Responsibility: CRUD and response shaping for stored model catalog settings.
 func (s *Service) ListModelConfigs(scope string) map[string]any {
 	rows := modelconfigsettings.ListConfigsForTenant(s.tenantID, scope)
+	configByID, pricingByID := pricingLookupMapsForTenant(s.tenantID)
 	items := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
-		items = append(items, modelConfigResponse(row))
+		pricing := row
+		if resolved, ok := usage.ResolveModelPricingRow(row.ModelID, configByID, pricingByID); ok {
+			pricing = resolved
+		}
+		items = append(items, modelConfigResponse(row, pricing))
 	}
 	return map[string]any{"object": "list", "data": items}
 }
@@ -55,7 +60,12 @@ func (s *Service) UpsertModelConfig(payload ModelConfigPayload, originalID, scop
 		}
 		return nil, err
 	}
-	return modelConfigResponse(saved), nil
+	pricing := saved
+	configByID, pricingByID := pricingLookupMapsForTenant(s.tenantID)
+	if resolved, ok := usage.ResolveModelPricingRow(saved.ModelID, configByID, pricingByID); ok {
+		pricing = resolved
+	}
+	return modelConfigResponse(saved, pricing), nil
 }
 
 func (s *Service) DeleteModelConfig(modelID string) error {

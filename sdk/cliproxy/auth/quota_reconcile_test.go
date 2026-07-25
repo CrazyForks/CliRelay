@@ -61,9 +61,10 @@ func TestManagerReconcileQuota_ClearsRecoveredModelCooldown(t *testing.T) {
 		Status:      StatusError,
 		Unavailable: true,
 		Quota: QuotaState{
-			Exceeded:      true,
-			Reason:        "quota",
-			NextRecoverAt: next,
+			Exceeded:         true,
+			RecoveryRequired: true,
+			Reason:           "quota",
+			NextRecoverAt:    next,
 		},
 		ModelStates: map[string]*ModelState{
 			"gpt-5-codex": {
@@ -73,9 +74,10 @@ func TestManagerReconcileQuota_ClearsRecoveredModelCooldown(t *testing.T) {
 				NextRetryAfter: next,
 				LastError:      &Error{Message: "quota exhausted", HTTPStatus: http.StatusTooManyRequests},
 				Quota: QuotaState{
-					Exceeded:      true,
-					Reason:        "quota",
-					NextRecoverAt: next,
+					Exceeded:         true,
+					RecoveryRequired: true,
+					Reason:           "quota",
+					NextRecoverAt:    next,
 				},
 			},
 		},
@@ -117,6 +119,54 @@ func TestManagerReconcileQuota_ClearsRecoveredModelCooldown(t *testing.T) {
 	}
 	if updated.Status != StatusActive {
 		t.Fatalf("auth.Status = %q, want %q", updated.Status, StatusActive)
+	}
+}
+
+func TestApplyQuotaProbeResult_NotRecoveredWithoutResetKeepsWindowGate(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	auth := &Auth{
+		ID:          "xai-auth",
+		Provider:    "xai",
+		Status:      StatusError,
+		Unavailable: true,
+		Quota: QuotaState{
+			Exceeded:         true,
+			RecoveryRequired: true,
+			Reason:           "quota",
+			Window:           "week",
+			WindowMinutes:    10080,
+			NextRecoverAt:    now.Add(-time.Hour),
+		},
+		NextRetryAfter: now.Add(-time.Hour),
+		ModelStates: map[string]*ModelState{
+			"grok-4.5": {
+				Status:         StatusError,
+				Unavailable:    true,
+				NextRetryAfter: now.Add(-time.Hour),
+				Quota: QuotaState{
+					Exceeded:         true,
+					RecoveryRequired: true,
+					Reason:           "quota",
+					Window:           "week",
+					WindowMinutes:    10080,
+					NextRecoverAt:    now.Add(-time.Hour),
+				},
+			},
+		},
+	}
+
+	applyQuotaProbeResult(auth, &QuotaProbeResult{Recovered: false}, now)
+	blocked, _, _ := isAuthBlockedForModel(auth, "grok-4.5", now)
+	if !blocked {
+		t.Fatal("not-recovered zero-reset probe released the credential")
+	}
+	if !authHasActiveQuotaCooldown(auth, now) {
+		t.Fatal("window gate no longer schedules recovery probes")
+	}
+	if next := nextQuotaProbeTime(auth, now); !next.After(now) || next.After(now.Add(2*quotaProbeMinInterval)) {
+		t.Fatalf("nextQuotaProbeTime() = %v, want prompt follow-up probe", next)
 	}
 }
 

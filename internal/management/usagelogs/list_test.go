@@ -3,14 +3,107 @@ package usagelogs
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
+
+func TestManagementLogsExpandsOwnedAPIKeyFilterIncludingSoftDeletedKeys(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.db")
+	if err := usage.InitDB(dbPath, config.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	t.Cleanup(usage.CloseDB)
+
+	tenantID := "00000000-0000-0000-0000-0000000000ac"
+	endUserID := "00000000-0000-0000-0000-0000000000bd"
+	now := time.Now().UTC().Format(time.RFC3339)
+	rows := []usage.APIKeyRow{
+		{TenantID: tenantID, ID: "00000000-0000-0000-0000-0000000000a2", Key: "sk-owned-log-a", Name: "Laptop", EndUserID: endUserID, CreatedAt: now, UpdatedAt: now},
+		{TenantID: tenantID, ID: "00000000-0000-0000-0000-0000000000b2", Key: "sk-owned-log-b", Name: "Automation", EndUserID: endUserID, IsDefault: true, CreatedAt: now, UpdatedAt: now},
+		{TenantID: tenantID, ID: "00000000-0000-0000-0000-0000000000c2", Key: "sk-standalone", Name: "Standalone", CreatedAt: now, UpdatedAt: now},
+	}
+	for _, row := range rows {
+		if err := usage.UpsertAPIKeyForTenant(tenantID, row); err != nil {
+			t.Fatalf("UpsertAPIKeyForTenant(%s): %v", row.Key, err)
+		}
+	}
+
+	logTime := time.Now().UTC()
+	usage.InsertLog("sk-owned-log-a", "Laptop", "gpt-test", "test", "channel", "auth-owned", false, logTime, 1, 0, usage.TokenStats{TotalTokens: 1}, "", "")
+	usage.InsertLog("sk-owned-log-a", "Laptop", "gpt-test", "test", "channel", "auth-owned", false, logTime.Add(time.Second), 1, 0, usage.TokenStats{TotalTokens: 1}, "", "")
+	usage.InsertLog("sk-standalone", "Standalone", "gpt-test", "test", "channel", "auth-standalone", false, logTime, 1, 0, usage.TokenStats{TotalTokens: 1}, "", "")
+	if err := usage.DeleteAPIKeyByIDForTenant(tenantID, rows[0].ID); err != nil {
+		t.Fatalf("DeleteAPIKeyByIDForTenant(%s): %v", rows[0].ID, err)
+	}
+
+	expanded := expandManagementAPIKeyFilters(tenantID, []string{
+		" sk-owned-log-b ", "sk-owned-log-b", " __system__ ", "__system__",
+	})
+	hasTombstone := false
+	for _, key := range expanded {
+		if strings.HasPrefix(key, "sk-deleted-") {
+			hasTombstone = true
+			break
+		}
+	}
+	if len(expanded) != 3 || !hasTombstone ||
+		!slices.Contains(expanded, "sk-owned-log-b") || !slices.Contains(expanded, "__system__") {
+		t.Fatalf("expanded filters = %#v, want active, soft-deleted, and system selectors", expanded)
+	}
+
+	service := NewForTenant(tenantID, &config.Config{}, nil)
+	unfiltered, err := service.ManagementLogs(ManagementLogQueryInput{Days: 1, Page: 1, Size: 50})
+	if err != nil {
+		t.Fatalf("ManagementLogs(unfiltered): %v", err)
+	}
+	filters := unfiltered["filters"].(usage.FilterOptions)
+	if !slices.Contains(filters.APIKeys, "sk-owned-log-b") {
+		t.Fatalf("filters.APIKeys = %#v, want representative sk-owned-log-b", filters.APIKeys)
+	}
+	if filters.APIKeyCounts["sk-owned-log-b"] != 2 {
+		t.Fatalf("filters.APIKeyCounts[sk-owned-log-b] = %d, want 2 account requests", filters.APIKeyCounts["sk-owned-log-b"])
+	}
+
+	owned, err := service.ManagementLogs(ManagementLogQueryInput{
+		Days: 1, Page: 1, Size: 50, APIKeys: []string{"sk-owned-log-b"},
+	})
+	if err != nil {
+		t.Fatalf("ManagementLogs(owned representative): %v", err)
+	}
+	if total := owned["total"].(int64); total != 2 {
+		t.Fatalf("owned total = %d, want 2 account requests", total)
+	}
+	ownedItems := owned["items"].([]usage.LogRow)
+	if len(ownedItems) != 2 || ownedItems[0].APIKey != "sk-owned-log-a" || ownedItems[1].APIKey != "sk-owned-log-a" {
+		t.Fatalf("owned items = %#v, want two sk-owned-log-a requests", ownedItems)
+	}
+	if stats := owned["stats"].(usage.LogStats); stats.Total != 2 {
+		t.Fatalf("owned stats total = %d, want 2", stats.Total)
+	}
+
+	standalone, err := service.ManagementLogs(ManagementLogQueryInput{
+		Days: 1, Page: 1, Size: 50, APIKeys: []string{"sk-standalone"},
+	})
+	if err != nil {
+		t.Fatalf("ManagementLogs(standalone): %v", err)
+	}
+	if total := standalone["total"].(int64); total != 1 {
+		t.Fatalf("standalone total = %d, want 1", total)
+	}
+	standaloneItems := standalone["items"].([]usage.LogRow)
+	if len(standaloneItems) != 1 || standaloneItems[0].APIKey != "sk-standalone" {
+		t.Fatalf("standalone items = %#v, want only sk-standalone", standaloneItems)
+	}
+}
 
 func TestLooksLikeAuthIndex(t *testing.T) {
 	t.Parallel()
@@ -481,6 +574,85 @@ func TestEnrichChannelFilterOptionsCollapsesByAuthSubject(t *testing.T) {
 	}
 	if xai.Provider != "xai" {
 		t.Fatalf("xai provider = %q, want xai", xai.Provider)
+	}
+}
+
+func TestEnrichChannelFilterOptionsCollapsesHistoricalSubjectRekeyByAuthIndex(t *testing.T) {
+	t.Parallel()
+
+	authIndex := "14c5636b41002b25"
+	oldSubject := "authsub_1111111111111111"
+	currentSubject := "authsub_2222222222222222"
+	label := "account@example.com"
+
+	options := []usage.ChannelFilterOption{
+		{Value: oldSubject, Label: label, AuthIndex: authIndex, AuthSubjectID: oldSubject},
+		{Value: currentSubject, Label: label, AuthIndex: authIndex, AuthSubjectID: currentSubject},
+	}
+	authMeta := authChannelMeta{label: label, provider: "codex", authType: "oauth"}
+
+	got := enrichChannelFilterOptions(
+		options,
+		nil,
+		map[string]string{authIndex: label},
+		map[string]authChannelMeta{authIndex: authMeta},
+		nil,
+		map[string]string{authIndex: currentSubject},
+		map[string]authChannelMeta{currentSubject: authMeta},
+	)
+	if len(got) != 1 {
+		t.Fatalf("options = %#v, want one current-subject option", got)
+	}
+	if got[0].Value != currentSubject || got[0].AuthSubjectID != currentSubject || got[0].AuthIndex != authIndex {
+		t.Fatalf("option = %#v, want current subject %q with auth index %q", got[0], currentSubject, authIndex)
+	}
+}
+
+func TestEnrichChannelFilterOptionsCollapsesHistoricalSubjectsByAuthIndexWithoutLiveMap(t *testing.T) {
+	t.Parallel()
+
+	authIndex := "14c5636b41002b25"
+	oldSubject := "authsub_4ca6f5185e367ab2"
+	newSubject := "authsub_9ebad60f7efd0b3c"
+	label := "GinofkFerraiuolo@hotmail.com"
+
+	options := []usage.ChannelFilterOption{
+		{Value: oldSubject, Label: label, AuthIndex: authIndex, AuthSubjectID: oldSubject},
+		{Value: newSubject, Label: label, AuthIndex: authIndex, AuthSubjectID: newSubject},
+	}
+
+	// The production hole has no live auth_index -> subject alias to choose a
+	// canonical subject. The shared auth_index must therefore become the stable
+	// option value so the next request matches both historical subject rows.
+	got := enrichChannelFilterOptions(options, nil, nil, nil, nil, nil, nil)
+	if len(got) != 1 {
+		t.Fatalf("options = %#v, want one auth-index option", got)
+	}
+	if got[0].Value != authIndex || got[0].AuthIndex != authIndex || got[0].AuthSubjectID != "" {
+		t.Fatalf("option = %#v, want auth index %q without a non-canonical subject", got[0], authIndex)
+	}
+
+	subjects, authIndexes, channelNames, _ := channelFilterSelectors(
+		[]string{got[0].Value},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	if len(subjects) != 0 || len(channelNames) != 0 {
+		t.Fatalf("subjects = %#v, channelNames = %#v, want auth-index-only filter", subjects, channelNames)
+	}
+	if !reflect.DeepEqual(authIndexes, []string{authIndex}) {
+		t.Fatalf("authIndexes = %#v, want [%s]", authIndexes, authIndex)
+	}
+	for _, row := range options {
+		if row.AuthIndex != authIndexes[0] {
+			t.Fatalf("historical subject %s was not covered by auth index %s", row.AuthSubjectID, authIndexes[0])
+		}
 	}
 }
 

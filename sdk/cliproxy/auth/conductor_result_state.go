@@ -42,6 +42,7 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 	quotaRecover := time.Time{}
 	quotaWindow := ""
 	quotaWindowMinutes := 0
+	quotaRecoveryRequired := false
 	maxBackoffLevel := 0
 	for _, state := range auth.ModelStates {
 		if state == nil {
@@ -50,6 +51,12 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 		stateUnavailable := false
 		if state.Status == StatusDisabled {
 			stateUnavailable = true
+		} else if quotaNeedsConfirmedRecovery(state.Quota) {
+			stateUnavailable = true
+			state.Unavailable = true
+			if state.NextRetryAfter.After(now) && (earliestRetry.IsZero() || state.NextRetryAfter.Before(earliestRetry)) {
+				earliestRetry = state.NextRetryAfter
+			}
 		} else if state.Unavailable {
 			if state.NextRetryAfter.IsZero() {
 				stateUnavailable = false
@@ -68,6 +75,7 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 		}
 		if state.Quota.Exceeded {
 			quotaExceeded = true
+			quotaRecoveryRequired = quotaRecoveryRequired || state.Quota.RecoveryRequired
 			if quotaRecover.IsZero() || (!state.Quota.NextRecoverAt.IsZero() && state.Quota.NextRecoverAt.Before(quotaRecover)) {
 				quotaRecover = state.Quota.NextRecoverAt
 				quotaWindow = state.Quota.Window
@@ -89,6 +97,7 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 	}
 	if quotaExceeded {
 		auth.Quota.Exceeded = true
+		auth.Quota.RecoveryRequired = quotaRecoveryRequired
 		auth.Quota.Reason = "quota"
 		auth.Quota.Window = quotaWindow
 		auth.Quota.WindowMinutes = quotaWindowMinutes
@@ -96,6 +105,7 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 		auth.Quota.BackoffLevel = maxBackoffLevel
 	} else {
 		auth.Quota.Exceeded = false
+		auth.Quota.RecoveryRequired = false
 		auth.Quota.Reason = ""
 		auth.Quota.Window = ""
 		auth.Quota.WindowMinutes = 0
@@ -122,10 +132,17 @@ func activeQuotaCooldown(quota QuotaState, retryAfter time.Time, now time.Time) 
 	if !quota.Exceeded {
 		return false
 	}
+	if quotaNeedsConfirmedRecovery(quota) {
+		return true
+	}
 	if !quota.NextRecoverAt.IsZero() {
 		return quota.NextRecoverAt.After(now)
 	}
 	return !retryAfter.IsZero() && retryAfter.After(now)
+}
+
+func quotaNeedsConfirmedRecovery(quota QuotaState) bool {
+	return quota.Exceeded && quota.RecoveryRequired
 }
 
 func activeModelRuntimeState(state *ModelState, now time.Time) bool {
@@ -172,7 +189,7 @@ func hasModelError(auth *Auth, now time.Time) bool {
 			return true
 		}
 		if state.Status == StatusError {
-			if state.Unavailable && (state.NextRetryAfter.IsZero() || state.NextRetryAfter.After(now)) {
+			if quotaNeedsConfirmedRecovery(state.Quota) || (state.Unavailable && (state.NextRetryAfter.IsZero() || state.NextRetryAfter.After(now))) {
 				return true
 			}
 		}
@@ -188,6 +205,7 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 	auth.Status = StatusActive
 	auth.StatusMessage = ""
 	auth.Quota.Exceeded = false
+	auth.Quota.RecoveryRequired = false
 	auth.Quota.Reason = ""
 	auth.Quota.Window = ""
 	auth.Quota.WindowMinutes = 0

@@ -26,7 +26,7 @@ func TestRegisterManagementRouteTable(t *testing.T) {
 		routes[key] = route
 	}
 
-	if got, want := len(routes), 296; got != want {
+	if got, want := len(routes), 305; got != want {
 		t.Fatalf("route count = %d, want %d", got, want)
 	}
 	if got, want := sortedRouteKeys(routes), expectedManagementRoutes(); !slices.Equal(got, want) {
@@ -34,6 +34,15 @@ func TestRegisterManagementRouteTable(t *testing.T) {
 	}
 
 	required := []string{
+		"GET /v0/management/content-moderation/metrics",
+		"GET /v0/management/content-moderation/profiles",
+		"POST /v0/management/content-moderation/profiles",
+		"GET /v0/management/content-moderation/profiles/:id",
+		"PATCH /v0/management/content-moderation/profiles/:id",
+		"DELETE /v0/management/content-moderation/profiles/:id",
+		"POST /v0/management/content-moderation/profiles/:id/test",
+		"GET /v0/management/content-moderation/channels",
+		"PATCH /v0/management/content-moderation/channel-bindings",
 		"GET /v0/management/dashboard-summary",
 		"GET /v0/management/system-stats/ws",
 		"GET /v0/management/model-configs",
@@ -244,6 +253,7 @@ func expectedManagementRoutes() []string {
 		"DELETE /v0/management/claude-api-key",
 		"DELETE /v0/management/cline-api-key",
 		"DELETE /v0/management/codex-api-key",
+		"DELETE /v0/management/content-moderation/profiles/:id",
 		"DELETE /v0/management/gemini-api-key",
 		"DELETE /v0/management/identity-fingerprint/account/profile",
 		"DELETE /v0/management/identity-fingerprint/learned",
@@ -289,6 +299,10 @@ func expectedManagementRoutes() []string {
 		"GET /v0/management/codex-oauth-admission",
 		"GET /v0/management/config",
 		"GET /v0/management/config.yaml",
+		"GET /v0/management/content-moderation/channels",
+		"GET /v0/management/content-moderation/metrics",
+		"GET /v0/management/content-moderation/profiles",
+		"GET /v0/management/content-moderation/profiles/:id",
 		"GET /v0/management/dashboard-summary",
 		"GET /v0/management/debug",
 		"GET /v0/management/error-logs-max-files",
@@ -378,6 +392,8 @@ func expectedManagementRoutes() []string {
 		"PATCH /v0/management/claude-api-key",
 		"PATCH /v0/management/cline-api-key",
 		"PATCH /v0/management/codex-api-key",
+		"PATCH /v0/management/content-moderation/channel-bindings",
+		"PATCH /v0/management/content-moderation/profiles/:id",
 		"PATCH /v0/management/debug",
 		"PATCH /v0/management/error-logs-max-files",
 		"PATCH /v0/management/force-model-prefix",
@@ -402,6 +418,8 @@ func expectedManagementRoutes() []string {
 		"PATCH /v0/management/vertex-api-key",
 		"PATCH /v0/management/ws-auth",
 		"POST /v0/management/api-call",
+		"POST /v0/management/content-moderation/profiles",
+		"POST /v0/management/content-moderation/profiles/:id/test",
 		"POST /v0/management/api-key-entries/daily-spending/reset",
 		"POST /v0/management/auth-files",
 		"POST /v0/management/iflow-auth-url",

@@ -705,6 +705,35 @@ func TestIsAuthBlockedForModel_AuthQuotaCooldownBlocksAllModels(t *testing.T) {
 	}
 }
 
+func TestIsAuthBlockedForModel_WindowExhaustedRemainsBlockedAfterRecoverAt(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	auth := &Auth{
+		ID: "xai-week-exhausted",
+		Quota: QuotaState{
+			Exceeded:         true,
+			RecoveryRequired: true,
+			Reason:           "quota",
+			Window:           "week",
+			WindowMinutes:    10080,
+			NextRecoverAt:    now.Add(-time.Hour),
+		},
+		NextRetryAfter: now.Add(-time.Hour),
+	}
+
+	blocked, reason, next := isAuthBlockedForModel(auth, "grok-4.5", now)
+	if !blocked {
+		t.Fatal("blocked = false, want true until recovery is confirmed")
+	}
+	if reason != blockReasonCooldown {
+		t.Fatalf("reason = %v, want %v", reason, blockReasonCooldown)
+	}
+	if !next.IsZero() {
+		t.Fatalf("next = %v, want zero for an expired unconfirmed reset", next)
+	}
+}
+
 func TestFillFirstSelectorPick_ThinkingSuffixFallsBackToBaseModelState(t *testing.T) {
 	t.Parallel()
 
