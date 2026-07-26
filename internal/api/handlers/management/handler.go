@@ -28,25 +28,12 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-type attemptInfo struct {
-	count        int
-	blockedUntil time.Time
-	lastActivity time.Time // track last activity for cleanup
-}
-
-// attemptCleanupInterval controls how often stale IP entries are purged
-const attemptCleanupInterval = 1 * time.Hour
-
-// attemptMaxIdleTime controls how long an IP can be idle before cleanup
-const attemptMaxIdleTime = 2 * time.Hour
-
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
 	cfg                  *config.Config
 	configFilePath       string
 	mu                   sync.Mutex
-	attemptsMu           sync.Mutex
-	failedAttempts       map[string]*attemptInfo // keyed by client IP
+	loginThrottle        *loginThrottle
 	authManager          *coreauth.Manager
 	usageStats           *usage.RequestStatistics
 	tokenStore           coreauth.Store
@@ -58,8 +45,6 @@ type Handler struct {
 	onConfigMutated      func(*config.Config)
 	onModelConfigMutated func()
 	startTime            time.Time
-	attemptCleanupStop   chan struct{}
-	attemptCleanupOnce   sync.Once
 	accessManager        *sdkaccess.Manager
 	trendCacheMu         sync.Mutex
 	trendCache           map[string]trendCacheEntry
@@ -83,18 +68,16 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 	h := &Handler{
 		cfg:                 cfg,
 		configFilePath:      configFilePath,
-		failedAttempts:      make(map[string]*attemptInfo),
+		loginThrottle:       newLoginThrottle(),
 		authManager:         manager,
 		usageStats:          usage.GetRequestStatistics(),
 		tokenStore:          sdkAuth.GetTokenStore(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
 		startTime:           time.Now(),
-		attemptCleanupStop:  make(chan struct{}),
 		trendCache:          make(map[string]trendCacheEntry),
 	}
 	h.imageGeneration = h.newImageGenerationService()
-	h.startAttemptCleanup()
 	return h
 }
 
@@ -119,49 +102,12 @@ func (h *Handler) ensureImageGenerationService() *imagegeneration.Service {
 	return h.imageGeneration
 }
 
-// startAttemptCleanup launches a background goroutine that periodically
-// removes stale IP entries from failedAttempts to prevent memory leaks.
-func (h *Handler) startAttemptCleanup() {
-	go func() {
-		ticker := time.NewTicker(attemptCleanupInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				h.purgeStaleAttempts()
-			case <-h.attemptCleanupStop:
-				return
-			}
-		}
-	}()
-}
-
 // Close stops background cleanup workers owned by the management handler.
 func (h *Handler) Close() {
 	if h == nil {
 		return
 	}
-	h.attemptCleanupOnce.Do(func() {
-		close(h.attemptCleanupStop)
-	})
-}
-
-// purgeStaleAttempts removes IP entries that have been idle beyond attemptMaxIdleTime
-// and whose ban (if any) has expired.
-func (h *Handler) purgeStaleAttempts() {
-	now := time.Now()
-	h.attemptsMu.Lock()
-	defer h.attemptsMu.Unlock()
-	for ip, ai := range h.failedAttempts {
-		// Skip if still banned
-		if !ai.blockedUntil.IsZero() && now.Before(ai.blockedUntil) {
-			continue
-		}
-		// Remove if idle too long
-		if now.Sub(ai.lastActivity) > attemptMaxIdleTime {
-			delete(h.failedAttempts, ip)
-		}
-	}
+	h.loginThrottle.close()
 }
 
 // NewHandler creates a new management handler instance.
@@ -230,8 +176,6 @@ func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) {
 // All requests (local and remote) require a valid management key.
 // Additionally, remote access requires allow-remote-management=true.
 func (h *Handler) Middleware() gin.HandlerFunc {
-	const maxFailures = 5
-	const banDuration = 30 * time.Minute
 
 	return func(c *gin.Context) {
 		c.Header("X-CPA-VERSION", buildinfo.Version)
@@ -251,7 +195,13 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		}
 
 		clientIP := c.ClientIP()
-		localClient := clientIP == "127.0.0.1" || clientIP == "::1"
+		// A loopback ClientIP alone does not prove local origin. With trusted-proxies
+		// unset (the default) gin falls back to RemoteAddr, so behind a same-host
+		// reverse proxy every external request would report 127.0.0.1 and thereby skip
+		// the allow-remote gate, unlock the local-password path, and bypass the per-IP
+		// login throttle entirely. Require the direct peer to be loopback and no relay
+		// headers to be present as well.
+		localClient := (clientIP == "127.0.0.1" || clientIP == "::1") && util.IsLocalOriginRequest(c.Request)
 		cfg := h.cfg
 		var (
 			allowRemote bool
@@ -271,50 +221,34 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		clearFailures := func() {}
 		if !localClient {
 			if !allowRemote {
-				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "remote management disabled"})
+				// Requests relayed by a local reverse proxy land here even though the TCP
+				// peer is loopback. allow-remote is the only advice that actually grants
+				// access: a relayed request is never treated as local, so trusted-proxies
+				// does not help on its own — it recovers the real client IP for the per-IP
+				// throttle, which is why it is named as an additional step rather than an
+				// alternative.
+				message := "remote management disabled"
+				if relayHeader := util.RelayIndicationHeader(c.Request); relayHeader != "" {
+					message = "remote management disabled: request was relayed (" + relayHeader + " header present), so it is not treated as local. Set remote-management.allow-remote=true to allow it, and list the proxy in trusted-proxies so per-IP throttling sees the real client."
+				}
+				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": message})
 				return
 			}
 
+			// Shares loginThrottle with PostLogin: both are password entry
+			// points, so failures against either must count toward the same
+			// per-IP budget.
 			isBanned = func() (time.Duration, bool) {
-				h.attemptsMu.Lock()
-				defer h.attemptsMu.Unlock()
-				ai := h.failedAttempts[clientIP]
-				if ai == nil || ai.blockedUntil.IsZero() {
+				remaining := h.loginThrottle.blockedFor(clientIP, time.Now())
+				if remaining <= 0 {
 					return 0, false
 				}
-				if time.Now().Before(ai.blockedUntil) {
-					return time.Until(ai.blockedUntil).Round(time.Second), true
-				}
-				// Ban expired, reset state.
-				ai.blockedUntil = time.Time{}
-				ai.count = 0
-				return 0, false
+				return remaining.Round(time.Second), true
 			}
 
-			fail = func() {
-				h.attemptsMu.Lock()
-				aip := h.failedAttempts[clientIP]
-				if aip == nil {
-					aip = &attemptInfo{}
-					h.failedAttempts[clientIP] = aip
-				}
-				aip.count++
-				aip.lastActivity = time.Now()
-				if aip.count >= maxFailures {
-					aip.blockedUntil = time.Now().Add(banDuration)
-					aip.count = 0
-				}
-				h.attemptsMu.Unlock()
-			}
+			fail = func() { h.loginThrottle.recordFailure(clientIP, time.Now()) }
 
-			clearFailures = func() {
-				h.attemptsMu.Lock()
-				if ai := h.failedAttempts[clientIP]; ai != nil {
-					ai.count = 0
-					ai.blockedUntil = time.Time{}
-				}
-				h.attemptsMu.Unlock()
-			}
+			clearFailures = func() { h.loginThrottle.recordSuccess(clientIP) }
 		}
 		localPasswordConfigured := localClient && h.localPassword != ""
 		if secretHash == "" && envSecret == "" && !localPasswordConfigured {
