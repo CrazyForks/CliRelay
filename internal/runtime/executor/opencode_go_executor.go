@@ -425,161 +425,6 @@ func opencodeGoCurrentRequestHasImage(payload []byte) bool {
 	return vision.CurrentTurnHasImages(payload)
 }
 
-func opencodeGoSanitizeHistoricalImages(payload []byte) ([]byte, bool) {
-	if len(payload) == 0 || !json.Valid(payload) {
-		return payload, false
-	}
-	var root map[string]any
-	if err := json.Unmarshal(payload, &root); err != nil {
-		return payload, false
-	}
-	changed := false
-	if messages, ok := root["messages"].([]any); ok {
-		if opencodeGoSanitizeMessageArray(messages) {
-			root["messages"] = messages
-			changed = true
-		}
-	}
-	if input, ok := root["input"]; ok {
-		if sanitized, ok := opencodeGoSanitizeResponsesInput(input); ok {
-			root["input"] = sanitized
-			changed = true
-		}
-	}
-	if !changed {
-		return payload, false
-	}
-	out, err := json.Marshal(root)
-	if err != nil {
-		return payload, false
-	}
-	return out, true
-}
-
-func opencodeGoSanitizeMessageArray(messages []any) bool {
-	changed := false
-	for _, raw := range messages {
-		message, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		content, ok := message["content"]
-		if !ok {
-			continue
-		}
-		if sanitized, ok := opencodeGoSanitizeContentParts(content, "text"); ok {
-			message["content"] = sanitized
-			changed = true
-		}
-	}
-	return changed
-}
-
-func opencodeGoSanitizeResponsesInput(input any) (any, bool) {
-	switch typed := input.(type) {
-	case []any:
-		changed := false
-		for i, raw := range typed {
-			item, ok := raw.(map[string]any)
-			if !ok {
-				continue
-			}
-			if opencodeGoContentPartIsImage(item) {
-				typed[i] = opencodeGoImagePlaceholderPart("input_text")
-				changed = true
-				continue
-			}
-			content, ok := item["content"]
-			if !ok {
-				continue
-			}
-			if sanitized, ok := opencodeGoSanitizeContentParts(content, "input_text"); ok {
-				item["content"] = sanitized
-				changed = true
-			}
-		}
-		return typed, changed
-	case map[string]any:
-		if opencodeGoContentPartIsImage(typed) {
-			return opencodeGoImagePlaceholderPart("input_text"), true
-		}
-		content, ok := typed["content"]
-		if !ok {
-			return input, false
-		}
-		if sanitized, ok := opencodeGoSanitizeContentParts(content, "input_text"); ok {
-			typed["content"] = sanitized
-			return typed, true
-		}
-	}
-	return input, false
-}
-
-func opencodeGoSanitizeContentParts(content any, placeholderType string) (any, bool) {
-	parts, ok := content.([]any)
-	if !ok {
-		return content, false
-	}
-	changed := false
-	out := make([]any, 0, len(parts))
-	for _, part := range parts {
-		partMap, ok := part.(map[string]any)
-		if !ok || !opencodeGoContentPartIsImage(partMap) {
-			out = append(out, part)
-			continue
-		}
-		if !opencodeGoContentPartsHaveText(out) {
-			out = append(out, opencodeGoImagePlaceholderPart(placeholderType))
-		}
-		changed = true
-	}
-	if !changed {
-		return content, false
-	}
-	if len(out) == 0 {
-		out = append(out, opencodeGoImagePlaceholderPart(placeholderType))
-	}
-	return out, true
-}
-
-func opencodeGoContentPartIsImage(part map[string]any) bool {
-	rawType, _ := part["type"].(string)
-	switch strings.ToLower(strings.TrimSpace(rawType)) {
-	case "image", "image_url", "input_image":
-		return true
-	}
-	_, ok := part["image_url"]
-	return ok
-}
-
-func opencodeGoContentPartsHaveText(parts []any) bool {
-	for _, part := range parts {
-		partMap, ok := part.(map[string]any)
-		if !ok {
-			continue
-		}
-		rawType, _ := partMap["type"].(string)
-		switch strings.ToLower(strings.TrimSpace(rawType)) {
-		case "text", "input_text", "output_text":
-			if text, _ := partMap["text"].(string); strings.TrimSpace(text) != "" {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func opencodeGoImagePlaceholderPart(partType string) map[string]any {
-	partType = strings.TrimSpace(partType)
-	if partType == "" {
-		partType = "text"
-	}
-	return map[string]any{
-		"type": partType,
-		"text": "[Image omitted from previous turn.]",
-	}
-}
-
 func opencodeGoCurrentValueHasImage(value any) (bool, bool) {
 	root, ok := value.(map[string]any)
 	if !ok {
@@ -667,6 +512,12 @@ func opencodeGoValueHasImage(value any) bool {
 			}
 		}
 		if _, ok := typed["image_url"]; ok {
+			return true
+		}
+		if _, ok := typed["inlineData"]; ok {
+			return true
+		}
+		if _, ok := typed["inline_data"]; ok {
 			return true
 		}
 		for _, child := range typed {

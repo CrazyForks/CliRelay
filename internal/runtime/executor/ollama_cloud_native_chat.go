@@ -173,6 +173,7 @@ func (e *OllamaCloudExecutor) prepareNativeChat(ctx context.Context, auth *clipr
 	if err != nil {
 		return nil, nil, nil, "", "", err
 	}
+	updated = applyOllamaCloudImagePolicy(req, updated)
 	updated = normalizeOpenAIChatToolCallMessages(updated)
 	updated = applyProviderPromptCaching(updated, req.Payload, auth, e.Identifier(), execCtx.BaseModel, sdktranslator.FormatOpenAI, opts)
 	body, promptText := ollamaNativeChatRequest(updated, stream)

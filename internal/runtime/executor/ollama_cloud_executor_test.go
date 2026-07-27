@@ -47,6 +47,240 @@ func TestOllamaCloudExecutorRoutesChatToOpenAICompatibleV1(t *testing.T) {
 	}
 }
 
+func TestOllamaCloudExecutorStripsImagesForNonVisionModelsAcrossIngressFormats(t *testing.T) {
+	tests := []struct {
+		name     string
+		source   sdktranslator.Format
+		payload  string
+		wantPath string
+	}{
+		{
+			name:     "openai",
+			source:   sdktranslator.FormatOpenAI,
+			payload:  `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}}]}]}`,
+			wantPath: "/api/chat",
+		},
+		{
+			name:     "claude",
+			source:   sdktranslator.FormatClaude,
+			payload:  `{"model":"deepseek-v4-flash","max_tokens":32,"messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}]}]}`,
+			wantPath: "/v1/messages",
+		},
+		{
+			name:     "gemini",
+			source:   sdktranslator.FormatGemini,
+			payload:  `{"model":"deepseek-v4-flash","contents":[{"role":"user","parts":[{"text":"describe"},{"inlineData":{"mimeType":"image/png","data":"aGVsbG8="}}]}]}`,
+			wantPath: "/v1/chat/completions",
+		},
+		{
+			name:     "openai tool history",
+			source:   sdktranslator.FormatOpenAI,
+			payload:  `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"capture the screen"},{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"capture","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":[{"type":"text","text":"screenshot"},{"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}}]},{"role":"user","content":"continue with text"}]}`,
+			wantPath: "/api/chat",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotPath string
+			var gotBody []byte
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/show":
+					_, _ = w.Write([]byte(`{"capabilities":["completion","tools"]}`))
+					return
+				case "/api/chat":
+					_, _ = w.Write([]byte(`{"model":"deepseek-v4-flash","message":{"role":"assistant","content":"ok"},"done":true,"done_reason":"stop","prompt_eval_count":1,"eval_count":1}`))
+				case "/v1/messages":
+					_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","model":"deepseek-v4-flash","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+				case "/v1/chat/completions":
+					_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","created":1,"model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+				default:
+					http.NotFound(w, r)
+					return
+				}
+				gotPath = r.URL.Path
+				gotBody, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+			}))
+			defer server.Close()
+
+			exec := NewOllamaCloudExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}}
+			_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "deepseek-v4-flash",
+				Payload: []byte(tt.payload),
+			}, cliproxyexecutor.Options{SourceFormat: tt.source})
+			if err != nil {
+				t.Fatalf("Execute returned error: %v", err)
+			}
+			if gotPath != tt.wantPath {
+				t.Fatalf("path = %q, want %q", gotPath, tt.wantPath)
+			}
+			if strings.Contains(string(gotBody), "aGVsbG8=") || strings.Contains(string(gotBody), `"images"`) || strings.Contains(string(gotBody), `"image_url"`) || strings.Contains(string(gotBody), `"type":"image"`) {
+				t.Fatalf("non-vision upstream received raw image content: %s", gotBody)
+			}
+			if !strings.Contains(string(gotBody), "Image omitted") {
+				t.Fatalf("upstream body lacks actionable image placeholder: %s", gotBody)
+			}
+		})
+	}
+}
+
+func TestOllamaCloudExecutorTextFollowUpAfterImageUsesCachedNonVisionCapability(t *testing.T) {
+	var showCalls int
+	var chatBodies [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/show":
+			showCalls++
+			_, _ = w.Write([]byte(`{"capabilities":["completion","tools"]}`))
+		case "/api/chat":
+			body, _ := io.ReadAll(r.Body)
+			chatBodies = append(chatBodies, body)
+			_, _ = w.Write([]byte(`{"model":"deepseek-v4-flash","message":{"role":"assistant","content":"ok"},"done":true,"done_reason":"stop","prompt_eval_count":1,"eval_count":1}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewOllamaCloudExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}}
+	requests := []string{
+		`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}}]}]}`,
+		`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}}]},{"role":"assistant","content":"ok"},{"role":"user","content":"now answer a text-only follow-up"}]}`,
+	}
+	for _, payload := range requests {
+		if _, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "deepseek-v4-flash",
+			Payload: []byte(payload),
+		}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI}); err != nil {
+			t.Fatalf("Execute returned error: %v", err)
+		}
+	}
+
+	if showCalls != 1 {
+		t.Fatalf("/api/show calls = %d, want 1 cached capability lookup", showCalls)
+	}
+	if len(chatBodies) != 2 {
+		t.Fatalf("/api/chat calls = %d, want 2", len(chatBodies))
+	}
+	for i, body := range chatBodies {
+		if strings.Contains(string(body), `"images"`) || strings.Contains(string(body), "aGVsbG8=") {
+			t.Fatalf("chat body %d retained image input: %s", i, body)
+		}
+	}
+}
+
+func TestOllamaCloudExecutorPreservesImagesForVisionModel(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/show":
+			_, _ = w.Write([]byte(`{"capabilities":["completion","tools","vision"]}`))
+		case "/api/chat":
+			gotBody, _ = io.ReadAll(r.Body)
+			_, _ = w.Write([]byte(`{"model":"qwen3.5:397b","message":{"role":"assistant","content":"vision ok"},"done":true,"done_reason":"stop","prompt_eval_count":1,"eval_count":1}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewOllamaCloudExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}}
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "qwen3.5:397b",
+		Payload: []byte(`{"model":"qwen3.5:397b","messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}}]}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if got := gjson.GetBytes(gotBody, "messages.0.images.0").String(); got != "aGVsbG8=" {
+		t.Fatalf("vision model image = %q, want base64 payload; body=%s", got, gotBody)
+	}
+}
+
+func TestOllamaCloudExecutorUsesVerifiedVisionFallback(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/show":
+			body, _ := io.ReadAll(r.Body)
+			if gjson.GetBytes(body, "model").String() == "qwen3.5:397b" {
+				_, _ = w.Write([]byte(`{"capabilities":["completion","vision"]}`))
+			} else {
+				_, _ = w.Write([]byte(`{"capabilities":["completion","tools"]}`))
+			}
+		case "/api/chat":
+			gotBody, _ = io.ReadAll(r.Body)
+			_, _ = w.Write([]byte(`{"model":"qwen3.5:397b","message":{"role":"assistant","content":"vision ok"},"done":true,"done_reason":"stop","prompt_eval_count":1,"eval_count":1}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewOllamaCloudExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":               "test-key",
+		"base_url":              server.URL,
+		"vision_fallback_model": "qwen3.5:397b",
+	}}
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "deepseek-v4-flash",
+		Payload: []byte(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}}]}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if got := gjson.GetBytes(gotBody, "model").String(); got != "qwen3.5:397b" {
+		t.Fatalf("upstream model = %q, want verified vision fallback; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "messages.0.images.0").String(); got != "aGVsbG8=" {
+		t.Fatalf("fallback image = %q, want preserved image; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(resp.Payload, "model").String(); got != "deepseek-v4-flash" {
+		t.Fatalf("response model = %q, want original model; payload=%s", got, resp.Payload)
+	}
+}
+
+func TestOllamaCloudExecutorStreamStripsImagesForNonVisionModel(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/show":
+			_, _ = w.Write([]byte(`{"capabilities":["completion"]}`))
+		case "/api/chat":
+			gotBody, _ = io.ReadAll(r.Body)
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			_, _ = w.Write([]byte(`{"model":"deepseek-v4-flash","message":{"role":"assistant","content":"ok"},"done":true,"done_reason":"stop","prompt_eval_count":1,"eval_count":1}` + "\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewOllamaCloudExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}}
+	result, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "deepseek-v4-flash",
+		Payload: []byte(`{"model":"deepseek-v4-flash","stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}}]}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI, Stream: true})
+	if err != nil {
+		t.Fatalf("ExecuteStream returned error: %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+	}
+	if strings.Contains(string(gotBody), "aGVsbG8=") || gjson.GetBytes(gotBody, "messages.0.images").Exists() {
+		t.Fatalf("stream upstream received image input: %s", gotBody)
+	}
+}
+
 func TestOllamaCloudNativeCacheKeyScopesExplicitPromptKey(t *testing.T) {
 	source := []byte(`{"model":"glm-5.2","prompt_cache_key":"shared-session","input":"hi"}`)
 	authA := &cliproxyauth.Auth{ID: "ollama-cloud:one"}
