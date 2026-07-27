@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
@@ -23,6 +25,18 @@ import (
 type OllamaCloudExecutor struct {
 	cfg *config.Config
 }
+
+const (
+	ollamaCloudCapabilityCacheTTL  = 10 * time.Minute
+	ollamaCloudImagePlaceholderKey = "ollama_cloud_image_placeholder"
+)
+
+type ollamaCloudCapabilityCacheEntry struct {
+	supportsVision bool
+	expiresAt      time.Time
+}
+
+var ollamaCloudCapabilityCache sync.Map
 
 func NewOllamaCloudExecutor(cfg *config.Config) *OllamaCloudExecutor {
 	return &OllamaCloudExecutor{cfg: cfg}
@@ -61,33 +75,48 @@ func (e *OllamaCloudExecutor) HttpRequest(ctx context.Context, auth *cliproxyaut
 }
 
 func (e *OllamaCloudExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	preparedCtx, prepared, err := e.prepareImageInput(ctx, auth, req, opts)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	ctx = preparedCtx
+	req = prepared.Request
+
+	var resp cliproxyexecutor.Response
 	if opts.Alt != "responses/compact" && (opts.SourceFormat == sdktranslator.FormatOpenAIResponse || opts.SourceFormat == sdktranslator.FormatOpenAI) {
-		return e.executeNativeChat(ctx, auth, req, opts)
+		resp, err = e.executeNativeChat(ctx, auth, req, opts)
+	} else if opts.Alt != "responses/compact" && opts.SourceFormat == sdktranslator.FormatClaude {
+		resp, err = e.executeDirect(ctx, auth, req, opts, sdktranslator.FormatClaude, "/messages", parseClaudeUsage)
+	} else {
+		resp, err = e.openAIExecutor().Execute(ctx, e.openAIAuth(auth), req, opts)
 	}
-	if opts.Alt != "responses/compact" {
-		switch opts.SourceFormat {
-		case sdktranslator.FormatOpenAIResponse:
-			return e.executeDirect(ctx, auth, req, opts, sdktranslator.FormatOpenAIResponse, "/responses", parseOpenAIUsage)
-		case sdktranslator.FormatClaude:
-			return e.executeDirect(ctx, auth, req, opts, sdktranslator.FormatClaude, "/messages", parseClaudeUsage)
-		}
+	if err != nil || !prepared.Applied {
+		return resp, err
 	}
-	return e.openAIExecutor().Execute(ctx, e.openAIAuth(auth), req, opts)
+	resp.Payload = opencodeGoRewriteFallbackResponseModel(resp.Payload, prepared.OriginalModel)
+	return resp, nil
 }
 
 func (e *OllamaCloudExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	preparedCtx, prepared, err := e.prepareImageInput(ctx, auth, req, opts)
+	if err != nil {
+		return nil, err
+	}
+	ctx = preparedCtx
+	req = prepared.Request
+
+	var result *cliproxyexecutor.StreamResult
 	if opts.Alt != "responses/compact" && (opts.SourceFormat == sdktranslator.FormatOpenAIResponse || opts.SourceFormat == sdktranslator.FormatOpenAI) {
-		return e.executeNativeChatStream(ctx, auth, req, opts)
+		result, err = e.executeNativeChatStream(ctx, auth, req, opts)
+	} else if opts.Alt != "responses/compact" && opts.SourceFormat == sdktranslator.FormatClaude {
+		result, err = e.executeDirectStream(ctx, auth, req, opts, sdktranslator.FormatClaude, "/messages", parseClaudeStreamUsage)
+	} else {
+		result, err = e.openAIExecutor().ExecuteStream(ctx, e.openAIAuth(auth), req, opts)
 	}
-	if opts.Alt != "responses/compact" {
-		switch opts.SourceFormat {
-		case sdktranslator.FormatOpenAIResponse:
-			return e.executeDirectStream(ctx, auth, req, opts, sdktranslator.FormatOpenAIResponse, "/responses", parseOpenAIResponsesStreamUsage)
-		case sdktranslator.FormatClaude:
-			return e.executeDirectStream(ctx, auth, req, opts, sdktranslator.FormatClaude, "/messages", parseClaudeStreamUsage)
-		}
+	if err != nil || !prepared.Applied {
+		return result, err
 	}
-	return e.openAIExecutor().ExecuteStream(ctx, e.openAIAuth(auth), req, opts)
+	return opencodeGoRewriteFallbackStreamResult(result, prepared.OriginalModel), nil
 }
 
 func (e *OllamaCloudExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
@@ -221,8 +250,130 @@ func (e *OllamaCloudExecutor) prepareDirect(ctx context.Context, auth *cliproxya
 	if err != nil {
 		return nil, nil, err
 	}
+	updated = applyOllamaCloudImagePolicy(req, updated)
 	updated = applyProviderPromptCaching(updated, req.Payload, auth, e.Identifier(), execCtx.BaseModel, target, opts)
 	return execCtx, updated, nil
+}
+
+func (e *OllamaCloudExecutor) prepareImageInput(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (context.Context, opencodeGoVisionFallbackResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	result := opencodeGoVisionFallbackResult{
+		Request:       req,
+		OriginalModel: payloadRequestedModel(opts, req.Model),
+	}
+	if !opencodeGoPayloadHasImage(req.Payload) {
+		return ctx, result, nil
+	}
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+
+	supportsVision, capabilityErr := e.modelSupportsVision(ctx, auth, baseModel)
+	if capabilityErr == nil && supportsVision {
+		return ctx, result, nil
+	}
+
+	fallbackModel := openAICompatVisionFallbackModel(e.cfg, auth, e.Identifier())
+	if fallbackModel != "" && !strings.EqualFold(baseModel, fallbackModel) {
+		fallbackSupportsVision, fallbackErr := e.modelSupportsVision(ctx, auth, fallbackModel)
+		if fallbackErr == nil && fallbackSupportsVision {
+			req.Model = fallbackModel
+			req.Payload, _ = sjson.SetBytes(req.Payload, "model", fallbackModel)
+			result.Request = req
+			result.FallbackModel = fallbackModel
+			result.Applied = true
+			ctx = contextWithVisionFallbackLog(ctx, result.OriginalModel, baseModel, fallbackModel)
+			return ctx, result, nil
+		}
+	}
+
+	placeholder := "[Image omitted: the selected Ollama model does not support image input. Switch to a vision-capable model to analyze it.]"
+	if capabilityErr != nil {
+		log.Warnf("ollama cloud executor: could not verify vision capability for %s: %v", baseModel, capabilityErr)
+		placeholder = "[Image omitted: CliRelay could not verify that the selected Ollama model supports image input. Switch to a verified vision-capable model to analyze it.]"
+	}
+	result.Request = withOllamaCloudImagePlaceholder(req, placeholder)
+	return ctx, result, nil
+}
+
+func (e *OllamaCloudExecutor) modelSupportsVision(ctx context.Context, auth *cliproxyauth.Auth, model string) (bool, error) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return false, fmt.Errorf("model is empty")
+	}
+	baseURL, _ := e.resolveCredentials(auth)
+	cacheKey := strings.ToLower(ollamaCloudNativeBaseURL(baseURL) + "\x00" + model)
+	if cached, ok := ollamaCloudCapabilityCache.Load(cacheKey); ok {
+		entry, _ := cached.(ollamaCloudCapabilityCacheEntry)
+		if time.Now().Before(entry.expiresAt) {
+			return entry.supportsVision, nil
+		}
+		ollamaCloudCapabilityCache.Delete(cacheKey)
+	}
+
+	body := []byte(`{"model":"","verbose":false}`)
+	body, _ = sjson.SetBytes(body, "model", model)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, ollamaCloudNativeBaseURL(baseURL)+"/api/show", bytes.NewReader(body))
+	if err != nil {
+		return false, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("User-Agent", "cli-proxy-ollama-cloud")
+	if err = e.PrepareRequest(httpReq, auth); err != nil {
+		return false, err
+	}
+
+	httpResp, err := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0).Do(httpReq)
+	if err != nil {
+		return false, err
+	}
+	defer httpResp.Body.Close()
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		return false, fmt.Errorf("capability request returned status %d: %s", httpResp.StatusCode, strings.TrimSpace(string(readUpstreamErrorBody(e.Identifier(), httpResp.Body))))
+	}
+	data, err := readUpstreamResponseBody(e.Identifier(), httpResp.Body)
+	if err != nil {
+		return false, err
+	}
+	capabilities := gjson.GetBytes(data, "capabilities")
+	if !capabilities.IsArray() {
+		return false, fmt.Errorf("capability response has no capabilities array")
+	}
+	supportsVision := false
+	for _, capability := range capabilities.Array() {
+		if strings.EqualFold(strings.TrimSpace(capability.String()), "vision") {
+			supportsVision = true
+			break
+		}
+	}
+	ollamaCloudCapabilityCache.Store(cacheKey, ollamaCloudCapabilityCacheEntry{
+		supportsVision: supportsVision,
+		expiresAt:      time.Now().Add(ollamaCloudCapabilityCacheTTL),
+	})
+	return supportsVision, nil
+}
+
+func withOllamaCloudImagePlaceholder(req cliproxyexecutor.Request, placeholder string) cliproxyexecutor.Request {
+	metadata := make(map[string]any, len(req.Metadata)+1)
+	for key, value := range req.Metadata {
+		metadata[key] = value
+	}
+	metadata[ollamaCloudImagePlaceholderKey] = placeholder
+	req.Metadata = metadata
+	return req
+}
+
+func applyOllamaCloudImagePolicy(req cliproxyexecutor.Request, payload []byte) []byte {
+	placeholder, _ := req.Metadata[ollamaCloudImagePlaceholderKey].(string)
+	placeholder = strings.TrimSpace(placeholder)
+	if placeholder == "" {
+		return payload
+	}
+	if updated, changed := sanitizeImageInputs(payload, placeholder, true); changed {
+		return updated
+	}
+	return payload
 }
 
 func (e *OllamaCloudExecutor) doJSON(execCtx *ExecutionContext, auth *cliproxyauth.Auth, endpoint string, body []byte, stream bool) (*http.Response, error) {

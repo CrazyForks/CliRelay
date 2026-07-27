@@ -117,6 +117,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return resp, err
 	}
+	if strings.EqualFold(e.provider, "ollama-cloud") {
+		translated = applyOllamaCloudImagePolicy(req, translated)
+	}
 	if shouldNormalizeKimiCompatPayload(execCtx.BaseModel) {
 		translated, err = normalizeKimiToolMessageLinks(translated)
 		if err != nil {
@@ -249,6 +252,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	translated, err = thinking.ApplyThinking(translated, req.Model, execCtx.SourceFormat.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, err
+	}
+	if strings.EqualFold(e.provider, "ollama-cloud") {
+		translated = applyOllamaCloudImagePolicy(req, translated)
 	}
 	if shouldNormalizeKimiCompatPayload(execCtx.BaseModel) {
 		translated, err = normalizeKimiToolMessageLinks(translated)
