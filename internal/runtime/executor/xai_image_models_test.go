@@ -44,7 +44,7 @@ func TestDiscoveredModelsCarryImageModels(t *testing.T) {
 	if _, ok := ids["grok-4.5"]; !ok {
 		t.Error("the live chat model list was lost")
 	}
-	for _, modelID := range []string{grokImagineModel, "grok-imagine-image-pro", "grok-2-image-1212"} {
+	for _, modelID := range []string{grokImagineModel, "grok-imagine-image-quality"} {
 		if _, ok := ids[modelID]; !ok {
 			t.Errorf("%s is not routable; the credential cannot serve it", modelID)
 		}
@@ -100,8 +100,11 @@ func TestUpstreamWinsWhenItAdvertisesAnImageModel(t *testing.T) {
 }
 
 func TestImageModelInfosCoverEveryRegisteredImageModel(t *testing.T) {
-	if len(xaiImageModelInfos()) != 3 {
-		t.Errorf("image model count = %d, want the three registered Grok image models", len(xaiImageModelInfos()))
+	// Two models: grok-imagine-image and grok-imagine-image-quality. Earlier
+	// revisions also carried grok-imagine-image-pro and grok-2-image-1212, which
+	// the live xAI catalog does not serve.
+	if len(xaiImageModelInfos()) != 2 {
+		t.Errorf("image model count = %d, want the two registered Grok image models", len(xaiImageModelInfos()))
 	}
 	for _, model := range xaiImageModelInfos() {
 		if model.Type != "xai" {

@@ -8,8 +8,7 @@ func TestIsImageGenerationModel(t *testing.T) {
 		"GPT-Image-2",
 		"gpt-image-3",
 		"grok-imagine-image",
-		"grok-imagine-image-pro",
-		"grok-2-image-1212",
+		"grok-imagine-image-quality",
 	}
 	for _, modelID := range imageModels {
 		if !IsImageGenerationModel(modelID) {
@@ -17,7 +16,11 @@ func TestIsImageGenerationModel(t *testing.T) {
 		}
 	}
 
-	textModels := []string{"", "grok-4.5", "grok-build-0.1", "gpt-5.5", "grok-imagine-video"}
+	// grok-2-image-1212 and grok-imagine-image-pro came from a third-party model
+	// list and are not in the live xAI catalog, so they must not classify.
+	textModels := []string{
+		"", "grok-4.5", "grok-build-0.1", "gpt-5.5", "grok-imagine-video", "grok-2-image-1212",
+	}
 	for _, modelID := range textModels {
 		if IsImageGenerationModel(modelID) {
 			t.Errorf("IsImageGenerationModel(%q) = true, want false", modelID)
@@ -62,6 +65,11 @@ func TestImageGenerationModelDefaults(t *testing.T) {
 		t.Errorf("grok-imagine-image price = %v, want 0", price)
 	}
 
+	// Models absent from the live catalog must not classify at all.
+	if IsImageGenerationModel("grok-2-image-1212") {
+		t.Error("grok-2-image-1212 is not in the xAI catalog and must not classify")
+	}
+
 	if _, _, ok := ImageGenerationModelDefaults("grok-4.5"); ok {
 		t.Error("a text model should have no image defaults")
 	}
@@ -71,7 +79,7 @@ func TestImageGenerationModelDefaults(t *testing.T) {
 // not the same as an image input modality, and widening it would reclassify
 // existing models as image-to-image in the catalog.
 func TestImageInputModalityStaysTextOnly(t *testing.T) {
-	for _, modelID := range []string{"gpt-image-2", "grok-imagine-image", "grok-2-image-1212"} {
+	for _, modelID := range []string{"gpt-image-2", "grok-imagine-image", "grok-imagine-image-quality"} {
 		got := ImageGenerationInputModalities(modelID)
 		if len(got) != 1 || got[0] != "text" {
 			t.Errorf("ImageGenerationInputModalities(%q) = %v, want [text]", modelID, got)
@@ -80,15 +88,10 @@ func TestImageInputModalityStaysTextOnly(t *testing.T) {
 }
 
 func TestSupportsImageEditing(t *testing.T) {
-	for _, modelID := range []string{"gpt-image-2", "grok-imagine-image", "grok-imagine-image-pro"} {
+	for _, modelID := range []string{"gpt-image-2", "grok-imagine-image", "grok-imagine-image-quality"} {
 		if !SupportsImageEditing(modelID) {
 			t.Errorf("SupportsImageEditing(%q) = false, want true", modelID)
 		}
-	}
-	// grok-2-image-1212 has no edit endpoint; offering the control would only
-	// produce upstream 404s.
-	if SupportsImageEditing("grok-2-image-1212") {
-		t.Error("grok-2-image-1212 has no edit endpoint and must not advertise one")
 	}
 }
 
@@ -108,7 +111,7 @@ func TestGrokImageModelsAreRegistered(t *testing.T) {
 	for _, model := range GetXAIModels() {
 		registered[model.ID] = struct{}{}
 	}
-	for _, modelID := range []string{"grok-imagine-image", "grok-imagine-image-pro", "grok-2-image-1212"} {
+	for _, modelID := range []string{"grok-imagine-image", "grok-imagine-image-quality"} {
 		if _, ok := registered[modelID]; !ok {
 			t.Errorf("%s is classified as an image model but is not in the xAI catalog", modelID)
 		}
