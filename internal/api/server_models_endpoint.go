@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/openai"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 // unifiedModelsHandler creates a unified handler for the /v1/models endpoint
@@ -72,7 +73,14 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 			portalVisibleModelIDs = modelcatalog.NewForTenant(tenantID, s.cfg, s.handlers.AuthManager).
 				PortalVisibleModelIDs(allowedChannelsRaw, allowedChannelGroupsRaw)
 		}
-		scopedRoutingRestricted := s.hasScopedRoutingModelRestrictionForTenant(tenantID, routeGroup, allowedChannelGroups)
+		// The channel-group editor lists models so an operator can tick them into
+		// AllowedModels. Filtering that list by AllowedModels makes a model that is
+		// not yet allowed impossible to add — the list to edit it is gated on the
+		// very setting being edited. Only the editor sets this flag; plaza and
+		// catalog keep enforcement.
+		ignoreGroupAllowedModels := queryFlagEnabled(c, "ignore_group_allowed_models", "ignore-group-allowed-models")
+		scopedRoutingRestricted := !ignoreGroupAllowedModels &&
+			s.hasScopedRoutingModelRestrictionForTenant(tenantID, routeGroup, allowedChannelGroups)
 		needsScopeFilter := tenantScoped || allowedModels != nil || allowedChannels != nil || allowedChannelGroups != nil || routeGroup != "" || scopedRoutingRestricted
 
 		recorder := &responseRecorder{
@@ -114,7 +122,10 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 						}
 					}
 					if tenantScoped || allowedChannels != nil || allowedChannelGroups != nil || routeGroup != "" {
-						if s.handlers == nil || s.handlers.AuthManager == nil || !s.handlers.AuthManager.CanServeModelWithScopesForTenant(tenantID, id, allowedChannels, allowedChannelGroups, routeGroup) {
+						if s.handlers == nil || s.handlers.AuthManager == nil || !s.handlers.AuthManager.CanServeModelWithScopesForTenantOpts(
+							tenantID, id, allowedChannels, allowedChannelGroups, routeGroup,
+							coreauth.ServeModelScopeOptions{IgnoreGroupAllowedModels: ignoreGroupAllowedModels},
+						) {
 							continue
 						}
 					}
@@ -345,4 +356,18 @@ func (r *responseRecorder) Write(b []byte) (int, error) {
 
 func (r *responseRecorder) WriteHeader(code int) {
 	r.statusCode = code
+}
+
+// queryFlagEnabled reads a boolean query flag under either naming convention.
+func queryFlagEnabled(c *gin.Context, primary, fallback string) bool {
+	raw := strings.TrimSpace(c.Query(primary))
+	if raw == "" && fallback != "" {
+		raw = strings.TrimSpace(c.Query(fallback))
+	}
+	switch strings.ToLower(raw) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
