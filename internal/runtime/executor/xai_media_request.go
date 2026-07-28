@@ -36,6 +36,21 @@ var xaiImageRequestFields = map[string]struct{}{
 	"user": {},
 }
 
+// xaiDefaultResponseFormat is what the Imagine endpoints are asked for when the
+// caller expressed no preference.
+//
+// xAI defaults to "url", which a Zero Data Retention team cannot use at all: the
+// upstream rejects the request with "Zero Data Retention teams do not have access
+// to URL format as it requires to store the generated images". Many subscription
+// teams are ZDR, so the permissive default fails for them on every request.
+// Requesting bytes back needs no server-side retention and works for both team
+// types, and it is what the management console renders regardless.
+//
+// An explicit caller choice is preserved: a caller asking for "url" against a ZDR
+// team gets the upstream error, which is the honest answer — that is a team
+// setting, not something this proxy can work around.
+const xaiDefaultResponseFormat = "b64_json"
+
 // shapeXAIImageRequest removes fields the Grok Imagine API rejects.
 //
 // It returns the filtered body and the names it dropped, so the caller can tell the
@@ -61,10 +76,23 @@ func shapeXAIImageRequest(payload []byte) ([]byte, []string) {
 		return true
 	})
 
-	if len(dropped) == 0 {
+	shaped = withXAIDefaultResponseFormat(shaped)
+	if len(dropped) == 0 && len(shaped) == len(payload) {
 		return payload, nil
 	}
 	return shaped, dropped
+}
+
+// withXAIDefaultResponseFormat pins a response format when the caller omitted one.
+func withXAIDefaultResponseFormat(payload []byte) []byte {
+	if strings.TrimSpace(gjson.GetBytes(payload, "response_format").String()) != "" {
+		return payload
+	}
+	updated, err := sjson.SetBytes(payload, "response_format", xaiDefaultResponseFormat)
+	if err != nil {
+		return payload
+	}
+	return updated
 }
 
 // escapeJSONPathKey protects keys containing the separators sjson treats specially,

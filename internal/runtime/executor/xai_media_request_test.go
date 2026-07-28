@@ -88,3 +88,33 @@ func TestShapeIgnoresNonObjectBodies(t *testing.T) {
 		}
 	}
 }
+
+// TestShapeDefaultsToBytesForZeroDataRetention is the fix for the upstream error
+// "Zero Data Retention teams do not have access to URL format". xAI defaults to
+// url, which a ZDR team cannot use at all, so a request that expressed no
+// preference failed for every such account.
+func TestShapeDefaultsToBytesForZeroDataRetention(t *testing.T) {
+	shaped, _ := shapeXAIImageRequest([]byte(`{"model":"grok-imagine-image","prompt":"x"}`))
+
+	var decoded map[string]any
+	if err := json.Unmarshal(shaped, &decoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if decoded["response_format"] != "b64_json" {
+		t.Errorf("response_format = %v, want b64_json", decoded["response_format"])
+	}
+}
+
+// TestShapeKeepsAnExplicitResponseFormat: asking for url against a ZDR team is a
+// team setting the proxy must not silently override.
+func TestShapeKeepsAnExplicitResponseFormat(t *testing.T) {
+	shaped, _ := shapeXAIImageRequest([]byte(`{"model":"grok-imagine-image","prompt":"x","response_format":"url"}`))
+
+	var decoded map[string]any
+	if err := json.Unmarshal(shaped, &decoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if decoded["response_format"] != "url" {
+		t.Errorf("response_format = %v, want the caller's explicit url", decoded["response_format"])
+	}
+}
