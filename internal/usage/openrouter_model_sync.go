@@ -644,7 +644,7 @@ func openRouterApplyImageGenerationSemantics(row *ModelConfigRow, model OpenRout
 
 func openRouterIsImageGenerationRow(row ModelConfigRow) bool {
 	modelID := strings.ToLower(strings.TrimSpace(row.ModelID))
-	if strings.HasPrefix(modelID, "gpt-image-") {
+	if registry.IsImageGenerationModel(modelID) {
 		return true
 	}
 	if strings.EqualFold(strings.TrimSpace(row.PricingMode), "call") {
@@ -659,12 +659,10 @@ func openRouterIsImageGenerationRow(row ModelConfigRow) bool {
 }
 
 func openRouterDefaultImageGenerationPricePerCall(modelID string) float64 {
-	switch strings.ToLower(strings.TrimSpace(modelID)) {
-	case "gpt-image-2":
-		return 0.04
-	default:
-		return 0
+	if price, _, ok := registry.ImageGenerationModelDefaults(modelID); ok {
+		return price
 	}
+	return 0
 }
 
 func imageOutputModalities(modalities []string) []string {

@@ -696,7 +696,7 @@ func GetAIStudioModels() []*ModelInfo {
 
 // GetOpenAIModels returns the standard OpenAI model definitions
 func GetOpenAIModels() []*ModelInfo {
-	return append([]*ModelInfo{
+	return append(getOpenAIImageModelDefinitions(), append([]*ModelInfo{
 		{
 			ID:                  "gpt-5",
 			Object:              "model",
@@ -907,21 +907,11 @@ func GetOpenAIModels() []*ModelInfo {
 			SupportedParameters: []string{"tools"},
 			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
 		},
-		{
-			ID:                  "gpt-image-2",
-			Object:              "model",
-			OwnedBy:             "openai",
-			Type:                "openai",
-			Version:             "gpt-image-2",
-			DisplayName:         "GPT Image 2",
-			Description:         "Text-to-image generation model.",
-			SupportedParameters: []string{"prompt", "size", "n", "response_format"},
-		},
-	}, getGPT56ModelDefinitions()...)
+	}, getGPT56ModelDefinitions()...)...)
 }
 
 func GetXAIModels() []*ModelInfo {
-	return []*ModelInfo{
+	return append(getXAIImageModelDefinitions(), []*ModelInfo{
 		{
 			ID:                  "grok-build-0.1",
 			Object:              "model",
@@ -1035,7 +1025,7 @@ func GetXAIModels() []*ModelInfo {
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
 		},
-	}
+	}...)
 }
 
 // GetQwenModels returns the standard Qwen model definitions
