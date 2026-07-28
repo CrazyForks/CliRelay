@@ -10,8 +10,12 @@ const portalRootModelsPath = "/v1/models"
 // PortalVisibleModelIDs returns the model IDs shared by configured availability
 // and the root OpenAI-compatible GET /v1/models path. The management model
 // plaza derives its tenant-visible catalog from these same two sources.
-func (s *Service) PortalVisibleModelIDs(allowedChannelsRaw, allowedGroupsRaw string) map[string]struct{} {
-	configuredIDs := configuredAvailabilityModelIDs(s.ConfiguredAvailability(allowedChannelsRaw, allowedGroupsRaw))
+//
+// opts is forwarded to the configured-availability pass so the channel-group
+// editor can see models that are not yet on a group's allow-list — otherwise the
+// list used to add a model is itself filtered by the setting being edited.
+func (s *Service) PortalVisibleModelIDs(allowedChannelsRaw, allowedGroupsRaw string, opts ...AvailabilityFilterOptions) map[string]struct{} {
+	configuredIDs := configuredAvailabilityModelIDs(s.ConfiguredAvailability(allowedChannelsRaw, allowedGroupsRaw, opts...))
 	rootPathIDs := rootModelsPathIDs(s.PathAvailability())
 	visible := make(map[string]struct{})
 	for id := range configuredIDs {
