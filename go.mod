@@ -5,6 +5,7 @@ go 1.26.0
 toolchain go1.26.5
 
 require (
+	clirelay.local/updater v0.0.0-00010101000000-000000000000
 	entgo.io/ent v0.14.6
 	github.com/andybalholm/brotli v1.2.2
 	github.com/atotto/clipboard v0.1.4
@@ -130,3 +131,5 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
+
+replace clirelay.local/updater => ./updater

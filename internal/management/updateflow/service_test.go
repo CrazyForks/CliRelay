@@ -1,11 +1,15 @@
 package updateflow
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"clirelay.local/updater/protocol"
 )
 
 func TestTriggerUpdateForwardsVersionAndReleaseMetadata(t *testing.T) {
@@ -16,8 +20,15 @@ func TestTriggerUpdateForwardsVersionAndReleaseMetadata(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
 			t.Fatalf("Authorization = %q, want Bearer test-token", got)
 		}
-		var payload map[string]string
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request: %v", err)
+		}
+		// Decoded as a flat map on purpose: this is exactly what an updater sidecar
+		// that predates plans sees, so the assertion doubles as a guarantee that the
+		// legacy fields survive alongside the nested plan.
+		var flat map[string]any
+		if err := json.NewDecoder(bytes.NewReader(body)).Decode(&flat); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
 		for key, want := range map[string]string{
@@ -30,9 +41,23 @@ func TestTriggerUpdateForwardsVersionAndReleaseMetadata(t *testing.T) {
 			"release_notes":        "latest changes",
 			"release_published_at": "2026-07-10T07:30:00Z",
 		} {
-			if payload[key] != want {
-				t.Fatalf("payload[%q] = %q, want %q", key, payload[key], want)
+			if got, _ := flat[key].(string); got != want {
+				t.Fatalf("payload[%q] = %q, want %q", key, got, want)
 			}
+		}
+
+		var request protocol.UpdateRequest
+		if err := json.NewDecoder(bytes.NewReader(body)).Decode(&request); err != nil {
+			t.Fatalf("decode plan request: %v", err)
+		}
+		if request.Plan == nil {
+			t.Fatal("no update plan was sent")
+		}
+		if _, err := request.Plan.Validate(); err != nil {
+			t.Fatalf("the plan the application sends must be valid: %v", err)
+		}
+		if request.Plan.Stages[len(request.Plan.Stages)-1].Services[0] != "clirelay" {
+			t.Fatalf("plan does not target the configured service: %+v", request.Plan.Stages)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"accepted","service":"clirelay","run_id":17}`))
@@ -43,6 +68,8 @@ func TestTriggerUpdateForwardsVersionAndReleaseMetadata(t *testing.T) {
 	t.Setenv("CLIRELAY_TARGET_SERVICE", "clirelay")
 
 	result, err := New(nil, Dependencies{}).TriggerUpdate(context.Background(), &CheckResponse{
+		DockerImage:        "ghcr.io/kittors/clirelay",
+		DockerTag:          "main",
 		CurrentVersion:     "main-old",
 		LatestVersion:      "main-new",
 		LatestCommitURL:    "https://example.com/backend",
