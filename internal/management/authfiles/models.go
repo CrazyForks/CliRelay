@@ -291,12 +291,12 @@ func ListModelEntriesLiveForTenant(
 	if supportsSharedDiscovery(provider) {
 		if !refresh {
 			if cached := loadDiscoveryCache(tenantID, provider); len(cached) > 0 {
-				return modelEntriesFromRegistry(cached), "upstream"
+				return modelEntriesFromRegistry(mergeDiscoveryWithStaticCatalog(provider, cached)), "upstream"
 			}
 		}
 		live, ok := warmSharedDiscovery(ctx, auth, cfg, tenantID, provider, refresh)
 		if ok && len(live) > 0 {
-			return modelEntriesFromRegistry(live), "upstream"
+			return modelEntriesFromRegistry(mergeDiscoveryWithStaticCatalog(provider, live)), "upstream"
 		}
 		// Live miss/fail: keep last good discovery list if any (do not snap back to static).
 		if cached := loadDiscoveryCache(tenantID, provider); len(cached) > 0 {

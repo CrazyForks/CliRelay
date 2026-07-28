@@ -1,6 +1,8 @@
 package authfiles
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -73,6 +75,65 @@ func TestXAIRefreshKeepsImageModels(t *testing.T) {
 	for _, modelID := range []string{"grok-4.5", "grok-imagine-image"} {
 		if _, ok := ids[modelID]; !ok {
 			t.Errorf("%s missing from the merged xai list", modelID)
+		}
+	}
+}
+
+// TestCachedDiscoveryPathAlsoMerges covers the call site, not just the helper.
+//
+// The previous fix merged only the fallback branch, so codex — which always takes
+// the shared-discovery path — still lost gpt-image-2 in the panel. The helper's own
+// tests passed the whole time, which is exactly why this test drives the entry
+// point instead.
+func TestCachedDiscoveryPathAlsoMerges(t *testing.T) {
+	const tenantID = "tenant-merge-test"
+	storeDiscoveryCache(tenantID, "codex", []*registry.ModelInfo{{ID: "gpt-5.5", Object: "model"}})
+	t.Cleanup(func() { storeDiscoveryCache(tenantID, "codex", nil) })
+
+	cached := loadDiscoveryCache(tenantID, "codex")
+	if len(cached) == 0 {
+		t.Skip("discovery cache unavailable in this environment")
+	}
+
+	entries := modelEntriesFromRegistry(mergeDiscoveryWithStaticCatalog("codex", cached))
+	ids := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		if id, ok := entry["id"].(string); ok {
+			ids[id] = struct{}{}
+		}
+	}
+	if _, ok := ids["gpt-image-2"]; !ok {
+		t.Error("the cached-discovery path still hides gpt-image-2 from the panel")
+	}
+	if _, ok := ids["gpt-5.5"]; !ok {
+		t.Error("the cached discovery result was lost")
+	}
+}
+
+// TestEveryDiscoveryReturnMerges guards against the same omission recurring: each
+// return inside the shared-discovery branch must go through the merge.
+func TestEveryDiscoveryReturnMerges(t *testing.T) {
+	source, err := os.ReadFile("models.go")
+	if err != nil {
+		t.Fatalf("read models.go: %v", err)
+	}
+	block := string(source)
+	start := strings.Index(block, "if supportsSharedDiscovery(provider) {")
+	if start < 0 {
+		t.Fatal("shared discovery branch not found")
+	}
+	end := strings.Index(block[start:], "\n\tif !refresh {")
+	if end < 0 {
+		t.Fatal("end of shared discovery branch not found")
+	}
+	branch := block[start : start+end]
+
+	for _, line := range strings.Split(branch, "\n") {
+		if !strings.Contains(line, "modelEntriesFromRegistry(") {
+			continue
+		}
+		if !strings.Contains(line, "mergeDiscoveryWithStaticCatalog(") {
+			t.Errorf("this return skips the static catalog merge and will hide routable models:\n  %s", strings.TrimSpace(line))
 		}
 	}
 }
