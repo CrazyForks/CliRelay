@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"context"
+	serviceapp "github.com/router-for-me/CLIProxyAPI/v6/sdkbridge/service"
 	"strings"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -213,6 +214,9 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 		}
 	}
 	models = applyOAuthModelAlias(s.cfg, provider, authKind, models)
+	// Applied after every filter: image models are entitlement-universal and never
+	// reported by chat discovery, so chat-model curation must not remove them.
+	models = serviceapp.WithRegisteredImageModels(provider, models)
 	if len(models) > 0 {
 		key := provider
 		if key == "" {
