@@ -58,10 +58,10 @@ func xaiMediaPath(alt string) string {
 
 // executeImageGeneration forwards an image request to the Grok Imagine API.
 //
-// The upstream is OpenAI-compatible on both the request and response side, so the
-// payload passes through untranslated. That is deliberate: inventing a translation
-// layer here would mean re-encoding fields we do not model, and any field xAI adds
-// later would be silently dropped instead of reaching the caller.
+// The response passes through untranslated because the upstream shape already
+// matches: re-encoding it would drop any field xAI adds that we do not model. The
+// request cannot be passed through, because xAI rejects OpenAI-only arguments
+// outright; see shapeXAIImageRequest.
 func (e *XAIExecutor) executeImageGeneration(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	execCtx := newExecutionContext(ctx, e.Identifier(), e.cfg, auth, req, opts, ExecutionOptions{})
 	reporter := execCtx.Reporter()
@@ -75,6 +75,15 @@ func (e *XAIExecutor) executeImageGeneration(ctx context.Context, auth *cliproxy
 	payload := req.Payload
 	if len(bytes.TrimSpace(payload)) == 0 {
 		return resp, statusErr{code: http.StatusBadRequest, msg: "image request body is empty"}
+	}
+
+	// xAI rejects the entire request when an OpenAI-only argument is present, so
+	// the body is filtered to what the Imagine endpoints accept.
+	payload, dropped := shapeXAIImageRequest(payload)
+	if len(dropped) > 0 {
+		logWithRequestID(execCtx.Context).Debugf(
+			"xai image request: dropped unsupported arguments %s", strings.Join(dropped, ", "),
+		)
 	}
 
 	endpoint := strings.TrimSuffix(xaiMediaBaseURL(auth), "/") + xaiMediaPath(opts.Alt)
