@@ -210,6 +210,7 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 		models = applyExcludedModels(models, excluded)
 	default:
 		if s.registerOpenAICompatModels(a, provider, compatProviderKey, compatDisplayName, compatDetected) {
+			logModelRegistration(a, provider, authKind, "openai-compat", nil)
 			return
 		}
 	}
@@ -222,6 +223,7 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 		if key == "" {
 			key = strings.ToLower(strings.TrimSpace(a.Provider))
 		}
+		logModelRegistration(a, provider, authKind, "catalog", models)
 		GlobalModelRegistry().RegisterClient(a.ID, key, applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
 		if provider == "antigravity" {
 			s.backfillAntigravityModels(a, models)
@@ -229,6 +231,7 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 		return
 	}
 
+	logModelRegistration(a, provider, authKind, "none", nil)
 	GlobalModelRegistry().UnregisterClient(a.ID)
 }
 
