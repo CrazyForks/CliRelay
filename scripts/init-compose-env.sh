@@ -134,3 +134,14 @@ set_default CLIRELAY_REDIS_ENABLE "true"
 set_default CLIRELAY_REDIS_ADDR "redis:6379"
 set_default CLIRELAY_REDIS_DB "$redis_db"
 set_default CLIRELAY_REDIS_DATA_PATH "${project_dir}/redis-data"
+
+# Bring the deployment's compose topology up to what this build needs. This used to
+# live in the updater sidecar, which meant a stale updater wrote a topology the
+# application could no longer run and every project refactor risked breaking online
+# update. It belongs here: this runs from the new image, before anything is
+# recreated, so each build migrates its own deployment forward.
+if [ -x /CLIProxyAPI/clirelay-compose-migrate ]; then
+	CLIRELAY_ENV_FILE="$env_file" \
+	CLIRELAY_PROJECT_DIR="$project_dir" \
+	/CLIProxyAPI/clirelay-compose-migrate
+fi

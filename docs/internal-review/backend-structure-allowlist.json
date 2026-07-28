@@ -9,10 +9,6 @@
     ],
     "baseline_above_800": [
       {
-        "path": "cmd/updater/main.go",
-        "max_lines": 1144
-      },
-      {
         "path": "internal/api/handlers/management/end_user.go",
         "max_lines": 912
       },
@@ -43,10 +39,6 @@
       {
         "path": "internal/runtime/executor/codex_image_generation_bridge.go",
         "max_lines": 1196
-      },
-      {
-        "path": "internal/runtime/executor/opencode_go_executor.go",
-        "max_lines": 817
       },
       {
         "path": "internal/storage/postgres/migrations.go",
