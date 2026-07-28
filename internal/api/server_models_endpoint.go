@@ -68,17 +68,18 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 
 		tenantID := requestTenantID(c)
 		tenantScoped := tenantID != identity.SystemTenantID
-		var portalVisibleModelIDs map[string]struct{}
-		if tenantScoped && s.handlers != nil {
-			portalVisibleModelIDs = modelcatalog.NewForTenant(tenantID, s.cfg, s.handlers.AuthManager).
-				PortalVisibleModelIDs(allowedChannelsRaw, allowedChannelGroupsRaw)
-		}
 		// The channel-group editor lists models so an operator can tick them into
 		// AllowedModels. Filtering that list by AllowedModels makes a model that is
 		// not yet allowed impossible to add — the list to edit it is gated on the
 		// very setting being edited. Only the editor sets this flag; plaza and
 		// catalog keep enforcement.
 		ignoreGroupAllowedModels := queryFlagEnabled(c, "ignore_group_allowed_models", "ignore-group-allowed-models")
+		var portalVisibleModelIDs map[string]struct{}
+		if tenantScoped && s.handlers != nil {
+			portalVisibleModelIDs = modelcatalog.NewForTenant(tenantID, s.cfg, s.handlers.AuthManager).
+				PortalVisibleModelIDs(allowedChannelsRaw, allowedChannelGroupsRaw,
+					modelcatalog.AvailabilityFilterOptions{IgnoreGroupAllowedModels: ignoreGroupAllowedModels})
+		}
 		scopedRoutingRestricted := !ignoreGroupAllowedModels &&
 			s.hasScopedRoutingModelRestrictionForTenant(tenantID, routeGroup, allowedChannelGroups)
 		needsScopeFilter := tenantScoped || allowedModels != nil || allowedChannels != nil || allowedChannelGroups != nil || routeGroup != "" || scopedRoutingRestricted
