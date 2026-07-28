@@ -9,6 +9,15 @@ import (
 // filterModelsByRoutingAllowedModels drops models outside the effective channel
 // group's allowed-models list. Used after live-discovery merge: discovery models
 // are not registry-backed, so CanServe cannot enforce AllowedModels for them.
+// filterModelsByRoutingAllowedModelsOpts skips the filter entirely when the caller
+// is the channel-group editor, which must list models it is meant to add.
+func (s *Service) filterModelsByRoutingAllowedModelsOpts(opts AvailabilityFilterOptions, models []map[string]any, allowedGroupsRaw string) []map[string]any {
+	if opts.IgnoreGroupAllowedModels {
+		return models
+	}
+	return s.filterModelsByRoutingAllowedModels(models, allowedGroupsRaw)
+}
+
 func (s *Service) filterModelsByRoutingAllowedModels(models []map[string]any, allowedGroupsRaw string) []map[string]any {
 	allowed := s.routingAllowedModels(allowedGroupsRaw)
 	if allowed == nil {
