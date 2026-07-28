@@ -727,3 +727,104 @@ func TestImageGenerationSizePresetsAreTenantScoped(t *testing.T) {
 		t.Fatalf("tenant B inherited tenant A presets: %s", rec.Body.String())
 	}
 }
+
+// managementImageProviderExecutor records which credential provider a request was
+// routed to.
+type managementImageProviderExecutor struct {
+	managementImageExecutor
+	identifier string
+}
+
+func (e *managementImageProviderExecutor) Identifier() string { return e.identifier }
+
+func registerManagementImageProviderAuth(t *testing.T, manager *coreauth.Manager, id string, provider string, models ...string) {
+	t.Helper()
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       id,
+		Provider: provider,
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"access_token": "token"},
+	}); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	modelInfos := make([]*registry.ModelInfo, 0, len(models))
+	for _, model := range models {
+		if strings.TrimSpace(model) != "" {
+			modelInfos = append(modelInfos, &registry.ModelInfo{ID: model})
+		}
+	}
+	registry.GetGlobalRegistry().RegisterClient(id, provider, modelInfos)
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+}
+
+// TestImageGenerationRoutesGrokModelsToXAI is the point of the change: the handler
+// used to pin every image request to the codex credential pool, so Grok image
+// models were unreachable from the console even once the runtime could serve them.
+func TestImageGenerationRoutesGrokModelsToXAI(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &managementImageProviderExecutor{identifier: "xai"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	registerManagementImageProviderAuth(t, manager, "xai-auth-image", "xai", "grok-imagine-image")
+
+	h := &Handler{authManager: manager}
+	_, err := h.executeImageGenerationTest(
+		context.Background(),
+		[]byte(`{"model":"grok-imagine-image","prompt":"a cat"}`),
+		imageGenerationAlt,
+	)
+	if err != nil {
+		t.Fatalf("executeImageGenerationTest() error = %v", err)
+	}
+	if executor.calls != 1 {
+		t.Fatalf("xai executor calls = %d, want 1", executor.calls)
+	}
+	if executor.model != "grok-imagine-image" {
+		t.Errorf("model = %q, want grok-imagine-image", executor.model)
+	}
+	if executor.alt != imageGenerationAlt {
+		t.Errorf("alt = %q, want %q", executor.alt, imageGenerationAlt)
+	}
+}
+
+// TestImageGenerationStillRoutesCodexModelsToCodex guards the existing path from
+// regressing while the provider is derived rather than pinned.
+func TestImageGenerationStillRoutesCodexModelsToCodex(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &managementImageProviderExecutor{identifier: "codex"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	registerManagementImageProviderAuth(t, manager, "codex-auth-image", "codex", imageGenerationModel)
+
+	h := &Handler{authManager: manager}
+	if _, err := h.executeImageGenerationTest(
+		context.Background(),
+		[]byte(`{"model":"gpt-image-2","prompt":"a cat"}`),
+		imageGenerationAlt,
+	); err != nil {
+		t.Fatalf("executeImageGenerationTest() error = %v", err)
+	}
+	if executor.calls != 1 {
+		t.Fatalf("codex executor calls = %d, want 1", executor.calls)
+	}
+}
+
+func TestImageGenerationRejectsNonImageModels(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := &Handler{authManager: manager}
+	_, err := h.executeImageGenerationTest(
+		context.Background(),
+		[]byte(`{"model":"grok-4.5","prompt":"a cat"}`),
+		imageGenerationAlt,
+	)
+	if err == nil {
+		t.Fatal("a chat model must not be accepted by the image generation path")
+	}
+	if !strings.Contains(err.Error(), "grok-4.5") {
+		t.Errorf("error should name the rejected model, got %q", err)
+	}
+}
