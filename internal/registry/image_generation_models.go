@@ -28,17 +28,19 @@ var imageGenerationModels = map[string]imageGenerationModelDefaults{
 		PricePerCall: 0.04,
 		Description:  "Image generation model billed per invocation",
 	},
-	// Grok Imagine. Pricing is left at zero because xAI bills these against the
-	// subscription rather than at a published per-image rate; an invented number
-	// would show up as real spend in usage reporting.
+	// Grok Imagine. These two ids are what api.x.ai actually serves; earlier
+	// revisions also listed grok-imagine-image-pro and grok-2-image-1212, taken
+	// from a third-party model list and never present in the live catalog, so
+	// selecting them could only ever fail.
+	//
+	// Pricing is left at zero because xAI bills these against the subscription
+	// rather than at a published per-image rate; an invented number would show up
+	// as real spend in usage reporting.
 	"grok-imagine-image": {
 		Description: "Grok Imagine image generation, billed per invocation",
 	},
-	"grok-imagine-image-pro": {
-		Description: "Grok Imagine Pro image generation, billed per invocation",
-	},
-	"grok-2-image-1212": {
-		Description: "Grok 2 image generation, billed per invocation",
+	"grok-imagine-image-quality": {
+		Description: "Grok Imagine Quality image generation, billed per invocation",
 	},
 }
 
@@ -183,8 +185,6 @@ func SupportsImageEditing(modelID string) bool {
 	case strings.HasPrefix(normalized, "grok-imagine-image"):
 		return true
 	default:
-		// grok-2-image-1212 is text-to-image only; offering an edit form for it
-		// would produce upstream 404s rather than a useful error.
 		return false
 	}
 }

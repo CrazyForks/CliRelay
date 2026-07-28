@@ -40,33 +40,20 @@ func getXAIImageModelDefinitions() []*ModelInfo {
 			DisplayName: "Grok Imagine",
 			Name:        "grok-imagine-image",
 			Description: "Grok Imagine text-to-image generation with reference image editing.",
-			// Media requests go to the official API host even for subscription
+			// Media requests reach the official API host even for subscription
 			// credentials; see xaiMediaBaseURL in the runtime executor.
 			SupportedParameters: []string{"prompt", "n", "response_format", "image", "mask"},
 		},
 		{
-			ID:                  "grok-imagine-image-pro",
+			ID:                  "grok-imagine-image-quality",
 			Object:              "model",
 			OwnedBy:             "xai",
 			Type:                "xai",
-			Version:             "grok-imagine-image-pro",
-			DisplayName:         "Grok Imagine Pro",
-			Name:                "grok-imagine-image-pro",
+			Version:             "grok-imagine-image-quality",
+			DisplayName:         "Grok Imagine Quality",
+			Name:                "grok-imagine-image-quality",
 			Description:         "Higher fidelity Grok Imagine image generation.",
 			SupportedParameters: []string{"prompt", "n", "response_format", "image", "mask"},
-		},
-		{
-			ID:          "grok-2-image-1212",
-			Object:      "model",
-			OwnedBy:     "xai",
-			Type:        "xai",
-			Version:     "grok-2-image-1212",
-			DisplayName: "Grok 2 Image",
-			Name:        "grok-2-image-1212",
-			Description: "Grok 2 text-to-image generation.",
-			// No image input: this model has no edit endpoint, so advertising one
-			// would only produce upstream 404s.
-			SupportedParameters: []string{"prompt", "n", "response_format"},
 		},
 	}
 }

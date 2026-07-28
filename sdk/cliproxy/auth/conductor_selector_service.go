@@ -232,9 +232,13 @@ func (s selectorService) pickLocked(
 	includeCandidate func(candidate *Auth) bool,
 ) (*Auth, string, error) {
 	registryRef := s.manager.modelRegistry
+	var diagnosis error
 	for _, selectorRouteGroup := range scope.routeGroupsToTry() {
 		candidates := s.buildCandidatesLocked(scope, selectorRouteGroup, tried, registryRef, includeCandidate)
 		if len(candidates) == 0 {
+			if diagnosis == nil {
+				diagnosis = s.diagnoseEmptyCandidates(scope, selectorRouteGroup, includeCandidate)
+			}
 			continue
 		}
 		selector := s.manager.selectorForRoutingScopeLocked(scope.cfg, selectorRouteGroup, scope.allowedGroups)
@@ -246,6 +250,11 @@ func (s selectorService) pickLocked(
 			return nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 		}
 		return selected, selectorRouteGroup, nil
+	}
+	// A specific cause beats the generic message: "no auth available" reads as
+	// "the account is missing" when the account is present and healthy.
+	if diagnosis != nil {
+		return nil, "", diagnosis
 	}
 	return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 }
