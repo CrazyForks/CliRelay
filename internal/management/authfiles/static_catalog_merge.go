@@ -20,11 +20,15 @@ import (
 // from the panel the moment an operator pressed refresh, which reads as "this
 // account does not have that model".
 //
-// Displayed and routable have to agree, so discovery is merged over the static
-// catalog rather than replacing it.
+// The merge is deliberately narrow. Discovery is authoritative for anything it can
+// report: a chat model absent from the listing has been retired upstream, and
+// resurrecting it from the compiled-in catalog would show operators models they
+// cannot use. Only models the listing structurally cannot contain are restored —
+// image generation lives on a different endpoint and never appears in a chat model
+// listing, which is exactly why gpt-image-2 went missing while gpt-5.5 did not.
 
-// mergeDiscoveryWithStaticCatalog returns the union of a provider's static catalog
-// and its live discovery result.
+// mergeDiscoveryWithStaticCatalog restores the static models a provider's discovery
+// endpoint cannot report, leaving everything else to discovery.
 //
 // Upstream wins on conflicting ids: when a provider does report a model, its live
 // definition is more current than the compiled-in one. Providers whose discovery is
@@ -50,7 +54,7 @@ func mergeDiscoveryWithStaticCatalog(provider string, live []*registry.ModelInfo
 	merged := make([]*registry.ModelInfo, 0, len(live)+len(static))
 	merged = append(merged, live...)
 	for _, model := range static {
-		if model == nil {
+		if model == nil || !undiscoverableByChatListing(model.ID) {
 			continue
 		}
 		if _, exists := seen[strings.ToLower(strings.TrimSpace(model.ID))]; exists {
@@ -59,6 +63,16 @@ func mergeDiscoveryWithStaticCatalog(provider string, live []*registry.ModelInfo
 		merged = append(merged, model)
 	}
 	return merged
+}
+
+// undiscoverableByChatListing reports whether a model can never appear in a
+// provider's chat model listing, and therefore has to come from the static catalog.
+//
+// Image generation is served by a separate endpoint and is absent from every chat
+// listing regardless of entitlement. A chat model missing from the listing means
+// something different — it was retired — so it is deliberately not restored here.
+func undiscoverableByChatListing(modelID string) bool {
+	return registry.IsImageGenerationModel(modelID)
 }
 
 // discoveryIsPartial reports whether a provider's upstream listing is known to be a
