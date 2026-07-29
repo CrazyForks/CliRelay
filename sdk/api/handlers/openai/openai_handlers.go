@@ -50,6 +50,10 @@ func (h *OpenAIAPIHandler) HandlerType() string {
 	return OpenAI
 }
 
+func openAIImageGenerationProvider(modelID string) string {
+	return registry.ImageGenerationProvider(modelID)
+}
+
 // Models returns the OpenAI-compatible model metadata supported by this handler.
 func (h *OpenAIAPIHandler) Models() []map[string]any {
 	// Get dynamic models from the global registry
