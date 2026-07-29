@@ -11,6 +11,7 @@ const (
 	ContextKeyGin                      = sdkrequestctx.ContextKeyGin
 	ContextKeyRoundTripper             = sdkrequestctx.ContextKeyRoundTripper
 	ContextKeyAPIKey                   = sdkrequestctx.ContextKeyAPIKey
+	ContextKeyTrustedTenantID          = sdkrequestctx.ContextKeyTrustedTenantID
 	ContextKeyImageGenerationPhaseHook = sdkrequestctx.ContextKeyImageGenerationPhaseHook
 )
 

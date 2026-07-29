@@ -377,7 +377,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	inputContent := resolveDeferredUsageContent(record.InputContent, record.InputContentPath)
 	outputContent := resolveDeferredUsageContent(record.OutputContent, record.OutputContentPath)
 	detailContent := resolveDeferredUsageContent(record.DetailContent, record.DetailContentPath)
-	InsertLogWithDetailsIdentitySubjectUpstreamVisionStreaming(statsKey, apiKeyID, record.AuthSubjectID, apiKeyName, modelName, record.UpstreamModel, record.VisionFallbackModel, record.Source, record.ChannelName,
+	InsertLogWithDetailsIdentitySubjectUpstreamVisionStreaming(record.TrustedTenantID, statsKey, apiKeyID, record.AuthSubjectID, apiKeyName, modelName, record.UpstreamModel, record.VisionFallbackModel, record.Source, record.ChannelName,
 		record.AuthIndex, failed, timestamp, record.LatencyMs, record.FirstTokenMs, detail,
 		inputContent, outputContent, detailContent, record.Streaming)
 }
