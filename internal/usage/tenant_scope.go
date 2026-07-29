@@ -12,6 +12,13 @@ func normalizeTenantID(tenantID string) string {
 	return tenantID
 }
 
+func resolveRequestLogTenantID(trustedTenantID, apiKey string) string {
+	if tenantID := strings.TrimSpace(trustedTenantID); tenantID != "" {
+		return normalizeTenantID(tenantID)
+	}
+	return normalizeTenantID(ResolveAPIKeyTenant(apiKey))
+}
+
 // isSystemTenant reports whether tenantID resolves to the shared system catalog tenant.
 // OpenRouter pricing/model metadata is written there and inherited by business tenants on read.
 func isSystemTenant(tenantID string) bool {

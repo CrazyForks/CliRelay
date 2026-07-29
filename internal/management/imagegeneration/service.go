@@ -108,6 +108,7 @@ func (s *Service) run(tenantID, taskID string, payload []byte, alt string) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
 	defer cancel()
+	ctx = context.WithValue(ctx, util.ContextKeyTrustedTenantID, tenantID)
 	ctx = context.WithValue(ctx, util.ContextKeyAPIKey, s.systemAPIKey)
 	ctx = context.WithValue(ctx, util.ContextKeyImageGenerationPhaseHook, func(phase string) {
 		s.update(taskID, func(item *task) {
