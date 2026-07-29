@@ -55,7 +55,7 @@ func (e *responsesCaptureExecutor) HttpRequest(_ context.Context, _ *coreauth.Au
 	return nil, errors.New("not implemented")
 }
 
-func TestOpenAIResponsesGPTImage2UsesStandardNonStreamingResponsesFlow(t *testing.T) {
+func TestOpenAIResponsesRejectsGPTImage2BeforeNonStreamingExecution(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	executor := &responsesCaptureExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -80,21 +80,18 @@ func TestOpenAIResponsesGPTImage2UsesStandardNonStreamingResponsesFlow(t *testin
 	resp := httptest.NewRecorder()
 	router.ServeHTTP(resp, req)
 
-	if resp.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d, body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body=%s", resp.Code, http.StatusBadRequest, resp.Body.String())
 	}
-	if executor.calls != 1 {
-		t.Fatalf("executor calls = %d, want 1", executor.calls)
+	if executor.calls != 0 {
+		t.Fatalf("executor calls = %d, want 0", executor.calls)
 	}
-	if executor.alt == openAIImageGenerationAlt {
-		t.Fatalf("alt = %q, want standard responses flow instead of image alt", executor.alt)
-	}
-	if strings.TrimSpace(resp.Body.String()) != `{"ok":true}` {
-		t.Fatalf("body = %s, want passthrough responses payload", resp.Body.String())
+	if body := resp.Body.String(); !strings.Contains(body, `"type":"invalid_request_error"`) || !strings.Contains(body, "/v1/images/generations") {
+		t.Fatalf("body = %s, want local image-endpoint guidance", body)
 	}
 }
 
-func TestOpenAIResponsesGPTImage2UsesStandardStreamingResponsesFlow(t *testing.T) {
+func TestOpenAIResponsesRejectsGPTImage2BeforeStreamingExecution(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	executor := &responsesCaptureExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -119,16 +116,13 @@ func TestOpenAIResponsesGPTImage2UsesStandardStreamingResponsesFlow(t *testing.T
 
 	h.Responses(c)
 
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d, body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
 	}
-	if executor.streamCalls != 1 {
-		t.Fatalf("stream calls = %d, want 1", executor.streamCalls)
+	if executor.streamCalls != 0 {
+		t.Fatalf("stream calls = %d, want 0", executor.streamCalls)
 	}
-	if executor.streamAlt == openAIImageGenerationAlt {
-		t.Fatalf("stream alt = %q, want standard responses streaming flow", executor.streamAlt)
-	}
-	if !strings.Contains(recorder.Body.String(), `"type":"response.completed"`) {
-		t.Fatalf("body = %s, want passthrough responses SSE payload", recorder.Body.String())
+	if body := recorder.Body.String(); !strings.Contains(body, `"type":"invalid_request_error"`) || !strings.Contains(body, "/v1/images/generations") {
+		t.Fatalf("body = %s, want local image-endpoint guidance", body)
 	}
 }
