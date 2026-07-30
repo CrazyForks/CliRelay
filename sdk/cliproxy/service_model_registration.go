@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"context"
+	serviceapp "github.com/router-for-me/CLIProxyAPI/v6/sdkbridge/service"
 	"strings"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -209,15 +210,20 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 		models = applyExcludedModels(models, excluded)
 	default:
 		if s.registerOpenAICompatModels(a, provider, compatProviderKey, compatDisplayName, compatDetected) {
+			logModelRegistration(a, provider, authKind, "openai-compat", nil)
 			return
 		}
 	}
 	models = applyOAuthModelAlias(s.cfg, provider, authKind, models)
+	// Applied after every filter: image models are entitlement-universal and never
+	// reported by chat discovery, so chat-model curation must not remove them.
+	models = serviceapp.WithRegisteredImageModels(provider, models)
 	if len(models) > 0 {
 		key := provider
 		if key == "" {
 			key = strings.ToLower(strings.TrimSpace(a.Provider))
 		}
+		logModelRegistration(a, provider, authKind, "catalog", models)
 		GlobalModelRegistry().RegisterClient(a.ID, key, applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
 		if provider == "antigravity" {
 			s.backfillAntigravityModels(a, models)
@@ -225,6 +231,7 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 		return
 	}
 
+	logModelRegistration(a, provider, authKind, "none", nil)
 	GlobalModelRegistry().UnregisterClient(a.ID)
 }
 

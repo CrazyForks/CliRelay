@@ -20,6 +20,10 @@ const (
 	// paths that still need request-log attribution.
 	ContextKeyAPIKey ContextKey = "cliproxy.api_key"
 
+	// ContextKeyTrustedTenantID carries a tenant scope established at an
+	// authenticated execution boundary. It must not be populated from raw client input.
+	ContextKeyTrustedTenantID ContextKey = "cliproxy.trusted_tenant_id"
+
 	// ContextKeyImageGenerationPhaseHook carries an optional callback that
 	// receives backend image-generation phase updates.
 	ContextKeyImageGenerationPhaseHook ContextKey = "cliproxy.image_generation.phase_hook"

@@ -1,4 +1,4 @@
-package main
+package composeplan
 
 import (
 	"path/filepath"

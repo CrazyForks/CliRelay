@@ -56,6 +56,35 @@ PY
 go vet ./...
 go test ./...
 
+# The updater is a separate Go module, so the ./... above does not reach it. It is
+# the component that must survive refactors of everything else, which makes leaving
+# it untested in CI exactly the wrong trade.
+(
+  cd updater
+  go vet ./...
+  go test ./...
+  go build -o /dev/null .
+)
+
+# Enforce the decoupling instead of trusting it: the updater must not acquire a
+# dependency on the application it updates, or on anything else. If this fails, the
+# fix is to move the data into the protocol, not to relax the check.
+python3 - <<'GUARD'
+import re
+import sys
+
+with open("updater/go.mod", encoding="utf-8") as handle:
+    text = handle.read()
+
+if re.search(r"^\s*require\b", text, re.MULTILINE):
+    print("updater/go.mod declares a dependency; the updater module must stay dependency-free.")
+    sys.exit(1)
+
+if "router-for-me/CLIProxyAPI" in text:
+    print("updater/go.mod references the application module; the dependency must stay one-way.")
+    sys.exit(1)
+GUARD
+
 required_golangci_lint_version="v1.64.5"
 golangci_lint_bin="${GOLANGCI_LINT_BIN:-}"
 if [ -z "${golangci_lint_bin}" ]; then

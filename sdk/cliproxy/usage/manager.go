@@ -33,6 +33,10 @@ type Record struct {
 	Streaming           bool
 	Detail              Detail
 
+	// TrustedTenantID is set only by authenticated internal execution paths.
+	// When empty, persistence resolves the tenant from the real API key.
+	TrustedTenantID string
+
 	// Optional: request/response content for log detail viewer.
 	// These are stored in SQLite when non-empty and can be retrieved via the
 	// /usage/logs/:id/content API. The persistence layer may compress and retain

@@ -90,9 +90,11 @@ func loadXAIModels() []*sdkmodelcatalog.ModelInfo {
 func fallbackXAIModels() []*sdkmodelcatalog.ModelInfo {
 	if models := loadXAIModels(); len(models) > 0 {
 		log.Debugf("xai executor: using cached model list (%d models)", len(models))
-		return models
+		return withXAIImageModels(models)
 	}
-	return nil
+	// The Imagine models are not discoverable, so they are still routable even when
+	// nothing could be fetched and no cache exists.
+	return withXAIImageModels(nil)
 }
 
 // FetchXAIModels retrieves the OAuth account's live model list from xAI.
@@ -147,7 +149,7 @@ func FetchXAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Co
 		return fallbackXAIModels()
 	}
 	storeXAIModels(models)
-	return models
+	return withXAIImageModels(models)
 }
 
 func parseXAIModels(body []byte, now int64) ([]*sdkmodelcatalog.ModelInfo, bool) {
