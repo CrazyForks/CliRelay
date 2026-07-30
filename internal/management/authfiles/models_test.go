@@ -185,8 +185,11 @@ func TestDiscoveryCacheSharedAcrossSameProviderAccounts(t *testing.T) {
 		if reg.calls != 0 {
 			t.Fatalf("RegisterClient must not run for shared discovery, calls=%d", reg.calls)
 		}
-		if len(models) != 2 || models[0]["id"] != "gpt-5.6-sol" {
-			t.Fatalf("%s models=%#v", name, models)
+		// Discovery supplements the static catalog rather than replacing it, so the
+		// assertion is that the discovered models are served — not that they are
+		// the only ones. Replacing the catalog is what hid gpt-image-2 from the panel.
+		if !containsModelID(models, "gpt-5.6-sol") || !containsModelID(models, "gpt-5.5") {
+			t.Fatalf("%s did not serve the shared discovery result: %#v", name, models)
 		}
 	}
 
@@ -202,14 +205,19 @@ func TestDiscoveryCacheSharedAcrossSameProviderAccounts(t *testing.T) {
 	claudeModels, claudeLabel := ListModelEntriesLiveForTenant(
 		context.Background(), manager, source, reg, nil, "", "claude-a.json", false,
 	)
-	if claudeLabel != "upstream" || len(claudeModels) != 1 || claudeModels[0]["id"] != "claude-sonnet-4" {
+	// The point of this assertion is cache isolation: claude serves its own
+	// discovery result and none of codex's.
+	if claudeLabel != "upstream" || !containsModelID(claudeModels, "claude-sonnet-4") {
 		t.Fatalf("claude models=%#v label=%q", claudeModels, claudeLabel)
+	}
+	if containsModelID(claudeModels, "gpt-5.6-sol") {
+		t.Fatalf("codex discovery leaked into claude: %#v", claudeModels)
 	}
 	// codex still its own cache
 	codexModels, codexLabel := ListModelEntriesLiveForTenant(
 		context.Background(), manager, source, reg, nil, "", "codex-a.json", false,
 	)
-	if codexLabel != "upstream" || len(codexModels) != 2 {
+	if codexLabel != "upstream" || !containsModelID(codexModels, "gpt-5.6-sol") {
 		t.Fatalf("codex still shared cache: %#v label=%q", codexModels, codexLabel)
 	}
 }
@@ -260,8 +268,8 @@ func TestXAISharedDiscoveryCacheAcrossAccounts(t *testing.T) {
 		if label != "upstream" {
 			t.Fatalf("%s label=%q want upstream", name, label)
 		}
-		if len(models) != 2 || models[0]["id"] != "grok-4" {
-			t.Fatalf("%s models=%#v want shared xai discovery", name, models)
+		if !containsModelID(models, "grok-4") {
+			t.Fatalf("%s did not serve the shared xai discovery result: %#v", name, models)
 		}
 	}
 	if reg.calls != 0 {
@@ -278,4 +286,14 @@ func TestSupportsSharedDiscoveryIncludesXAI(t *testing.T) {
 	if SupportsSharedDiscovery("antigravity") {
 		t.Fatalf("antigravity must not use shared discovery")
 	}
+}
+
+// containsModelID reports whether a rendered model list carries an id.
+func containsModelID(models []map[string]any, id string) bool {
+	for _, model := range models {
+		if got, _ := model["id"].(string); got == id {
+			return true
+		}
+	}
+	return false
 }

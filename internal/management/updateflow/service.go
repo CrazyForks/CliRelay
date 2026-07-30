@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"clirelay.local/updater/protocol"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -244,26 +245,30 @@ func (s *Service) TriggerUpdate(ctx context.Context, check *CheckResponse) (*Tri
 	if check == nil {
 		return nil, fmt.Errorf("update target is nil")
 	}
-	payload := map[string]string{
-		"image":                check.DockerImage,
-		"tag":                  check.DockerTag,
-		"channel":              check.TargetChannel,
-		"current_version":      check.CurrentVersion,
-		"current_commit":       check.CurrentCommit,
-		"current_ui_version":   check.CurrentUIVersion,
-		"current_ui_commit":    check.CurrentUICommit,
-		"version":              check.LatestVersion,
-		"commit":               check.LatestCommit,
-		"commit_url":           check.LatestCommitURL,
-		"ui_version":           check.LatestUIVersion,
-		"ui_commit":            check.LatestUICommit,
-		"ui_commit_url":        check.LatestUICommitURL,
-		"release_name":         check.ReleaseName,
-		"release_tag":          check.ReleaseTag,
-		"release_notes":        check.ReleaseNotes,
-		"release_url":          check.ReleaseURL,
-		"release_published_at": check.ReleasePublishedAt,
-		"service":              UpdaterTargetService(),
+	// The flat fields are still sent alongside the plan. A sidecar that has not been
+	// refreshed yet ignores the plan and acts on these, which is what lets the
+	// application be updated before the updater that will replace it.
+	payload := protocol.UpdateRequest{
+		Plan:               BuildUpdatePlan(check),
+		Service:            UpdaterTargetService(),
+		Image:              check.DockerImage,
+		Tag:                check.DockerTag,
+		Channel:            check.TargetChannel,
+		CurrentVersion:     check.CurrentVersion,
+		CurrentCommit:      check.CurrentCommit,
+		CurrentUIVersion:   check.CurrentUIVersion,
+		CurrentUICommit:    check.CurrentUICommit,
+		Version:            check.LatestVersion,
+		Commit:             check.LatestCommit,
+		CommitURL:          check.LatestCommitURL,
+		UIVersion:          check.LatestUIVersion,
+		UICommit:           check.LatestUICommit,
+		UICommitURL:        check.LatestUICommitURL,
+		ReleaseName:        check.ReleaseName,
+		ReleaseTag:         check.ReleaseTag,
+		ReleaseNotes:       check.ReleaseNotes,
+		ReleaseURL:         check.ReleaseURL,
+		ReleasePublishedAt: check.ReleasePublishedAt,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

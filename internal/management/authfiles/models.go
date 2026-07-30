@@ -291,16 +291,16 @@ func ListModelEntriesLiveForTenant(
 	if supportsSharedDiscovery(provider) {
 		if !refresh {
 			if cached := loadDiscoveryCache(tenantID, provider); len(cached) > 0 {
-				return modelEntriesFromRegistry(cached), "upstream"
+				return modelEntriesFromRegistry(mergeDiscoveryWithStaticCatalog(provider, cached)), "upstream"
 			}
 		}
 		live, ok := warmSharedDiscovery(ctx, auth, cfg, tenantID, provider, refresh)
 		if ok && len(live) > 0 {
-			return modelEntriesFromRegistry(live), "upstream"
+			return modelEntriesFromRegistry(mergeDiscoveryWithStaticCatalog(provider, live)), "upstream"
 		}
 		// Live miss/fail: keep last good discovery list if any (do not snap back to static).
 		if cached := loadDiscoveryCache(tenantID, provider); len(cached) > 0 {
-			return modelEntriesFromRegistry(cached), "upstream"
+			return modelEntriesFromRegistry(mergeDiscoveryWithStaticCatalog(provider, cached)), "upstream"
 		}
 		return ListModelEntriesForTenant(manager, source, tenantID, name), sourceLabel
 	}
@@ -313,6 +313,10 @@ func ListModelEntriesLiveForTenant(
 	if len(live) == 0 {
 		return ListModelEntriesForTenant(manager, source, tenantID, name), sourceLabel
 	}
+
+	// Discovery for these providers is a subset of what the runtime registers, so
+	// it supplements the static catalog instead of replacing the panel's view.
+	live = mergeDiscoveryWithStaticCatalog(liveProvider, live)
 
 	sourceLabel = "upstream"
 	if updateRegistry && registrar != nil {

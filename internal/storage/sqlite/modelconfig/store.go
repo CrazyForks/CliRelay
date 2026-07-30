@@ -699,13 +699,7 @@ func defaultModelConfigRows() []ModelConfigRow {
 				PricingMode:         "token",
 				Source:              "seed",
 			}
-			if modelID == "gpt-image-2" {
-				row.Description = "Image generation model billed per invocation"
-				row.InputModalities = []string{"text"}
-				row.OutputModalities = []string{"image"}
-				row.PricingMode = "call"
-				row.PricePerCall = 0.04
-			}
+			applyImageGenerationSeedDefaults(&row, modelID)
 			rows = append(rows, row)
 		}
 	}

@@ -61,6 +61,11 @@ func (h *OpenAIImagesAPIHandler) executeImages(c *gin.Context, rawJSON []byte, a
 			rawJSON = updated
 		}
 	}
+	provider := openAIImageGenerationProvider(modelName)
+	if provider == "" {
+		writeOpenAIImagesError(c, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("model %q is not a supported image generation model", modelName))
+		return
+	}
 	imageCount, countErr := openAIImageRequestCount(rawJSON)
 	if countErr != nil {
 		writeOpenAIImagesError(c, http.StatusBadRequest, "invalid_request_error", countErr.Error())
@@ -89,7 +94,7 @@ func (h *OpenAIImagesAPIHandler) executeImages(c *gin.Context, rawJSON []byte, a
 				return
 			}
 		}
-		resp, err := h.AuthManager.Execute(cliCtx, []string{"codex"}, coreexecutor.Request{
+		resp, err := h.AuthManager.Execute(cliCtx, []string{provider}, coreexecutor.Request{
 			Model:   modelName,
 			Payload: execPayload,
 			Format:  sdktranslator.FromString("openai"),

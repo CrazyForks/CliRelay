@@ -45,6 +45,7 @@ FROM --platform=$BUILDPLATFORM golang:1.26.1-alpine AS backend-builder
 WORKDIR /app
 
 COPY go.mod go.sum ./
+COPY updater/go.mod ./updater/go.mod
 RUN go mod download
 
 COPY . .
@@ -70,7 +71,14 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
   -ldflags="-s -w" \
-  -o ./clirelay-updater ./cmd/updater/
+  -o ./clirelay-compose-migrate ./cmd/composemigrate/
+
+# The updater is a separate Go module with no dependencies, so it builds on its own.
+# Keeping it out of the main module is what stops it from drifting along with the
+# application it is responsible for updating.
+RUN cd ./updater && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+  -ldflags="-s -w" \
+  -o /app/clirelay-updater .
 
 # ── Runtime ──────────────────────────────────────────────────────────────────
 FROM alpine:3.22.0
@@ -84,6 +92,7 @@ RUN addgroup -S -g 10001 clirelay \
 
 COPY --from=backend-builder --chown=clirelay:clirelay /app/CLIProxyAPI /CLIProxyAPI/CLIProxyAPI
 COPY --from=backend-builder --chown=clirelay:clirelay /app/clirelay-updater /CLIProxyAPI/clirelay-updater
+COPY --from=backend-builder --chown=clirelay:clirelay /app/clirelay-compose-migrate /CLIProxyAPI/clirelay-compose-migrate
 COPY --from=frontend-builder --chown=clirelay:clirelay /frontend/dist/ /CLIProxyAPI/panel/
 
 COPY --chown=clirelay:clirelay config.example.yaml /CLIProxyAPI/config.example.yaml

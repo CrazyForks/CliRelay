@@ -103,8 +103,17 @@ func TestFetchXAIModelsFallsBackToCachedCatalog(t *testing.T) {
 			"base_url": "http://127.0.0.1:1",
 		},
 	}, nil)
-	if len(models) != 1 || models[0].ID != "cached-xai-model" {
-		t.Fatalf("fallback models = %+v, want cached-xai-model", models)
+	// The cached chat model must survive. It is no longer the only entry: the Grok
+	// Imagine models are not discoverable through /models at all, so they are merged
+	// into every credential's set and remain routable when discovery fails.
+	found := false
+	for _, model := range models {
+		if model != nil && model.ID == "cached-xai-model" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("fallback models = %+v, want the cached model retained", models)
 	}
 }
 

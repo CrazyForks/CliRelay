@@ -1,6 +1,10 @@
 package updateflow
 
-import "time"
+import (
+	"time"
+
+	"clirelay.local/updater/protocol"
+)
 
 const (
 	UpdateHTTPTimeout       = 10 * time.Second
@@ -58,47 +62,13 @@ type CheckResponse struct {
 	Message              string `json:"message,omitempty"`
 }
 
-type ProgressLogEntry struct {
-	Timestamp string `json:"timestamp"`
-	Stream    string `json:"stream"`
-	Message   string `json:"message"`
-}
+// ProgressLogEntry and ProgressResponse are aliases for the updater's wire contract
+// rather than copies of it. A mirrored struct would drift the moment either side
+// gained a field, and the panel would silently lose data it was already being sent.
+type ProgressLogEntry = protocol.LogEntry
 
-type ProgressResponse struct {
-	RunID              uint64             `json:"run_id,omitempty"`
-	EventID            uint64             `json:"event_id,omitempty"`
-	Status             string             `json:"status"`
-	Stage              string             `json:"stage"`
-	MessageCode        string             `json:"message_code,omitempty"`
-	Message            string             `json:"message,omitempty"`
-	ProgressPercent    float64            `json:"progress_percent,omitempty"`
-	ProgressCurrent    int                `json:"progress_current,omitempty"`
-	ProgressTotal      int                `json:"progress_total,omitempty"`
-	ProgressUnit       string             `json:"progress_unit,omitempty"`
-	Service            string             `json:"service,omitempty"`
-	CurrentVersion     string             `json:"current_version,omitempty"`
-	CurrentCommit      string             `json:"current_commit,omitempty"`
-	CurrentUIVersion   string             `json:"current_ui_version,omitempty"`
-	CurrentUICommit    string             `json:"current_ui_commit,omitempty"`
-	TargetImage        string             `json:"target_image,omitempty"`
-	TargetTag          string             `json:"target_tag,omitempty"`
-	TargetVersion      string             `json:"target_version,omitempty"`
-	TargetCommit       string             `json:"target_commit,omitempty"`
-	TargetCommitURL    string             `json:"target_commit_url,omitempty"`
-	TargetUIVersion    string             `json:"target_ui_version,omitempty"`
-	TargetUICommit     string             `json:"target_ui_commit,omitempty"`
-	TargetUICommitURL  string             `json:"target_ui_commit_url,omitempty"`
-	TargetChannel      string             `json:"target_channel,omitempty"`
-	ReleaseName        string             `json:"release_name,omitempty"`
-	ReleaseTag         string             `json:"release_tag,omitempty"`
-	ReleaseNotes       string             `json:"release_notes,omitempty"`
-	ReleaseURL         string             `json:"release_url,omitempty"`
-	ReleasePublishedAt string             `json:"release_published_at,omitempty"`
-	StartedAt          string             `json:"started_at,omitempty"`
-	UpdatedAt          string             `json:"updated_at,omitempty"`
-	FinishedAt         string             `json:"finished_at,omitempty"`
-	Logs               []ProgressLogEntry `json:"logs,omitempty"`
-}
+// ProgressResponse is the status the management API relays from the updater.
+type ProgressResponse = protocol.Status
 
 type TriggerResponse struct {
 	Status  string `json:"status"`

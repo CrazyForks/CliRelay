@@ -27,6 +27,7 @@ type managementImageExecutor struct {
 	payloads        []string
 	originalRequest string
 	metadata        map[string]any
+	authID          string
 	calls           int
 	err             error
 }
@@ -53,6 +54,9 @@ func (e *managementImageExecutor) Execute(ctx context.Context, auth *coreauth.Au
 	e.payloads = append(e.payloads, e.payload)
 	e.originalRequest = string(opts.OriginalRequest)
 	e.metadata = opts.Metadata
+	if auth != nil {
+		e.authID = auth.ID
+	}
 	if e.err != nil {
 		return coreexecutor.Response{}, e.err
 	}
@@ -81,8 +85,14 @@ func (e *managementImageExecutor) HttpRequest(context.Context, *coreauth.Auth, *
 
 func registerManagementImageAuth(t *testing.T, manager *coreauth.Manager, id string, models ...string) {
 	t.Helper()
+	registerManagementImageAuthForTenant(t, manager, identity.SystemTenantID, id, models...)
+}
+
+func registerManagementImageAuthForTenant(t *testing.T, manager *coreauth.Manager, tenantID, id string, models ...string) {
+	t.Helper()
 	if _, err := manager.Register(context.Background(), &coreauth.Auth{
 		ID:       id,
+		TenantID: tenantID,
 		Provider: "codex",
 		Status:   coreauth.StatusActive,
 		Metadata: map[string]any{"access_token": "token"},
@@ -346,6 +356,60 @@ func TestPostImageGenerationTestCreatesTaskAndPollsSucceededResult(t *testing.T)
 	}
 }
 
+func TestPostImageGenerationTestUsesEffectiveTenantAuth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	const tenantID = "00000000-0000-0000-0000-00000000000a"
+	systemExecutor := &managementImageExecutor{}
+	tenantExecutor := &managementImageExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(systemExecutor)
+	manager.RegisterExecutorForTenant(tenantID, tenantExecutor)
+	registerManagementImageAuth(t, manager, "codex-auth-system", imageGenerationModel)
+	registerManagementImageAuthForTenant(t, manager, tenantID, "codex-auth-tenant-a", imageGenerationModel)
+
+	h := &Handler{authManager: manager}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Set(managementPrincipalKey, identity.Principal{EffectiveTenant: identity.Tenant{ID: tenantID}})
+	req := httptest.NewRequest(http.MethodPost, "/image-generation/test", strings.NewReader(`{
+		"model":"gpt-image-2",
+		"prompt":"safe tenant test prompt"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	c.Request = req
+
+	h.PostImageGenerationTest(c)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	var created struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("Unmarshal create task response: %v", err)
+	}
+	waitForImageGenerationTaskForTenant(t, h, tenantID, created.TaskID, func(body []byte) bool {
+		var task struct {
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(body, &task); err != nil {
+			t.Fatalf("Unmarshal poll response: %v", err)
+		}
+		return task.Status == "succeeded"
+	})
+
+	if tenantExecutor.calls != 1 || tenantExecutor.authID != "codex-auth-tenant-a" {
+		t.Fatalf("tenant executor calls=%d auth=%q, want one call with tenant auth", tenantExecutor.calls, tenantExecutor.authID)
+	}
+	if systemExecutor.calls != 0 {
+		t.Fatalf("system executor calls = %d, want 0", systemExecutor.calls)
+	}
+	if got := tenantExecutor.metadata[coreexecutor.TenantMetadataKey]; got != tenantID {
+		t.Fatalf("tenant metadata = %v, want %q", got, tenantID)
+	}
+}
+
 func TestPostImageGenerationTestCreatesTaskAndPollsFailedError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -420,10 +484,16 @@ func TestPostImageGenerationTestCreatesTaskAndPollsFailedError(t *testing.T) {
 
 func waitForImageGenerationTask(t *testing.T, h *Handler, taskID string, done func([]byte) bool) {
 	t.Helper()
+	waitForImageGenerationTaskForTenant(t, h, identity.SystemTenantID, taskID, done)
+}
+
+func waitForImageGenerationTaskForTenant(t *testing.T, h *Handler, tenantID, taskID string, done func([]byte) bool) {
+	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		rec := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(rec)
+		c.Set(managementPrincipalKey, identity.Principal{EffectiveTenant: identity.Tenant{ID: tenantID}})
 		c.Params = gin.Params{{Key: "task_id", Value: taskID}}
 		c.Request = httptest.NewRequest(http.MethodGet, "/image-generation/test/"+taskID, nil)
 
@@ -725,5 +795,106 @@ func TestImageGenerationSizePresetsAreTenantScoped(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "4096x2304") {
 		t.Fatalf("tenant B inherited tenant A presets: %s", rec.Body.String())
+	}
+}
+
+// managementImageProviderExecutor records which credential provider a request was
+// routed to.
+type managementImageProviderExecutor struct {
+	managementImageExecutor
+	identifier string
+}
+
+func (e *managementImageProviderExecutor) Identifier() string { return e.identifier }
+
+func registerManagementImageProviderAuth(t *testing.T, manager *coreauth.Manager, id string, provider string, models ...string) {
+	t.Helper()
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       id,
+		Provider: provider,
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"access_token": "token"},
+	}); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	modelInfos := make([]*registry.ModelInfo, 0, len(models))
+	for _, model := range models {
+		if strings.TrimSpace(model) != "" {
+			modelInfos = append(modelInfos, &registry.ModelInfo{ID: model})
+		}
+	}
+	registry.GetGlobalRegistry().RegisterClient(id, provider, modelInfos)
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+}
+
+// TestImageGenerationRoutesGrokModelsToXAI is the point of the change: the handler
+// used to pin every image request to the codex credential pool, so Grok image
+// models were unreachable from the console even once the runtime could serve them.
+func TestImageGenerationRoutesGrokModelsToXAI(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &managementImageProviderExecutor{identifier: "xai"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	registerManagementImageProviderAuth(t, manager, "xai-auth-image", "xai", "grok-imagine-image")
+
+	h := &Handler{authManager: manager}
+	_, err := h.executeImageGenerationTest(
+		context.Background(),
+		[]byte(`{"model":"grok-imagine-image","prompt":"a cat"}`),
+		imageGenerationAlt,
+	)
+	if err != nil {
+		t.Fatalf("executeImageGenerationTest() error = %v", err)
+	}
+	if executor.calls != 1 {
+		t.Fatalf("xai executor calls = %d, want 1", executor.calls)
+	}
+	if executor.model != "grok-imagine-image" {
+		t.Errorf("model = %q, want grok-imagine-image", executor.model)
+	}
+	if executor.alt != imageGenerationAlt {
+		t.Errorf("alt = %q, want %q", executor.alt, imageGenerationAlt)
+	}
+}
+
+// TestImageGenerationStillRoutesCodexModelsToCodex guards the existing path from
+// regressing while the provider is derived rather than pinned.
+func TestImageGenerationStillRoutesCodexModelsToCodex(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &managementImageProviderExecutor{identifier: "codex"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	registerManagementImageProviderAuth(t, manager, "codex-auth-image", "codex", imageGenerationModel)
+
+	h := &Handler{authManager: manager}
+	if _, err := h.executeImageGenerationTest(
+		context.Background(),
+		[]byte(`{"model":"gpt-image-2","prompt":"a cat"}`),
+		imageGenerationAlt,
+	); err != nil {
+		t.Fatalf("executeImageGenerationTest() error = %v", err)
+	}
+	if executor.calls != 1 {
+		t.Fatalf("codex executor calls = %d, want 1", executor.calls)
+	}
+}
+
+func TestImageGenerationRejectsNonImageModels(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := &Handler{authManager: manager}
+	_, err := h.executeImageGenerationTest(
+		context.Background(),
+		[]byte(`{"model":"grok-4.5","prompt":"a cat"}`),
+		imageGenerationAlt,
+	)
+	if err == nil {
+		t.Fatal("a chat model must not be accepted by the image generation path")
+	}
+	if !strings.Contains(err.Error(), "grok-4.5") {
+		t.Errorf("error should name the rejected model, got %q", err)
 	}
 }

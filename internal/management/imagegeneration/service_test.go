@@ -5,7 +5,37 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 )
+
+func TestServiceBackgroundContextRetainsTrustedTenantAttribution(t *testing.T) {
+	t.Parallel()
+
+	const (
+		tenantID     = "00000000-0000-0000-0000-00000000000a"
+		systemAPIKey = "POST /image-generation/test"
+	)
+	contextSeen := make(chan context.Context, 1)
+	svc := NewService(func(ctx context.Context, gotTenantID string, _ []byte, _ string) ([]byte, error) {
+		if gotTenantID != tenantID {
+			t.Errorf("tenantID = %q, want %q", gotTenantID, tenantID)
+		}
+		contextSeen <- ctx
+		return []byte(`{"data":[]}`), nil
+	}, systemAPIKey)
+
+	task := svc.Start(tenantID, []byte(`{"prompt":"hello"}`), "images/generations")
+	_ = waitTaskStatus(t, svc, tenantID, task.ID, "succeeded")
+
+	ctx := <-contextSeen
+	if got, _ := ctx.Value(util.ContextKeyTrustedTenantID).(string); got != tenantID {
+		t.Fatalf("trusted tenant in background context = %q, want %q", got, tenantID)
+	}
+	if got, _ := ctx.Value(util.ContextKeyAPIKey).(string); got != systemAPIKey {
+		t.Fatalf("api key label = %q, want %q", got, systemAPIKey)
+	}
+}
 
 func TestServiceStartAndGetLifecycle(t *testing.T) {
 	t.Parallel()

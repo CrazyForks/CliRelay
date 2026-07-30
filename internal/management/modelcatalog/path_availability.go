@@ -17,7 +17,16 @@ import (
 //
 // Claude/Codex live discovery is merged into the root OpenAI path so the model
 // catalog "path-only" enrichment matches the auth-file models panel.
-func (s *Service) PathAvailability() map[string]any {
+// PathAvailability lists per-model route capabilities.
+//
+// opts is honoured so the channel-group editor can see models that are not yet on
+// a group's allow-list. Without it the editor's list is filtered by the very
+// setting it exists to edit, and a model can never be added.
+func (s *Service) PathAvailability(opts ...AvailabilityFilterOptions) map[string]any {
+	var filterOpts AvailabilityFilterOptions
+	if len(opts) > 0 {
+		filterOpts = opts[0]
+	}
 	modelRegistry := registry.GetGlobalRegistry()
 	items := make(map[string]*modelPathAvailabilityResponse)
 
@@ -39,12 +48,12 @@ func (s *Service) PathAvailability() map[string]any {
 	// Live discovery is not registry-backed, so CanServe cannot enforce
 	// channel-group AllowedModels for those rows. Filter after merge so plaza
 	// and catalog path enrichment match configured-availability.
-	openaiModels = s.filterModelsByRoutingAllowedModels(
+	openaiModels = s.filterModelsByRoutingAllowedModelsOpts(filterOpts,
 		appendSharedDiscoveryModels(openaiModels, discoveryByProvider),
 		"",
 	)
 	appendModelPaths(items, openaiModels, "/", rootOpenAICapabilities)
-	appendModelPaths(items, s.filterModelsByRoutingAllowedModels(
+	appendModelPaths(items, s.filterModelsByRoutingAllowedModelsOpts(filterOpts,
 		s.modelRootRouteScopedModels(modelRegistry.GetAvailableModels("gemini"), routingConfig),
 		"",
 	), "/", rootGeminiCapabilities)
@@ -69,11 +78,11 @@ func (s *Service) PathAvailability() map[string]any {
 			ReadOnly:     false,
 			Capabilities: capabilities,
 		})
-		appendModelPaths(items, s.filterModelsByRoutingAllowedModels(
+		appendModelPaths(items, s.filterModelsByRoutingAllowedModelsOpts(filterOpts,
 			s.modelPathRouteScopedModels(modelRegistry.GetAvailableModels("openai"), route.Group),
 			route.Group,
 		), route.Path, openAIV1Capabilities(route.Path))
-		appendModelPaths(items, s.filterModelsByRoutingAllowedModels(
+		appendModelPaths(items, s.filterModelsByRoutingAllowedModelsOpts(filterOpts,
 			s.modelPathRouteScopedModels(modelRegistry.GetAvailableModels("gemini"), route.Group),
 			route.Group,
 		), route.Path, geminiV1BetaCapabilities(route.Path))

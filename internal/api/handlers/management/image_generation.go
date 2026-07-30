@@ -17,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	imagegeneration "github.com/router-for-me/CLIProxyAPI/v6/internal/management/imagegeneration"
 	settingsstore "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/store"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -247,6 +248,13 @@ func (h *Handler) executeImageGenerationTestForTenant(ctx context.Context, tenan
 	if modelName == "" {
 		modelName = imageGenerationModel
 	}
+	// The credential pool is derived from the model rather than pinned. Pinning it
+	// to codex is what made every Grok image model unreachable from the console
+	// even once the runtime could serve them.
+	provider := registry.ImageGenerationProvider(modelName)
+	if provider == "" {
+		return nil, fmt.Errorf("model %q is not a supported image generation model", modelName)
+	}
 	imageCount, err := imageGenerationRequestCount(payload)
 	if err != nil {
 		return nil, err
@@ -261,7 +269,7 @@ func (h *Handler) executeImageGenerationTestForTenant(ctx context.Context, tenan
 				return nil, fmt.Errorf("invalid image generation request")
 			}
 		}
-		resp, execErr := h.authManager.Execute(ctx, []string{"codex"}, coreexecutor.Request{
+		resp, execErr := h.authManager.Execute(ctx, []string{provider}, coreexecutor.Request{
 			Model:   modelName,
 			Payload: execPayload,
 			Format:  sdktranslator.FromString("openai"),
@@ -576,39 +584,96 @@ func firstImageGenerationFormValue(values map[string][]string, key, fallback str
 	return fallback
 }
 
+// imageGenerationProviderChannels groups usable channels under the credential
+// provider that owns them.
+type imageGenerationProviderChannels struct {
+	Provider string   `json:"provider"`
+	Channels []string `json:"channels"`
+	Models   []string `json:"models"`
+}
+
 func (h *Handler) ListImageGenerationChannels(c *gin.Context) {
-	channels := make([]string, 0)
+	byProvider := make(map[string][]string)
 	seen := make(map[string]struct{})
+
 	if h != nil && h.authManager != nil {
 		for _, auth := range h.authManager.ListForTenant(effectiveTenantID(c)) {
-			if auth == nil || auth.Disabled {
+			if auth == nil || auth.Disabled || auth.Status == coreauth.StatusDisabled {
 				continue
 			}
-			if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+			provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+			// Only providers that actually serve an image model are offered; every
+			// other credential in the tenant is irrelevant to this page.
+			if !imageGenerationProviderHasModels(provider) {
 				continue
 			}
 			accountType, _ := auth.AccountInfo()
 			if !strings.EqualFold(strings.TrimSpace(accountType), "oauth") {
 				continue
 			}
-			if auth.Status == coreauth.StatusDisabled {
-				continue
-			}
 			name := strings.TrimSpace(auth.ChannelName())
 			if name == "" {
 				continue
 			}
-			key := strings.ToLower(name)
+			key := provider + "\x00" + strings.ToLower(name)
 			if _, ok := seen[key]; ok {
 				continue
 			}
 			seen[key] = struct{}{}
-			channels = append(channels, name)
+			byProvider[provider] = append(byProvider[provider], name)
 		}
 	}
-	sort.Strings(channels)
+
+	models := registry.ListImageGenerationModels()
+	providers := make([]imageGenerationProviderChannels, 0, len(byProvider))
+	flat := make([]string, 0)
+	flatSeen := make(map[string]struct{})
+
+	for provider, channels := range byProvider {
+		sort.Strings(channels)
+		providerModels := make([]string, 0, len(models))
+		for _, model := range models {
+			if model.Provider == provider {
+				providerModels = append(providerModels, model.ID)
+			}
+		}
+		providers = append(providers, imageGenerationProviderChannels{
+			Provider: provider,
+			Channels: channels,
+			Models:   providerModels,
+		})
+		for _, name := range channels {
+			key := strings.ToLower(name)
+			if _, ok := flatSeen[key]; ok {
+				continue
+			}
+			flatSeen[key] = struct{}{}
+			flat = append(flat, name)
+		}
+	}
+	sort.Slice(providers, func(i, j int) bool { return providers[i].Provider < providers[j].Provider })
+	sort.Strings(flat)
+
+	// `model` and `channels` are retained verbatim: a panel built against the
+	// single-provider shape still works, and only reads the new fields once updated.
 	c.JSON(http.StatusOK, gin.H{
-		"model":    imageGenerationModel,
-		"channels": channels,
+		"model":     imageGenerationModel,
+		"channels":  flat,
+		"providers": providers,
+		"models":    models,
 	})
+}
+
+// imageGenerationProviderHasModels reports whether a credential provider serves at
+// least one image model this build knows about.
+func imageGenerationProviderHasModels(provider string) bool {
+	if strings.TrimSpace(provider) == "" {
+		return false
+	}
+	for _, model := range registry.ListImageGenerationModels() {
+		if strings.EqualFold(model.Provider, provider) {
+			return true
+		}
+	}
+	return false
 }

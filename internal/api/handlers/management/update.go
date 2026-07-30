@@ -73,7 +73,14 @@ func (h *Handler) GetUpdateProgress(c *gin.Context) {
 }
 
 func (h *Handler) StreamUpdateProgress(c *gin.Context) {
-	upstream, err := h.updateService().OpenProgressStream(c.Request.Context(), c.GetHeader("Last-Event-ID"))
+	// Accept the resume point from either the SSE header or a query parameter. The
+	// panel reconnects with fetch rather than EventSource and finds the query
+	// parameter easier to attach, but real EventSource clients only send the header.
+	lastEventID := c.GetHeader("Last-Event-ID")
+	if strings.TrimSpace(lastEventID) == "" {
+		lastEventID = c.Query("last_event_id")
+	}
+	upstream, err := h.updateService().OpenProgressStream(c.Request.Context(), lastEventID)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "update_events_failed", "message": err.Error()})
 		return

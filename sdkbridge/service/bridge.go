@@ -114,3 +114,9 @@ func FetchCodexModels(ctx context.Context, auth *coreauth.Auth, cfg *config.Conf
 func RegisterExecutorForAuth(coreManager *coreauth.Manager, cfg *config.Config, auth *coreauth.Auth, forceReplace bool, gateway WebsocketGateway) {
 	internalserviceapp.RegisterExecutorForAuth(coreManager, cfg, auth, forceReplace, gateway)
 }
+
+// WithRegisteredImageModels guarantees a provider's image-generation models are in
+// the set registered for a credential. See internal/app/service for why.
+func WithRegisteredImageModels(provider string, models []*sdkmodelcatalog.ModelInfo) []*sdkmodelcatalog.ModelInfo {
+	return internalserviceapp.WithRegisteredImageModels(provider, models)
+}

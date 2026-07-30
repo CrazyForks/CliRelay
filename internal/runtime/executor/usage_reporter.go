@@ -12,6 +12,7 @@ import (
 	"time"
 
 	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
@@ -29,6 +30,7 @@ type usageReporter struct {
 	authIndex           string
 	authSubjectID       string
 	apiKey              string
+	trustedTenantID     string
 	apiKeyID            string
 	apiKeyName          string
 	source              string
@@ -57,6 +59,7 @@ func newUsageReporter(ctx context.Context, provider, model, upstreamModel string
 		upstreamModel:      upstreamModel,
 		requestedAt:        time.Now(),
 		apiKey:             apiKey,
+		trustedTenantID:    strings.TrimSpace(contextStringValue(ctx, util.ContextKeyTrustedTenantID)),
 		source:             resolveUsageSource(auth, apiKey),
 		captureFullContent: internalusage.RequestLogBodyStorageEnabled(),
 	}
@@ -342,6 +345,7 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail coreusage
 			Source:              r.source,
 			ChannelName:         r.channelName,
 			APIKey:              r.apiKey,
+			TrustedTenantID:     r.trustedTenantID,
 			APIKeyID:            r.apiKeyID,
 			APIKeyName:          r.apiKeyName,
 			AuthID:              r.authID,
@@ -391,6 +395,7 @@ func (r *usageReporter) ensurePublished(ctx context.Context) {
 			Source:              r.source,
 			ChannelName:         r.channelName,
 			APIKey:              r.apiKey,
+			TrustedTenantID:     r.trustedTenantID,
 			APIKeyID:            r.apiKeyID,
 			APIKeyName:          r.apiKeyName,
 			AuthID:              r.authID,

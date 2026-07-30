@@ -888,6 +888,13 @@ func (h *BaseAPIHandler) getRequestDetails(ctx context.Context, modelName string
 	baseModel := strings.TrimSpace(parsed.ModelName)
 	routeCtx := routeContextFromExecutionContext(ctx)
 	requestedPrefix, unprefixedModel := splitRequestedModelPrefix(baseModel)
+	// Image models must use image endpoints instead of reaching text executors.
+	if registry.IsImageGenerationModel(unprefixedModel) {
+		return nil, "", &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      fmt.Errorf("model %q generates images; use /v1/images/generations or /v1/images/edits instead", modelName),
+		}
+	}
 	if routeCtx != nil && routeCtx.Group != "" && requestedPrefix != "" && requestedPrefix != routeCtx.Group && !internalrouting.IsCcSwitchMappedTargetModel(routeCtx, baseModel) {
 		return nil, "", &interfaces.ErrorMessage{
 			StatusCode: http.StatusBadRequest,
@@ -905,11 +912,8 @@ func (h *BaseAPIHandler) getRequestDetails(ctx context.Context, modelName string
 	}
 
 	providers = scopedProvidersForModel(lookupModel, scopedGroups)
-	// Fallback: if baseModel has no provider but differs from resolvedModelName,
-	// try using the full model name. This handles edge cases where custom models
-	// may be registered with their full suffixed name (e.g., "my-model(8192)").
-	// Evaluated in Story 11.8: This fallback is intentionally preserved to support
-	// custom model registrations that include thinking suffixes.
+	// Preserve support for custom model registrations that include thinking
+	// suffixes, evaluated in Story 11.8.
 	if len(providers) == 0 && baseModel != resolvedModelName {
 		providers = scopedProvidersForModel(resolvedModelName, scopedGroups)
 	}
@@ -918,18 +922,14 @@ func (h *BaseAPIHandler) getRequestDetails(ctx context.Context, modelName string
 		return nil, "", &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName)}
 	}
 
-	// Reconstruct the returned model name from parsed result to ensure trailing
-	// [...] context window markers (e.g., "[1M]", "[128K]") are stripped, even
-	// when they appear before a thinking suffix (e.g., "model[1M](8192)").
-	// Round bracket thinking suffixes are preserved for existing thinking config.
+	// Strip context-window markers while preserving round-bracket thinking
+	// suffixes for existing thinking config.
 	if parsed.HasSuffix {
 		resolvedModelName = parsed.ModelName + "(" + parsed.RawSuffix + ")"
 	} else {
 		resolvedModelName = parsed.ModelName
 	}
 
-	// The thinking suffix is preserved in the model name itself, so no
-	// metadata-based configuration passing is needed.
 	return providers, resolvedModelName, nil
 }
 
