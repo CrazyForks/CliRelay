@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/quota"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 )
 
@@ -281,6 +282,62 @@ func TestResetAPIKeyDailySpendingSuccessAndGuards(t *testing.T) {
 	}
 	if !bytes.Contains(rec.Body.Bytes(), []byte(`effective_used_before`)) {
 		t.Fatalf("history body missing effective_used_before: %s", rec.Body.String())
+	}
+}
+
+func TestResetAPIKeyPeriodSpendingContract(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupAPIKeyEntriesTestDB(t)
+	if err := usage.UpsertAPIKey(usage.APIKeyRow{
+		ID: "period-reset-id", Key: "sk-period-reset", Name: "Period Reset",
+		PeriodSpendingLimits: quota.PeriodSpendingLimits{Week: 100, Month: 300},
+	}); err != nil {
+		t.Fatalf("UpsertAPIKey: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := usage.RuntimeDB().Exec(`INSERT INTO usage_rollup_buckets
+		(tenant_id,bucket_kind,bucket_start,api_key_id,model,cost_total,updated_at)
+		VALUES (?,?,?,?,?,?,?)`, "00000000-0000-0000-0000-000000000001", "day", usage.LocalDayKeyAt(now), "period-reset-id", "model", 12.0, now); err != nil {
+		t.Fatalf("insert rollup: %v", err)
+	}
+	h := NewHandler(&config.Config{}, "", nil)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api-key-entries/period-spending/reset",
+		bytes.NewBufferString(`{"id":"period-reset-id","periods":["week","month","week"]}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.ResetAPIKeyPeriodSpending(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("success status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"periods":["week","month"]`)) ||
+		!bytes.Contains(rec.Body.Bytes(), []byte(`"reset-count":1`)) {
+		t.Fatalf("success body = %s", rec.Body.String())
+	}
+	used, err := usage.QueryPeriodSpendingByAPIKeyIDForTenant("00000000-0000-0000-0000-000000000001", "period-reset-id")
+	if err != nil {
+		t.Fatalf("query used: %v", err)
+	}
+	if used.Week != 0 || used.Month != 0 || used.Day != 12 {
+		t.Fatalf("used after reset = %+v, want week/month=0 day=12", used)
+	}
+
+	for name, tc := range map[string]struct{ body, code string }{
+		"missing limit":  {`{"id":"period-reset-id","periods":["day"]}`, "period_limit_missing"},
+		"invalid period": {`{"id":"period-reset-id","periods":["quarter"]}`, "invalid_period"},
+		"empty periods":  {`{"id":"period-reset-id","periods":[]}`, "periods_required"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/api-key-entries/period-spending/reset", bytes.NewBufferString(tc.body))
+			c.Request.Header.Set("Content-Type", "application/json")
+			h.ResetAPIKeyPeriodSpending(c)
+			if rec.Code != http.StatusBadRequest || !bytes.Contains(rec.Body.Bytes(), []byte(`"code":"`+tc.code+`"`)) {
+				t.Fatalf("status/body = %d %s, want 400 code=%s", rec.Code, rec.Body.String(), tc.code)
+			}
+		})
 	}
 }
 

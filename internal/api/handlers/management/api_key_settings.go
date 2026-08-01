@@ -270,6 +270,54 @@ func (h *Handler) ResetAPIKeyDailySpending(c *gin.Context) {
 	})
 }
 
+// ResetAPIKeyPeriodSpending resets configured period baselines for one key.
+// POST /v0/management/api-key-entries/period-spending/reset
+func (h *Handler) ResetAPIKeyPeriodSpending(c *gin.Context) {
+	var body struct {
+		ID      *string        `json:"id"`
+		Key     *string        `json:"key"`
+		Periods []quota.Period `json:"periods"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "invalid_body", "message": "Request body must be valid JSON"}})
+		return
+	}
+	periods, err := quota.NormalizePeriods(body.Periods)
+	if err != nil {
+		var invalid *quota.InvalidPeriodError
+		switch {
+		case errors.Is(err, quota.ErrPeriodsRequired):
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "periods_required", "message": "periods must be a non-empty array"}})
+		case errors.As(err, &invalid):
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "invalid_period", "message": "Invalid period " + string(invalid.Period)}})
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "invalid_period", "message": err.Error()}})
+		}
+		return
+	}
+	result, err := h.apiKeySettings(c).ResetPeriodSpending(body.ID, body.Key, periods, periodResetActorFromContext(c))
+	if err != nil {
+		switch {
+		case errors.Is(err, apikeysettings.ErrItemNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"code": "item_not_found", "message": "item not found"}})
+		case writeKeyPeriodResetError(c, err, "Key"):
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"status":                "ok",
+		"id":                    result.ID,
+		"key":                   result.Key,
+		"periods":               result.Periods,
+		"period-spending":       result.PeriodSpending,
+		"reset-count":           result.ResetCount,
+		"effective-used-before": result.EffectiveUsedBefore,
+		"raw":                   result.Raw,
+	})
+}
+
 // GetAPIKeyDailySpendingResetHistory lists manual reset events for a key.
 // GET /v0/management/api-key-entries/daily-spending/reset-history?id=... or ?key=...
 func (h *Handler) GetAPIKeyDailySpendingResetHistory(c *gin.Context) {

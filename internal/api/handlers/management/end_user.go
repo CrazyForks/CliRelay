@@ -305,21 +305,19 @@ func (h *Handler) PostEndUserDailySpendingReset(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "daily_spending_limit_missing", "message": "Account daily spending limit is unlimited"}})
 		return
 	}
-	usedBefore, rawToday, err := usage.ResetTodayCostByEndUser(tenantID, user.ID)
+	actor := periodResetActorFromContext(c)
+	reset, err := usage.ResetPeriodSpendingByEndUserForTenant(tenantID, user.ID, []quota.Period{quota.PeriodDay}, usage.PeriodSpendingResetActor{
+		UserID: actor.UserID, Username: actor.Username, Kind: actor.Kind,
+	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	actorKind := "service_credential"
-	actorUserID := ""
-	actorUsername := ""
-	if kind := strings.TrimSpace(principal.Kind); kind != "" {
-		actorKind = kind
-	}
-	actorUserID = strings.TrimSpace(principal.User.ID)
-	actorUsername = strings.TrimSpace(principal.User.Username)
-	if actorUsername == "" {
-		actorUsername = strings.TrimSpace(principal.User.DisplayName)
+	usedBefore := reset.EffectiveUsedBefore.Day
+	rawToday := reset.Raw.Day
+	if err := usage.UpsertEndUserDailySpendingReset(tenantID, user.ID, rawToday); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 	if err := usage.InsertEndUserDailySpendingResetEvent(usage.EndUserDailySpendingResetEvent{
 		TenantID:            tenantID,
@@ -327,9 +325,9 @@ func (h *Handler) PostEndUserDailySpendingReset(c *gin.Context) {
 		CostBaseline:        rawToday,
 		EffectiveUsedBefore: usedBefore,
 		RawTodayCost:        rawToday,
-		ActorUserID:         actorUserID,
-		ActorUsername:       actorUsername,
-		ActorKind:           actorKind,
+		ActorUserID:         actor.UserID,
+		ActorUsername:       actor.Username,
+		ActorKind:           actor.Kind,
 	}); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

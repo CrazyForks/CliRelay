@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/quota"
 )
 
 func TestPeriodWindowKeysAtUsesProjectTimezoneMondayWeek(t *testing.T) {
@@ -84,5 +85,129 @@ func TestRollupBucketStartsProjectsQuotaMinuteInUTC(t *testing.T) {
 	}
 	if starts[rollupBucketQuotaMinuteUTC] != "2026-07-22T15:59" {
 		t.Fatalf("quota UTC minute = %q, want 2026-07-22T15:59", starts[rollupBucketQuotaMinuteUTC])
+	}
+}
+
+func TestPeriodSpendingResetWeekOnlyAndMultiplePeriods(t *testing.T) {
+	initTestUsageDB(t, config.RequestLogStorageConfig{})
+	db := getDB()
+	now := time.Date(2026, 7, 22, 12, 30, 45, 0, time.UTC)
+	keyID := "period-reset-key"
+	insert := func(kind, start, model string, cost float64) {
+		t.Helper()
+		if _, err := db.Exec(`INSERT INTO usage_rollup_buckets
+			(tenant_id,bucket_kind,bucket_start,api_key_id,model,cost_total,updated_at)
+			VALUES (?,?,?,?,?,?,?)`, systemTenantID, kind, start, keyID, model, cost, now); err != nil {
+			t.Fatalf("insert %s %s: %v", kind, start, err)
+		}
+	}
+	insert(rollupBucketDay, "2026-07-20", "monday", 10)
+	insert(rollupBucketDay, "2026-07-22", "today", 5)
+	insert(rollupBucketQuotaMinuteUTC, "2026-07-22T12:30", "minute", 7)
+
+	reset, err := resetPeriodSpendingForSubject(systemTenantID, periodSubjectAPIKey, keyID, []quota.Period{quota.PeriodWeek}, PeriodSpendingResetActor{Kind: "test"}, now)
+	if err != nil {
+		t.Fatalf("reset week: %v", err)
+	}
+	if reset.EffectiveUsedBefore.Week != 15 || reset.CostBaselines[quota.PeriodWeek] != 15 {
+		t.Fatalf("week reset = %+v, want used/baseline 15", reset)
+	}
+	got, err := QueryPeriodSpendingByAPIKeyIDsForTenantAt(systemTenantID, []string{keyID}, now)
+	if err != nil {
+		t.Fatalf("query after week reset: %v", err)
+	}
+	if used := got[keyID]; used.Week != 0 || used.Day != 5 || used.Month != 15 || used.FiveHour != 7 {
+		t.Fatalf("week-only used = %+v, want week=0 day=5 month=15 5h=7", used)
+	}
+
+	insert(rollupBucketDay, "2026-07-22", "after-reset", 2)
+	got, err = QueryPeriodSpendingByAPIKeyIDsForTenantAt(systemTenantID, []string{keyID}, now)
+	if err != nil {
+		t.Fatalf("query incremental: %v", err)
+	}
+	if used := got[keyID]; used.Week != 2 || used.Day != 7 || used.Month != 17 {
+		t.Fatalf("incremental used = %+v, want week=2 day=7 month=17", used)
+	}
+
+	reset, err = resetPeriodSpendingForSubject(systemTenantID, periodSubjectAPIKey, keyID,
+		[]quota.Period{quota.PeriodMonth, quota.PeriodFiveHour, quota.PeriodDay, quota.PeriodMonth}, PeriodSpendingResetActor{Kind: "test"}, now)
+	if err != nil {
+		t.Fatalf("reset month+day: %v", err)
+	}
+	if len(reset.Periods) != 3 || reset.Periods[0] != quota.PeriodMonth || reset.Periods[1] != quota.PeriodFiveHour || reset.Periods[2] != quota.PeriodDay {
+		t.Fatalf("deduped periods = %v", reset.Periods)
+	}
+	got, err = QueryPeriodSpendingByAPIKeyIDsForTenantAt(systemTenantID, []string{keyID}, now)
+	if err != nil {
+		t.Fatalf("query after multi reset: %v", err)
+	}
+	if used := got[keyID]; used.Month != 0 || used.Day != 0 || used.Week != 2 || used.FiveHour != 0 {
+		t.Fatalf("multi-period used = %+v, want month/day/5h=0 week=2", used)
+	}
+	count, err := CountAPIKeyPeriodSpendingResetEvents(systemTenantID, keyID)
+	if err != nil || count != 2 {
+		t.Fatalf("event count = %d, %v; want 2", count, err)
+	}
+}
+
+func TestPeriodSpendingResetSubjectAndTenantIsolation(t *testing.T) {
+	initTestUsageDB(t, config.RequestLogStorageConfig{})
+	db := getDB()
+	now := time.Date(2026, 7, 22, 12, 30, 0, 0, time.UTC)
+	tenantA := "11111111-1111-1111-1111-111111111111"
+	tenantB := "22222222-2222-2222-2222-222222222222"
+	keyID := "shared-key-id"
+	endUserID := "shared-user-id"
+	for _, tenantID := range []string{tenantA, tenantB} {
+		if _, err := db.Exec(`INSERT INTO usage_rollup_buckets
+			(tenant_id,bucket_kind,bucket_start,api_key_id,end_user_id,model,cost_total,updated_at)
+			VALUES (?,?,?,?,?,?,?,?)`, tenantID, rollupBucketDay, "2026-07-22", keyID, endUserID, "model", 9, now); err != nil {
+			t.Fatalf("insert tenant %s: %v", tenantID, err)
+		}
+	}
+	if _, err := resetPeriodSpendingForSubject(tenantA, periodSubjectAPIKey, keyID, []quota.Period{quota.PeriodDay}, PeriodSpendingResetActor{Kind: "test"}, now); err != nil {
+		t.Fatalf("reset tenant A key: %v", err)
+	}
+	keyA, _ := QueryPeriodSpendingByAPIKeyIDsForTenantAt(tenantA, []string{keyID}, now)
+	keyB, _ := QueryPeriodSpendingByAPIKeyIDsForTenantAt(tenantB, []string{keyID}, now)
+	userA, _ := QueryPeriodSpendingByEndUsersForTenantAt(tenantA, []string{endUserID}, now)
+	if keyA[keyID].Day != 0 || keyB[keyID].Day != 9 || userA[endUserID].Day != 9 {
+		t.Fatalf("after key reset keyA=%+v keyB=%+v userA=%+v", keyA[keyID], keyB[keyID], userA[endUserID])
+	}
+	if _, err := resetPeriodSpendingForSubject(tenantA, periodSubjectEndUser, endUserID, []quota.Period{quota.PeriodDay}, PeriodSpendingResetActor{Kind: "test"}, now); err != nil {
+		t.Fatalf("reset tenant A account: %v", err)
+	}
+	keyA, _ = QueryPeriodSpendingByAPIKeyIDsForTenantAt(tenantA, []string{keyID}, now)
+	userA, _ = QueryPeriodSpendingByEndUsersForTenantAt(tenantA, []string{endUserID}, now)
+	if keyA[keyID].Day != 0 || userA[endUserID].Day != 0 {
+		t.Fatalf("account/key isolation after both resets keyA=%+v userA=%+v", keyA[keyID], userA[endUserID])
+	}
+}
+
+func TestPeriodSpendingResetExpiresWhenWindowChanges(t *testing.T) {
+	initTestUsageDB(t, config.RequestLogStorageConfig{})
+	db := getDB()
+	firstWeek := time.Date(2026, 7, 22, 12, 30, 0, 0, time.UTC)
+	keyID := "window-reset-key"
+	if _, err := db.Exec(`INSERT INTO usage_rollup_buckets
+		(tenant_id,bucket_kind,bucket_start,api_key_id,model,cost_total,updated_at)
+		VALUES (?,?,?,?,?,?,?)`, systemTenantID, rollupBucketDay, "2026-07-22", keyID, "first", 9, firstWeek); err != nil {
+		t.Fatalf("insert first week: %v", err)
+	}
+	if _, err := resetPeriodSpendingForSubject(systemTenantID, periodSubjectAPIKey, keyID, []quota.Period{quota.PeriodWeek}, PeriodSpendingResetActor{Kind: "test"}, firstWeek); err != nil {
+		t.Fatalf("reset first week: %v", err)
+	}
+	nextWeek := firstWeek.AddDate(0, 0, 7)
+	if _, err := db.Exec(`INSERT INTO usage_rollup_buckets
+		(tenant_id,bucket_kind,bucket_start,api_key_id,model,cost_total,updated_at)
+		VALUES (?,?,?,?,?,?,?)`, systemTenantID, rollupBucketDay, "2026-07-29", keyID, "next", 4, nextWeek); err != nil {
+		t.Fatalf("insert next week: %v", err)
+	}
+	got, err := QueryPeriodSpendingByAPIKeyIDsForTenantAt(systemTenantID, []string{keyID}, nextWeek)
+	if err != nil {
+		t.Fatalf("query next week: %v", err)
+	}
+	if got[keyID].Week != 4 {
+		t.Fatalf("next-week used = %+v, want week=4 (old baseline expired)", got[keyID])
 	}
 }

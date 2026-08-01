@@ -80,7 +80,7 @@ func QueryPeriodSpendingByEndUsersForTenant(tenantID string, endUserIDs []string
 	return QueryPeriodSpendingByEndUsersForTenantAt(tenantID, endUserIDs, time.Now())
 }
 
-func queryPeriodSpendingForSubjects(tenantID string, subject periodSubject, ids []string, now time.Time) (map[string]quota.PeriodSpendingUsage, error) {
+func queryRawPeriodSpendingForSubjects(tenantID string, subject periodSubject, ids []string, now time.Time) (map[string]quota.PeriodSpendingUsage, error) {
 	ids = dedupeExactStrings(ids)
 	out := make(map[string]quota.PeriodSpendingUsage, len(ids))
 	for _, id := range ids {
@@ -103,7 +103,7 @@ func queryPeriodSpendingForSubjects(tenantID string, subject periodSubject, ids 
 			if end > len(cleanIDs) {
 				end = len(cleanIDs)
 			}
-			part, err := queryPeriodSpendingForSubjects(tenantID, subject, cleanIDs[start:end], now)
+			part, err := queryRawPeriodSpendingForSubjects(tenantID, subject, cleanIDs[start:end], now)
 			if err != nil {
 				return nil, err
 			}
@@ -142,23 +142,72 @@ func queryPeriodSpendingForSubjects(tenantID string, subject periodSubject, ids 
 		}
 	}
 
-	var baselines map[string]float64
-	var err error
-	if subject == periodSubjectAPIKey {
-		baselines, err = ListDailySpendingResetBaselines(tenantID, ids)
-	} else {
-		baselines, err = listEndUserDailySpendingResetBaselines(tenantID, ids, windows.Day)
+	return out, nil
+}
+
+func queryPeriodSpendingForSubjects(tenantID string, subject periodSubject, ids []string, now time.Time) (map[string]quota.PeriodSpendingUsage, error) {
+	out, err := queryRawPeriodSpendingForSubjects(tenantID, subject, ids, now)
+	if err != nil || len(out) == 0 {
+		return out, err
 	}
+	cleanIDs := make([]string, 0, len(out))
+	for id := range out {
+		cleanIDs = append(cleanIDs, id)
+	}
+	windows := PeriodWindowKeysAt(now, getUsageLocation())
+	baselines, err := listEffectivePeriodBaselines(tenantID, subject, cleanIDs, windows)
 	if err != nil {
-		return nil, fmt.Errorf("%w: day baselines: %v", ErrQuotaUsageUnavailable, err)
+		return nil, fmt.Errorf("%w: period baselines: %v", ErrQuotaUsageUnavailable, err)
 	}
-	for id, baseline := range baselines {
+	for id, periodBaselines := range baselines {
 		current := out[id]
-		current.Day -= baseline
-		if current.Day < 0 {
-			current.Day = 0
+		for period, baseline := range periodBaselines {
+			applyPeriodBaseline(&current, period, baseline)
 		}
 		out[id] = current
+	}
+	return out, nil
+}
+
+func listEffectivePeriodBaselines(tenantID string, subject periodSubject, ids []string, windows PeriodWindowKeys) (map[string]map[quota.Period]float64, error) {
+	const baselineChunkSize = 300
+	if len(ids) > baselineChunkSize {
+		combined := make(map[string]map[quota.Period]float64)
+		for start := 0; start < len(ids); start += baselineChunkSize {
+			end := start + baselineChunkSize
+			if end > len(ids) {
+				end = len(ids)
+			}
+			part, err := listEffectivePeriodBaselines(tenantID, subject, ids[start:end], windows)
+			if err != nil {
+				return nil, err
+			}
+			for id, values := range part {
+				combined[id] = values
+			}
+		}
+		return combined, nil
+	}
+	out, err := listPeriodSpendingResetBaselines(tenantID, subject, ids, windows)
+	if err != nil {
+		return nil, err
+	}
+	var legacy map[string]float64
+	if subject == periodSubjectAPIKey {
+		legacy, err = listDailySpendingResetBaselinesAt(tenantID, ids, windows.Day)
+	} else {
+		legacy, err = listEndUserDailySpendingResetBaselines(tenantID, ids, windows.Day)
+	}
+	if err != nil {
+		return nil, err
+	}
+	for id, baseline := range legacy {
+		if out[id] == nil {
+			out[id] = make(map[quota.Period]float64)
+		}
+		if _, exists := out[id][quota.PeriodDay]; !exists {
+			out[id][quota.PeriodDay] = baseline
+		}
 	}
 	return out, nil
 }

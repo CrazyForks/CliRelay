@@ -19,6 +19,11 @@ func principalHasManagementRequestPermission(principal identity.Principal, metho
 		return true
 	}
 	relative := strings.TrimSuffix(strings.TrimPrefix(path, "/v0/management"), "/")
+	if method == http.MethodPost && strings.HasPrefix(relative, "/end-users/") &&
+		strings.Contains(relative, "/api-keys/") && strings.HasSuffix(relative, "/period-spending/reset") &&
+		principal.Has("end_users.write") {
+		return true
+	}
 	return (method == http.MethodGet || method == http.MethodHead) &&
 		strings.HasPrefix(relative, "/end-users/") &&
 		strings.HasSuffix(relative, "/daily-spending/reset-history") &&
