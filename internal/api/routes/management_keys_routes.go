@@ -20,6 +20,7 @@ func registerManagementAPIKeyRoutes(group *gin.RouterGroup, h *managementhandler
 	group.PATCH("/api-key-entries", h.PatchAPIKeyEntry)
 	group.DELETE("/api-key-entries", h.DeleteAPIKeyEntry)
 	group.POST("/api-key-entries/daily-spending/reset", h.ResetAPIKeyDailySpending)
+	group.POST("/api-key-entries/period-spending/reset", h.ResetAPIKeyPeriodSpending)
 	group.GET("/api-key-entries/daily-spending/reset-history", h.GetAPIKeyDailySpendingResetHistory)
 
 	group.GET("/gemini-api-key", keys.GetGeminiKeys)
