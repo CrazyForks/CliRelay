@@ -13,6 +13,7 @@ type LogRow struct {
 	APIKeyOwnName       string    `json:"api_key_own_name,omitempty"`
 	EndUserDisplayName  string    `json:"end_user_display_name,omitempty"`
 	Model               string    `json:"model"`
+	ThinkingLevel       string    `json:"thinking_level"`
 	UpstreamModel       string    `json:"upstream_model,omitempty"`
 	VisionFallbackModel string    `json:"vision_fallback_model,omitempty"`
 	Source              string    `json:"source"`

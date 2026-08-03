@@ -24,6 +24,7 @@ const usageReporterOutputMemoryLimit = 256 * 1024
 type usageReporter struct {
 	provider            string
 	model               string
+	thinkingLevel       string
 	upstreamModel       string
 	visionFallbackModel string
 	authID              string
@@ -112,6 +113,13 @@ func (r *usageReporter) setModel(model string) {
 	if model = strings.TrimSpace(model); model != "" {
 		r.model = model
 	}
+}
+
+func (r *usageReporter) setThinkingLevel(level string) {
+	if r == nil {
+		return
+	}
+	r.thinkingLevel = level
 }
 
 func (r *usageReporter) setUpstreamModel(model string) {
@@ -340,6 +348,7 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail coreusage
 		coreusage.PublishRecord(ctx, coreusage.Record{
 			Provider:            r.provider,
 			Model:               r.model,
+			ThinkingLevel:       r.thinkingLevel,
 			UpstreamModel:       r.upstreamModel,
 			VisionFallbackModel: r.visionFallbackModel,
 			Source:              r.source,
@@ -390,6 +399,7 @@ func (r *usageReporter) ensurePublished(ctx context.Context) {
 		coreusage.PublishRecord(ctx, coreusage.Record{
 			Provider:            r.provider,
 			Model:               r.model,
+			ThinkingLevel:       r.thinkingLevel,
 			UpstreamModel:       r.upstreamModel,
 			VisionFallbackModel: r.visionFallbackModel,
 			Source:              r.source,

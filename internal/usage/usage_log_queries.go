@@ -18,7 +18,7 @@ func QueryLogRowByIDForTenant(tenantID string, id int64) (LogRow, error) {
 	var ts storedTime
 	var failedInt, streamingInt, hasContentInt int
 	err := db.QueryRow(
-		"SELECT id, timestamp, api_key, api_key_name, model, source, channel_name, auth_index, "+
+		"SELECT id, timestamp, api_key, api_key_name, model, thinking_level, source, channel_name, auth_index, "+
 			"failed, streaming, latency_ms, first_token_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, "+
 			"cost, "+
 			"(CASE WHEN EXISTS (SELECT 1 FROM request_log_content content WHERE content.tenant_id = request_logs.tenant_id AND content.log_id = request_logs.id) "+
@@ -26,7 +26,7 @@ func QueryLogRowByIDForTenant(tenantID string, id int64) (LogRow, error) {
 			"FROM request_logs WHERE tenant_id = ? AND id = ?",
 		tenantID, id,
 	).Scan(
-		&row.ID, &ts, &row.APIKey, &row.APIKeyName, &row.Model, &row.Source, &row.ChannelName,
+		&row.ID, &ts, &row.APIKey, &row.APIKeyName, &row.Model, &row.ThinkingLevel, &row.Source, &row.ChannelName,
 		&row.AuthIndex, &failedInt, &streamingInt, &row.LatencyMs, &row.FirstTokenMs,
 		&row.InputTokens, &row.OutputTokens, &row.ReasoningTokens,
 		&row.CachedTokens, &row.TotalTokens, &row.Cost, &hasContentInt,

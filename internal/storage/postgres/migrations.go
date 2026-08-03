@@ -37,6 +37,7 @@ func RuntimeMigrations() []Migration {
 		{Version: "202607210001_end_user_daily_spending_reset_events", SQL: endUserDailySpendingResetEventsSQL},
 		{Version: "202607220001_period_spending_limits", SQL: periodSpendingLimitsSQL},
 		{Version: "202607240001_ai_account_subject_usage_tokens", SQL: aiAccountSubjectUsageTokensSQL},
+		{Version: "202608030001_request_log_thinking_level", SQL: requestLogThinkingLevelSQL},
 	}
 }
 
@@ -336,14 +337,6 @@ CREATE TABLE IF NOT EXISTS api_key_daily_spending_reset_events (
 );
 CREATE INDEX IF NOT EXISTS idx_api_key_daily_spending_reset_events_key
   ON api_key_daily_spending_reset_events(tenant_id, api_key_id, reset_at DESC);
-`
-
-const requestLogsAuthLookupIndexesSQL = `
-CREATE INDEX IF NOT EXISTS idx_request_logs_tenant_auth_index_time
-  ON request_logs(tenant_id, auth_index, timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_request_logs_tenant_auth_subject_time_cost
-  ON request_logs(tenant_id, auth_subject_id, timestamp DESC)
-  INCLUDE (cost);
 `
 
 // Schema only: historical backfill uses usageLoc at process init (not UTC-hardcoded SQL).
