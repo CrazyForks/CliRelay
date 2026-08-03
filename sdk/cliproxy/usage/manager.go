@@ -13,6 +13,7 @@ import (
 type Record struct {
 	Provider            string
 	Model               string
+	ThinkingLevel       string
 	UpstreamModel       string
 	VisionFallbackModel string
 	APIKey              string

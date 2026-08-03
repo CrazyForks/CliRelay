@@ -62,6 +62,42 @@ func TestExecutionContextUsesOriginalRequestAndRequestedModel(t *testing.T) {
 	}
 }
 
+func TestExecutionContextReporterCapturesThinkingSuffix(t *testing.T) {
+	tests := []struct {
+		name           string
+		requestedModel string
+		wantModel      string
+		wantLevel      string
+	}{
+		{name: "level", requestedModel: "gpt-5.6-sol(max)", wantModel: "gpt-5.6-sol", wantLevel: "max"},
+		{name: "numeric budget", requestedModel: "gpt-5.6-sol(8192)", wantModel: "gpt-5.6-sol", wantLevel: "8192"},
+		{name: "no suffix", requestedModel: "gpt-5.6-sol", wantModel: "gpt-5.6-sol", wantLevel: ""},
+		{name: "context marker only", requestedModel: "gpt-5.6-sol[128K]", wantModel: "gpt-5.6-sol", wantLevel: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			execCtx := newExecutionContext(
+				context.Background(),
+				"codex",
+				&config.Config{},
+				nil,
+				cliproxyexecutor.Request{Model: tt.requestedModel},
+				cliproxyexecutor.Options{},
+				ExecutionOptions{},
+			)
+
+			reporter := execCtx.Reporter()
+			if reporter.model != tt.wantModel {
+				t.Fatalf("reporter.model = %q, want %q", reporter.model, tt.wantModel)
+			}
+			if reporter.thinkingLevel != tt.wantLevel {
+				t.Fatalf("reporter.thinkingLevel = %q, want %q", reporter.thinkingLevel, tt.wantLevel)
+			}
+		})
+	}
+}
+
 func TestExecutionContextTranslatesSharedRequestPayloadOnce(t *testing.T) {
 	var calls atomic.Int32
 	from := sdktranslator.FromString("execution-context-shared-source")
@@ -214,7 +250,7 @@ func byteSizeLabel(size int) string {
 }
 
 func TestExecutionContextReporterKeepsVisionFallbackSeparateFromModelMapping(t *testing.T) {
-	ctx := contextWithVisionFallbackLog(context.Background(), "alias-model", "real-model", "vision-model")
+	ctx := contextWithVisionFallbackLog(context.Background(), "alias-model(max)", "real-model", "vision-model")
 	req := cliproxyexecutor.Request{
 		Model:   "vision-model",
 		Payload: []byte(`{"messages":[]}`),
@@ -232,6 +268,9 @@ func TestExecutionContextReporterKeepsVisionFallbackSeparateFromModelMapping(t *
 	reporter := execCtx.Reporter()
 	if reporter.model != "alias-model" {
 		t.Fatalf("reporter.model = %q, want alias-model", reporter.model)
+	}
+	if reporter.thinkingLevel != "max" {
+		t.Fatalf("reporter.thinkingLevel = %q, want max", reporter.thinkingLevel)
 	}
 	if reporter.upstreamModel != "real-model" {
 		t.Fatalf("reporter.upstreamModel = %q, want real-model", reporter.upstreamModel)

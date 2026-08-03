@@ -23,7 +23,7 @@ func isRetryableUsageWriteErr(err error) bool {
 
 func insertLogIdentityOnce(
 	db *sql.DB,
-	tenantID, apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstreamModel, visionFallbackModel,
+	tenantID, apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstreamModel, visionFallbackModel, thinkingLevel,
 	source, channelName, authIndex, endUserID string,
 	failed, streaming bool,
 	timestamp time.Time, latencyMs, firstTokenMs int64,
@@ -52,12 +52,12 @@ func insertLogIdentityOnce(
 	}
 
 	insertSQL := `INSERT INTO request_logs
-		(tenant_id, timestamp, api_key, api_key_id, auth_subject_id, api_key_name, model, upstream_model, vision_fallback_model, source, channel_name, auth_index,
+		(tenant_id, timestamp, api_key, api_key_id, auth_subject_id, api_key_name, model, thinking_level, upstream_model, vision_fallback_model, source, channel_name, auth_index,
 		 failed, streaming, latency_ms, first_token_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost)
-	 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	insertArgs := []any{
 		tenantID, timestamp.UTC().Format(time.RFC3339Nano),
-		apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstreamModel, visionFallbackModel, source, channelName, authIndex,
+		apiKey, apiKeyID, authSubjectID, apiKeyName, model, thinkingLevel, upstreamModel, visionFallbackModel, source, channelName, authIndex,
 		failedInt, streamingInt, latencyMs, firstTokenMs,
 		tokens.InputTokens, tokens.OutputTokens, tokens.ReasoningTokens,
 		tokens.CachedTokens, tokens.TotalTokens, cost,

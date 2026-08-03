@@ -32,6 +32,7 @@ func TestUsageReporterPublishesTrustedTenantSeparatelyFromAPIKeyLabel(t *testing
 	ctx := context.WithValue(context.Background(), util.ContextKeyTrustedTenantID, tenantID)
 	ctx = context.WithValue(ctx, util.ContextKeyAPIKey, systemAPIKey)
 	reporter := newUsageReporter(ctx, "codex", model, "", nil)
+	reporter.setThinkingLevel("high")
 	reporter.ensurePublished(ctx)
 
 	deadline := time.After(2 * time.Second)
@@ -46,6 +47,9 @@ func TestUsageReporterPublishesTrustedTenantSeparatelyFromAPIKeyLabel(t *testing
 			}
 			if record.APIKey != systemAPIKey {
 				t.Fatalf("APIKey = %q, want display label %q", record.APIKey, systemAPIKey)
+			}
+			if record.ThinkingLevel != "high" {
+				t.Fatalf("ThinkingLevel = %q, want high", record.ThinkingLevel)
 			}
 			return
 		case <-deadline:

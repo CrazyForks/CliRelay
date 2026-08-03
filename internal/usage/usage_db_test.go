@@ -3,6 +3,7 @@ package usage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"math"
 	"os"
 	"path/filepath"
@@ -553,6 +554,77 @@ func TestQueryLogsReturnsVisionFallbackModelSeparately(t *testing.T) {
 	}
 }
 
+func TestQueryLogsReturnsThinkingLevel(t *testing.T) {
+	initTestUsageDB(t, config.RequestLogStorageConfig{})
+
+	now := time.Now().UTC()
+	InsertLogWithDetailsIdentitySubjectUpstreamVisionStreaming(
+		"",
+		"sk-thinking",
+		"key-thinking",
+		"subject-thinking",
+		"Primary",
+		"gpt-5.6-sol",
+		"gpt-5.6-sol",
+		"",
+		"max",
+		"codex",
+		"Codex",
+		"auth-thinking",
+		false,
+		now,
+		140,
+		14,
+		TokenStats{InputTokens: 1, OutputTokens: 1, TotalTokens: 2},
+		"",
+		"",
+		"",
+		false,
+	)
+	InsertLog("sk-no-thinking", "", "gpt-5.6-sol", "codex", "Codex", "auth-no-thinking", false, now.Add(-time.Second), 100, 10, TokenStats{
+		InputTokens: 1, OutputTokens: 1, TotalTokens: 2,
+	}, "", "")
+
+	result, err := QueryLogs(LogQueryParams{Page: 1, Size: 10, Days: 1})
+	if err != nil {
+		t.Fatalf("QueryLogs() error = %v", err)
+	}
+	if len(result.Items) != 2 {
+		t.Fatalf("items = %d, want 2", len(result.Items))
+	}
+
+	rowsByKey := make(map[string]LogRow, len(result.Items))
+	for _, row := range result.Items {
+		rowsByKey[row.APIKey] = row
+	}
+	thinkingRow := rowsByKey["sk-thinking"]
+	if thinkingRow.Model != "gpt-5.6-sol" {
+		t.Fatalf("Model = %q, want gpt-5.6-sol", thinkingRow.Model)
+	}
+	if thinkingRow.ThinkingLevel != "max" {
+		t.Fatalf("ThinkingLevel = %q, want max", thinkingRow.ThinkingLevel)
+	}
+	noThinkingRow := rowsByKey["sk-no-thinking"]
+	if noThinkingRow.ThinkingLevel != "" {
+		t.Fatalf("ThinkingLevel without suffix = %q, want empty", noThinkingRow.ThinkingLevel)
+	}
+	encoded, err := json.Marshal(noThinkingRow)
+	if err != nil {
+		t.Fatalf("json.Marshal(LogRow) error = %v", err)
+	}
+	if !strings.Contains(string(encoded), `"thinking_level":""`) {
+		t.Fatalf("LogRow JSON = %s, want empty thinking_level field", encoded)
+	}
+
+	rowByID, err := QueryLogRowByID(thinkingRow.ID)
+	if err != nil {
+		t.Fatalf("QueryLogRowByID() error = %v", err)
+	}
+	if rowByID.ThinkingLevel != "max" {
+		t.Fatalf("QueryLogRowByID().ThinkingLevel = %q, want max", rowByID.ThinkingLevel)
+	}
+}
+
 func TestQueryLogContentKeepsMissingFailedOutputEmpty(t *testing.T) {
 	initTestUsageDB(t, config.RequestLogStorageConfig{
 		StoreContent:           true,
@@ -782,7 +854,7 @@ func TestInitDBMigratesFirstTokenAndStreamingColumns(t *testing.T) {
 		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &pk); err != nil {
 			t.Fatalf("scan table info: %v", err)
 		}
-		if name == "first_token_ms" || name == "streaming" || name == "vision_fallback_model" {
+		if name == "first_token_ms" || name == "streaming" || name == "vision_fallback_model" || name == "thinking_level" {
 			found[name] = true
 		}
 	}
@@ -794,6 +866,9 @@ func TestInitDBMigratesFirstTokenAndStreamingColumns(t *testing.T) {
 	}
 	if !found["vision_fallback_model"] {
 		t.Fatalf("expected vision_fallback_model column to exist after InitDB migration")
+	}
+	if !found["thinking_level"] {
+		t.Fatalf("expected thinking_level column to exist after InitDB migration")
 	}
 }
 
