@@ -119,7 +119,7 @@ func (r *usageReporter) setThinkingLevel(level string) {
 	if r == nil {
 		return
 	}
-	r.thinkingLevel = level
+	r.thinkingLevel = strings.TrimSpace(level)
 }
 
 func (r *usageReporter) setUpstreamModel(model string) {

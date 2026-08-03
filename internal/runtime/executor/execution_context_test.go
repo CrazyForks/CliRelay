@@ -62,16 +62,22 @@ func TestExecutionContextUsesOriginalRequestAndRequestedModel(t *testing.T) {
 	}
 }
 
-func TestExecutionContextReporterCapturesThinkingSuffix(t *testing.T) {
+func TestExecutionContextReporterCapturesThinkingLevel(t *testing.T) {
 	tests := []struct {
 		name           string
 		requestedModel string
+		payload        []byte
+		sourceFormat   sdktranslator.Format
 		wantModel      string
 		wantLevel      string
 	}{
-		{name: "level", requestedModel: "gpt-5.6-sol(max)", wantModel: "gpt-5.6-sol", wantLevel: "max"},
+		{name: "body effort", requestedModel: "gpt-5.6-sol", payload: []byte(`{"reasoning":{"effort":"max"}}`), sourceFormat: sdktranslator.FormatOpenAIResponse, wantModel: "gpt-5.6-sol", wantLevel: "max"},
+		{name: "body effort trimmed", requestedModel: "gpt-5.6-sol", payload: []byte(`{"reasoning":{"effort":" high "}}`), sourceFormat: sdktranslator.FormatOpenAIResponse, wantModel: "gpt-5.6-sol", wantLevel: "high"},
+		{name: "chat completions effort", requestedModel: "gpt-5.5", payload: []byte(`{"reasoning_effort":"medium"}`), sourceFormat: sdktranslator.FormatOpenAI, wantModel: "gpt-5.5", wantLevel: "medium"},
+		{name: "claude budget", requestedModel: "claude-sonnet", payload: []byte(`{"thinking":{"type":"enabled","budget_tokens":4096}}`), sourceFormat: sdktranslator.FormatClaude, wantModel: "claude-sonnet", wantLevel: "4096"},
+		{name: "suffix takes priority", requestedModel: "gpt-5.6-sol(high)", payload: []byte(`{"reasoning":{"effort":"max"}}`), sourceFormat: sdktranslator.FormatOpenAIResponse, wantModel: "gpt-5.6-sol", wantLevel: "high"},
 		{name: "numeric budget", requestedModel: "gpt-5.6-sol(8192)", wantModel: "gpt-5.6-sol", wantLevel: "8192"},
-		{name: "no suffix", requestedModel: "gpt-5.6-sol", wantModel: "gpt-5.6-sol", wantLevel: ""},
+		{name: "no suffix or body effort", requestedModel: "gpt-5.6-sol", wantModel: "gpt-5.6-sol", wantLevel: ""},
 		{name: "context marker only", requestedModel: "gpt-5.6-sol[128K]", wantModel: "gpt-5.6-sol", wantLevel: ""},
 	}
 
@@ -82,8 +88,8 @@ func TestExecutionContextReporterCapturesThinkingSuffix(t *testing.T) {
 				"codex",
 				&config.Config{},
 				nil,
-				cliproxyexecutor.Request{Model: tt.requestedModel},
-				cliproxyexecutor.Options{},
+				cliproxyexecutor.Request{Model: tt.requestedModel, Payload: tt.payload},
+				cliproxyexecutor.Options{SourceFormat: tt.sourceFormat},
 				ExecutionOptions{},
 			)
 
