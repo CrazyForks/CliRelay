@@ -12,6 +12,10 @@
 </p>
 
 <p align="center">
+  Multi-tenant web panel · request logs & quotas · routing groups & failover · self-hosted
+</p>
+
+<p align="center">
   English | <a href="README_CN.md">中文</a>
 </p>
 
@@ -22,13 +26,19 @@
   <a href="https://github.com/kittors/CliRelay/pulls">✨ Request Feature</a>
 </p>
 
+<p align="center">
+  <img src="docs/images/readme-showcase/landing.png" width="100%" alt="CliRelay portal landing page" />
+</p>
+
 ---
 
 ## ⚡ What is CliRelay?
 
 > **✨ Heavily enhanced fork of the [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) project** — rebuilt with a production-grade management layer, web control panel hosting, and a terminal TUI for day-2 operations.
 
-CliRelay turns AI CLI subscriptions, OAuth credentials, API keys, and compatible upstream services into one managed API layer. It proxies Claude Code, Gemini CLI, OpenAI Codex, Qwen, iFlow, Kimi, Antigravity, xAI/Grok, OpenCode Go, ClinePass, Ollama Cloud, Bedrock, Amp, Vertex, OpenAI-compatible clients, and other AI coding tools through a unified endpoint, then adds routing groups, failover, request logging, quota control, model pricing, image-generation support, API-key self-service, online updates, `/manage` web hosting, and terminal management workflows around that traffic.
+CliRelay turns AI CLI subscriptions, OAuth credentials, API keys, and compatible upstream services into one managed API layer. It proxies Claude Code, Gemini CLI, OpenAI Codex, Qwen, iFlow, Kimi, Antigravity, xAI/Grok, OpenCode Go, ClinePass, Ollama Cloud, Bedrock, Amp, Vertex, OpenAI-compatible clients, and other AI coding tools through a unified endpoint, then adds routing groups, failover, request logging, quota control, model pricing, image-generation support, content moderation, online updates, `/manage` web hosting, and terminal management workflows around that traffic.
+
+It is built to be **operated by more than one person**. Tenants, users, roles, and a fine-grained permission model (`governance.tenants`, `models.write`, `providers.test`, …) decide which pages, buttons, and actions each account gets, and every security-sensitive change lands in an audit log. Portal accounts let end users hold several API keys under one identity and check their own usage without an admin in the loop.
 
 The current runtime data stack is PostgreSQL 15+, Redis 7+, and Ent ORM. PostgreSQL is the source of truth for runtime data; Redis is used for cache, locks, limits, queues, and rebuildable state. SQLite is legacy-only and is supported as an import source during migration.
 
@@ -71,14 +81,26 @@ The current runtime data stack is PostgreSQL 15+, Redis 7+, and Ent ORM. Postgre
 | 📡 **WebSocket Monitoring** | Live system stats streamed via WebSocket: CPU, memory, goroutines, network I/O, DB size |
 | 🗄️ **Ent + PostgreSQL** | Uses PostgreSQL 15+ as the runtime primary database with Ent-generated schema metadata |
 
-### 🔐 API Key & Access Management
+### 🏛️ Multi-Tenancy & Governance
+
+| Feature | Description |
+|:--------|:------------|
+| 🏢 **Tenant Lifecycle** | Create tenants and manage their lease periods; runtime data is scoped by tenant end to end |
+| 👤 **User Management** | Manage the accounts inside the active tenant, with password policy and reset flows |
+| 🎭 **Role Permissions** | Fine-grained resource.action permissions (`governance.tenants`, `models.write`, `providers.test`, …) decide which pages, buttons, and actions an account can reach |
+| 🧾 **Audit Logs** | Security-sensitive account and tenant changes are recorded and reviewable in the panel |
+| 🧭 **Menu Management** | Curate which navigation entries a tenant sees, keeping menus aligned with granted permissions |
+
+### 🔐 API Key & Portal Accounts
 
 | Feature | Description |
 |:--------|:------------|
 | 🔑 **API Key CRUD** | Create, edit, delete API keys via Management API — each with custom name, notes, and independent enable/disable toggle |
+| 🧑‍💼 **Portal Accounts** | Group several API keys under one end-user account, so a person is managed once instead of key by key |
 | 📊 **Per-Key Quotas** | Set max token / request quotas per key with automatic enforcement |
+| 🔁 **Period Quota Resets** | Reset spending quotas for a chosen period, for a whole account or a single owned key |
 | ⏱️ **Rate Limiting** | Per-key rate limiting (requests per minute/hour) |
-| 👥 **Team Permissions** | Assign API keys to different users or groups with scoped channel access and model permissions |
+| 🧩 **Permission Profiles** | Reusable profiles bind scoped channel access and model permissions to keys |
 | 🔒 **Key Masking** | API keys are always displayed masked (`sk-***xxx`) in UI and logs |
 | 🌍 **Public Lookup Page** | End users can query their own usage stats and request logs via a public self-service page (no login required) |
 
@@ -101,8 +123,10 @@ The current runtime data stack is PostgreSQL 15+, Redis 7+, and Ent ORM. Postgre
 |:--------|:------------|
 | 🔐 **OAuth Support** | Native OAuth flows for Gemini, Claude, Codex, Qwen, iFlow, Antigravity, Kimi, and xAI/Grok, plus device/browser/cookie variants where supported |
 | 🪪 **Identity Fingerprints** | Centralize upstream identity metadata so providers receive consistent client fingerprints |
+| 🧹 **Content Moderation** | Build reusable moderation profiles, test them against sample content, and bind them to AI accounts, provider keys, or a provider default |
 | 🔒 **TLS Handling** | Configurable TLS settings for upstream communication |
 | 🏠 **Panel Isolation** | Management panel access controlled independently with admin password |
+| 🌐 **Scoped CORS** | Browser and extension callers are allowlisted explicitly, including a controlled `chrome-extension://*` form; the preflight advertises every auth header the server actually accepts |
 | 🛡️ **Request Cloaking** | Upstream requests are stripped of client-identifying headers for privacy |
 
 ### 🛠️ Operator Experience
@@ -110,11 +134,12 @@ The current runtime data stack is PostgreSQL 15+, Redis 7+, and Ent ORM. Postgre
 | Feature | Description |
 |:--------|:------------|
 | 🖥️ **Visual Management Panel** | Configure providers, auth, API keys, models, routing, logs, updates, and system status from `/manage` |
-| 🌐 **Chinese / English UI** | Built-in i18n for the management panel and Compose/TUI language selection |
+| 🌐 **Trilingual UI** | Built-in i18n for the management panel — Simplified Chinese, English, and Russian — plus Compose/TUI language selection |
 | 🌙 **Dark Mode** | Full dark theme for long-running operational sessions |
 | 🧬 **Visual Config Editor** | Edit runtime config visually or inspect source YAML when you need exact control |
 | 🔄 **Online Update Flow** | Check versions, review update notes, trigger the updater sidecar, and wait for backend recovery from the panel |
-| 📥 **CC Switch Import** | Import cc-switch style configuration into the managed model/channel workspace |
+| 📥 **CC Switch Presets** | Build reusable CC Switch provider configs from a channel group, map each Claude role (main / Haiku / Sonnet / Opus / Fable) or Codex model to a real upstream model, and hand out a one-click import link |
+| 🛒 **Model Plaza** | Browse every model currently available to the active tenant in one place |
 
 ### 🗄️ Data Persistence
 
@@ -140,57 +165,73 @@ The current runtime data stack is PostgreSQL 15+, Redis 7+, and Ent ORM. Postgre
 
 CliRelay can expose a built-in web control panel at `/manage`. The server can host bundled SPA assets or fall back to synced management assets from the configured panel repository.
 
-The gallery below uses the latest supplied screenshots, covering the current end-to-end management workflow.
+The gallery below follows the panel's own navigation, captured from a live deployment.
 
-### Dashboard & Monitoring
+### Observability
 
-| Dashboard overview | System health |
-| :----------------- | :------------ |
-| <img src="docs/images/readme-showcase/dashboard-overview.png" width="100%" alt="CliRelay dashboard overview" /> | <img src="docs/images/readme-showcase/dashboard-health.png" width="100%" alt="CliRelay health score and system monitor" /> |
+| Dashboard | Monitor center |
+| :-------- | :------------- |
+| <img src="docs/images/readme-showcase/dashboard.png" width="100%" alt="Dashboard with request, token, cost and cache metrics" /> | <img src="docs/images/readme-showcase/monitor.png" width="100%" alt="Monitor center with model distribution and daily usage trend" /> |
 
-| Traffic trend | Monitor summary |
-| :------------ | :-------------- |
-| <img src="docs/images/readme-showcase/dashboard-traffic.png" width="100%" alt="CliRelay traffic trend chart" /> | <img src="docs/images/readme-showcase/monitor-summary.png" width="100%" alt="Monitor center summary charts" /> |
+| Request logs | Runtime logs |
+| :----------- | :----------- |
+| <img src="docs/images/readme-showcase/request-logs.png" width="100%" alt="Request log table with latency and token metrics per call" /> | <img src="docs/images/readme-showcase/runtime-logs.png" width="100%" alt="Runtime error logs with per-request diagnostics and download" /> |
 
-| Monitor breakdown | Request logs |
-| :---------------- | :----------- |
-| <img src="docs/images/readme-showcase/monitor-breakdown.png" width="100%" alt="Monitor center model and API key breakdown" /> | <img src="docs/images/readme-showcase/request-logs.png" width="100%" alt="Request log table with filters" /> |
+### Access & Credentials
 
-| Request details | Public API key lookup |
-| :-------------- | :-------------------- |
-| <img src="docs/images/readme-showcase/request-details.png" width="100%" alt="Request details viewer" /> | <img src="docs/images/readme-showcase/api-key-lookup.png" width="100%" alt="Public API key lookup page" /> |
+| AI providers | AI accounts |
+| :----------- | :---------- |
+| <img src="docs/images/readme-showcase/ai-providers.png" width="100%" alt="Provider channels grouped by upstream type" /> | <img src="docs/images/readme-showcase/ai-accounts.png" width="100%" alt="AI account cards with quota windows and health" /> |
 
-### Providers, Auth & Access
+| Portal accounts | Portal account permissions |
+| :-------------- | :------------------------- |
+| <img src="docs/images/readme-showcase/portal-accounts.png" width="100%" alt="Portal accounts holding multiple API keys each" /> | <img src="docs/images/readme-showcase/portal-account-permissions.png" width="100%" alt="Reusable permission profiles with quotas and system prompts" /> |
 
-| OpenCode Go auth files | Claude auth file controls |
-| :--------------------- | :------------------------ |
-| <img src="docs/images/readme-showcase/auth-files-opencode-go.png" width="100%" alt="OpenCode Go auth file management" /> | <img src="docs/images/readme-showcase/auth-files-claude.png" width="100%" alt="Claude auth file management" /> |
+| Content moderation | CC Switch config |
+| :----------------- | :--------------- |
+| <img src="docs/images/readme-showcase/content-moderation.png" width="100%" alt="Moderation profiles bound to accounts, keys or provider defaults" /> | <img src="docs/images/readme-showcase/cc-switch-config.png" width="100%" alt="Reusable CC Switch config presets per client" /> |
 
-| Claude OAuth health | API keys |
-| :------------------ | :------- |
-| <img src="docs/images/readme-showcase/auth-files-claude-oauth.png" width="100%" alt="Claude OAuth health and account state" /> | <img src="docs/images/readme-showcase/api-keys.png" width="100%" alt="API key management table" /> |
+### Models & Routing
 
-| API key permissions | Proxy pool |
-| :------------------ | :--------- |
-| <img src="docs/images/readme-showcase/api-key-permissions.png" width="100%" alt="API key permission profiles" /> | <img src="docs/images/readme-showcase/proxy-pool.png" width="100%" alt="Reusable proxy pool management" /> |
+| Model plaza | Model catalog |
+| :---------- | :------------ |
+| <img src="docs/images/readme-showcase/model-plaza.png" width="100%" alt="Model plaza browsing models available to the tenant" /> | <img src="docs/images/readme-showcase/model-catalog.png" width="100%" alt="Model catalog with capabilities and per-million pricing" /> |
 
-### Routing, Models & Configuration
+| Image models | Channel groups |
+| :----------- | :------------- |
+| <img src="docs/images/readme-showcase/image-models.png" width="100%" alt="Image generation endpoints with ready-to-run curl samples" /> | <img src="docs/images/readme-showcase/channel-groups.png" width="100%" alt="Channel groups with health state and routing paths" /> |
 
-| CC Switch import | Image generation |
-| :--------------- | :--------------- |
-| <img src="docs/images/readme-showcase/cc-switch-import.png" width="100%" alt="CC Switch import settings" /> | <img src="docs/images/readme-showcase/image-generation.png" width="100%" alt="Image generation channel configuration" /> |
+| Outbound proxies |
+| :--------------- |
+| <img src="docs/images/readme-showcase/outbound-proxies.png" width="100%" alt="Reusable outbound proxy pool with latency probes" /> |
 
-| Channel groups | Model catalog |
-| :------------- | :------------ |
-| <img src="docs/images/readme-showcase/channel-groups.png" width="100%" alt="Channel group routing and custom path configuration" /> | <img src="docs/images/readme-showcase/models.png" width="100%" alt="Model catalog and pricing management" /> |
+### Organization
 
-| Runtime config | System information |
-| :------------- | :----------------- |
-| <img src="docs/images/readme-showcase/config.png" width="100%" alt="Runtime configuration editor" /> | <img src="docs/images/readme-showcase/system-info.png" width="100%" alt="System information page" /> |
+| Tenants | Tenant switcher |
+| :------ | :-------------- |
+| <img src="docs/images/readme-showcase/tenants.png" width="100%" alt="Tenant list with lifecycle and expiry" /> | <img src="docs/images/readme-showcase/tenant-switcher.png" width="100%" alt="Switching the effective tenant from the header" /> |
 
-| Runtime logs |
-| :----------- |
-| <img src="docs/images/readme-showcase/live-logs.png" width="100%" alt="Runtime logs viewer" /> |
+| Users | Roles & permissions |
+| :---- | :------------------ |
+| <img src="docs/images/readme-showcase/users.png" width="100%" alt="Users inside the effective tenant with assigned roles" /> | <img src="docs/images/readme-showcase/roles-permissions.png" width="100%" alt="Built-in and custom roles with permission counts" /> |
+
+| Audit logs |
+| :--------- |
+| <img src="docs/images/readme-showcase/audit-logs.png" width="100%" alt="Audit trail of security-sensitive account and tenant changes" /> |
+
+### System & Self-Service
+
+| Visual config editor | Menu management |
+| :------------------- | :-------------- |
+| <img src="docs/images/readme-showcase/config-visual-editor.png" width="100%" alt="Visual config editor with recommended production profile" /> | <img src="docs/images/readme-showcase/menu-management.png" width="100%" alt="Menu visibility, ordering and required permission per entry" /> |
+
+| System info | User portal |
+| :---------- | :---------- |
+| <img src="docs/images/readme-showcase/system-info.png" width="100%" alt="System info with version, build time and update check" /> | <img src="docs/images/readme-showcase/user-portal.png" width="100%" alt="End-user portal with usage stats and request heatmap" /> |
+
+| Public API key lookup |
+| :-------------------- |
+| <img src="docs/images/readme-showcase/api-key-lookup.png" width="100%" alt="Public API key usage lookup without login" /> |
 
 > 🔗 The runtime panel source is configurable via `remote-management.panel-github-repository`. The default repository is [kittors/codeProxy](https://github.com/kittors/codeProxy).
 
@@ -363,6 +404,7 @@ CliRelay/
 ├── internal/auth/            # Provider OAuth / cookie / browser auth flows
 ├── internal/config/          # Config parsing, defaults, migrations
 ├── internal/store/           # Local, Git, PostgreSQL, object-store auth/config persistence
+├── internal/identity/        # Tenants, users, roles, permissions, menus, audit logs
 ├── internal/tui/             # Terminal management UI
 ├── internal/usage/           # PostgreSQL-backed usage data, retention, analytics
 ├── internal/managementasset/ # /manage panel hosting and asset sync
