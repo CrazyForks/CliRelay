@@ -12,6 +12,23 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 )
 
+// corsAllowHeaders must cover every request header a browser client legitimately sends,
+// otherwise the preflight is rejected by the browser and the caller sees a bare CORS error
+// with no server-side trace.
+//
+// The three auth headers mirror what config_access.provider.Authenticate actually reads
+// (Authorization / X-Goog-Api-Key / X-Api-Key). Omitting the latter two meant the server
+// advertised auth schemes that no browser could ever use.
+//
+// anthropic-version is mandatory on the Anthropic wire format and anthropic-beta carries
+// feature opt-ins; x-stainless-* is emitted automatically by the official OpenAI and
+// Anthropic SDKs, so browser callers cannot drop it.
+const corsAllowHeaders = "Authorization, Content-Type, Accept, Origin, " +
+	"X-Api-Key, X-Goog-Api-Key, " +
+	"anthropic-version, anthropic-beta, " +
+	"x-stainless-arch, x-stainless-lang, x-stainless-os, x-stainless-package-version, " +
+	"x-stainless-retry-count, x-stainless-runtime, x-stainless-runtime-version, x-stainless-timeout"
+
 func corsMiddleware(cfgProvider func() *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c != nil && c.Request != nil && c.Request.URL != nil {
@@ -52,7 +69,7 @@ func corsMiddleware(cfgProvider func() *config.Config) gin.HandlerFunc {
 		c.Header("Vary", "Origin")
 		c.Header("Access-Control-Allow-Origin", allowedOrigin)
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, Origin")
+		c.Header("Access-Control-Allow-Headers", corsAllowHeaders)
 		c.Header("Access-Control-Expose-Headers", "X-CPA-VERSION, X-CPA-COMMIT, X-CPA-BUILD-DATE")
 
 		if c.Request.Method == http.MethodOptions {
