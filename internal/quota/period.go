@@ -20,7 +20,44 @@ var OrderedPeriods = [...]Period{PeriodFiveHour, PeriodDay, PeriodWeek, PeriodMo
 var (
 	ErrInvalidSpendingLimit    = errors.New("invalid spending limit")
 	ErrPeriodDayLegacyConflict = errors.New("period day legacy conflict")
+	ErrPeriodsRequired         = errors.New("periods must be a non-empty array")
+	ErrInvalidPeriod           = errors.New("invalid period")
 )
+
+type InvalidPeriodError struct {
+	Period Period
+}
+
+func (e *InvalidPeriodError) Error() string {
+	return fmt.Sprintf("%s: %v", e.Period, ErrInvalidPeriod)
+}
+
+func (e *InvalidPeriodError) Unwrap() error {
+	return ErrInvalidPeriod
+}
+
+// NormalizePeriods validates reset periods and removes duplicates while
+// preserving the request order.
+func NormalizePeriods(periods []Period) ([]Period, error) {
+	if len(periods) == 0 {
+		return nil, ErrPeriodsRequired
+	}
+	out := make([]Period, 0, len(periods))
+	seen := make(map[Period]struct{}, len(periods))
+	for _, period := range periods {
+		switch period {
+		case PeriodFiveHour, PeriodDay, PeriodWeek, PeriodMonth:
+		default:
+			return nil, &InvalidPeriodError{Period: period}
+		}
+		if _, ok := seen[period]; ok {
+			continue
+		}
+		seen[period] = struct{}{}
+		out = append(out, period)
+	}
+	return out, nil
+}
 
 type PeriodSpendingLimits struct {
 	FiveHour float64 `json:"5h" yaml:"5h"`

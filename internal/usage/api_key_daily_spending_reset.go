@@ -148,6 +148,10 @@ func GetDailySpendingResetBaseline(tenantID, apiKeyID string) (float64, bool, er
 
 // ListDailySpendingResetBaselines returns same-day baselines keyed by api_key_id.
 func ListDailySpendingResetBaselines(tenantID string, apiKeyIDs []string) (map[string]float64, error) {
+	return listDailySpendingResetBaselinesAt(tenantID, apiKeyIDs, LocalDayKeyAt(time.Now()))
+}
+
+func listDailySpendingResetBaselinesAt(tenantID string, apiKeyIDs []string, dayKey string) (map[string]float64, error) {
 	out := make(map[string]float64)
 	if len(apiKeyIDs) == 0 {
 		return out, nil
@@ -157,7 +161,7 @@ func ListDailySpendingResetBaselines(tenantID string, apiKeyIDs []string) (map[s
 		return out, nil
 	}
 	tenantID = normalizeTenantID(tenantID)
-	today := LocalDayKeyAt(time.Now())
+	today := strings.TrimSpace(dayKey)
 	ids := make([]string, 0, len(apiKeyIDs))
 	seen := make(map[string]struct{}, len(apiKeyIDs))
 	for _, id := range apiKeyIDs {

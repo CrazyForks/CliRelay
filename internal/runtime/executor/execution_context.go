@@ -183,13 +183,23 @@ func (ec *ExecutionContext) Reporter() *usageReporter {
 	if ec == nil {
 		return nil
 	}
-	model := thinking.ParseSuffix(ec.RequestedModel).ModelName
+	parsedModel := thinking.ParseSuffix(ec.RequestedModel)
+	model := parsedModel.ModelName
 	if strings.TrimSpace(model) == "" {
 		model = ec.BaseModel
 	}
 	reporter := newUsageReporter(ec.Context, ec.Provider, model, ec.BaseModel, ec.Auth)
+	level := thinking.ExtractThinkingLevel(ec.OriginalPayload, ec.SourceFormat.String())
+	if parsedModel.HasSuffix {
+		level = parsedModel.RawSuffix
+	}
+	reporter.setThinkingLevel(level)
 	if fallback := visionFallbackLogFromContext(ec.Context); fallback.FallbackModel != "" {
-		reporter.setModel(fallback.RequestedModel)
+		fallbackModel := thinking.ParseSuffix(fallback.RequestedModel)
+		reporter.setModel(fallbackModel.ModelName)
+		if fallbackModel.HasSuffix {
+			reporter.setThinkingLevel(fallbackModel.RawSuffix)
+		}
 		reporter.setUpstreamModel(fallback.UpstreamModel)
 		reporter.setVisionFallbackModel(fallback.FallbackModel)
 	}

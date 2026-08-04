@@ -55,7 +55,10 @@ func ensureEndUserDailySpendingResetEventsTable(db *sql.DB) error {
 }
 
 func bootstrapEndUserDailySpendingResetEvents(db *sql.DB) error {
-	return ensureEndUserDailySpendingResetEventsTable(db)
+	if err := ensureEndUserDailySpendingResetEventsTable(db); err != nil {
+		return err
+	}
+	return bootstrapPeriodSpendingResets(db)
 }
 
 // InsertEndUserDailySpendingResetEvent appends one reset history row.

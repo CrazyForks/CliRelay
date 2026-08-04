@@ -26,7 +26,7 @@ func TestRegisterManagementRouteTable(t *testing.T) {
 		routes[key] = route
 	}
 
-	if got, want := len(routes), 305; got != want {
+	if got, want := len(routes), 309; got != want {
 		t.Fatalf("route count = %d, want %d", got, want)
 	}
 	if got, want := sortedRouteKeys(routes), expectedManagementRoutes(); !slices.Equal(got, want) {
@@ -56,6 +56,7 @@ func TestRegisterManagementRouteTable(t *testing.T) {
 		"PATCH /v0/management/api-key-entries",
 		"GET /v0/management/end-users/:id/daily-spending/reset-history",
 		"POST /v0/management/end-users/:id/api-keys/:key_id/daily-spending/reset",
+		"POST /v0/management/end-users/:id/api-keys/:key_id/period-spending/reset",
 		"GET /v0/management/end-users/:id/api-keys/:key_id/daily-spending/reset-history",
 		"POST /v0/management/opencode-go-api-key/usage",
 		"GET /v0/management/cline-api-key",
@@ -197,6 +198,7 @@ func expectedManagementRoutes() []string {
 		"GET /v0/portal/api-keys/:id/secret",
 		"PATCH /v0/portal/api-keys/:id",
 		"POST /v0/portal/api-keys/:id/rotate",
+		"POST /v0/portal/api-keys/:id/period-spending/reset",
 		"DELETE /v0/portal/api-keys/:id",
 		"POST /v0/portal/auth/login",
 		"POST /v0/portal/auth/logout",
@@ -228,12 +230,14 @@ func expectedManagementRoutes() []string {
 		"DELETE /v0/management/end-users/:id",
 		"POST /v0/management/end-users/:id/reset-password",
 		"POST /v0/management/end-users/:id/daily-spending/reset",
+		"POST /v0/management/end-users/:id/period-spending/reset",
 		"GET /v0/management/end-users/:id/daily-spending/reset-history",
 		"GET /v0/management/end-users/:id/api-keys",
 		"POST /v0/management/end-users/:id/api-keys",
 		"PATCH /v0/management/end-users/:id/api-keys/:key_id",
 		"POST /v0/management/end-users/:id/api-keys/:key_id/rotate",
 		"POST /v0/management/end-users/:id/api-keys/:key_id/daily-spending/reset",
+		"POST /v0/management/end-users/:id/api-keys/:key_id/period-spending/reset",
 		"GET /v0/management/end-users/:id/api-keys/:key_id/daily-spending/reset-history",
 		"DELETE /v0/management/end-users/:id/api-keys/:key_id",
 		"POST /v0/management/end-users/:id/api-keys/:key_id/default",
@@ -421,6 +425,7 @@ func expectedManagementRoutes() []string {
 		"POST /v0/management/content-moderation/profiles",
 		"POST /v0/management/content-moderation/profiles/:id/test",
 		"POST /v0/management/api-key-entries/daily-spending/reset",
+		"POST /v0/management/api-key-entries/period-spending/reset",
 		"POST /v0/management/auth-files",
 		"POST /v0/management/iflow-auth-url",
 		"POST /v0/management/image-generation/test",

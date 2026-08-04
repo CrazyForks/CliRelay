@@ -11,13 +11,20 @@ import (
 
 func TestRuntimeMigrationsCoverCoreTables(t *testing.T) {
 	migrations := RuntimeMigrations()
-	if len(migrations) != 23 {
-		t.Fatalf("RuntimeMigrations len = %d, want 23", len(migrations))
+	if len(migrations) != 24 {
+		t.Fatalf("RuntimeMigrations len = %d, want 24", len(migrations))
 	}
-	// Latest: shared AI-account cycle token projection.
-	if migrations[22].Version != "202607240001_ai_account_subject_usage_tokens" {
-		t.Fatalf("latest migration version = %q", migrations[22].Version)
+	// Latest: request-log thinking level metadata.
+	if migrations[23].Version != "202608030001_request_log_thinking_level" {
+		t.Fatalf("latest migration version = %q", migrations[23].Version)
 	}
+	thinkingSQL := migrations[23].SQL
+	for _, fragment := range []string{"ALTER TABLE request_logs", "thinking_level TEXT NOT NULL DEFAULT ''"} {
+		if !strings.Contains(thinkingSQL, fragment) {
+			t.Fatalf("request log thinking level migration missing %q", fragment)
+		}
+	}
+	// Prior: shared AI-account cycle token projection.
 	tokenSQL := migrations[22].SQL
 	for _, fragment := range []string{"ALTER TABLE ai_account_subject_usage_buckets", "total_tokens BIGINT NOT NULL DEFAULT 0"} {
 		if !strings.Contains(tokenSQL, fragment) {

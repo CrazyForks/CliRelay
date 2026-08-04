@@ -164,10 +164,6 @@ func QueryTodayEffectiveCostsByEndUsersForTenant(tenantID string, endUserIDs []s
 
 // ResetTodayCostByEndUser sets an account-level baseline without deleting logs.
 func ResetTodayCostByEndUser(tenantID, endUserID string) (usedBefore float64, rawToday float64, err error) {
-	db := getDB()
-	if db == nil {
-		return 0, 0, nil
-	}
 	tenantID = normalizeTenantID(tenantID)
 	endUserID = strings.TrimSpace(endUserID)
 	usedBefore, err = QueryTodayEffectiveCostByEndUserForTenant(tenantID, endUserID)
@@ -178,8 +174,25 @@ func ResetTodayCostByEndUser(tenantID, endUserID string) (usedBefore float64, ra
 	if err != nil {
 		return 0, 0, err
 	}
+	err = UpsertEndUserDailySpendingReset(tenantID, endUserID, rawToday)
+	return usedBefore, rawToday, err
+}
+
+func UpsertEndUserDailySpendingReset(tenantID, endUserID string, rawToday float64) error {
+	db := getDB()
+	if db == nil {
+		return fmt.Errorf("usage: database not initialised")
+	}
+	tenantID = normalizeTenantID(tenantID)
+	endUserID = strings.TrimSpace(endUserID)
+	if endUserID == "" {
+		return fmt.Errorf("usage: end_user_id is required")
+	}
+	if rawToday < 0 {
+		rawToday = 0
+	}
 	now := time.Now().UTC()
-	_, err = db.Exec(`
+	_, err := db.Exec(`
 		INSERT INTO end_user_daily_spending_resets (tenant_id, end_user_id, day_key, cost_baseline, reset_at)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT (tenant_id, end_user_id) DO UPDATE SET
@@ -188,7 +201,7 @@ func ResetTodayCostByEndUser(tenantID, endUserID string) (usedBefore float64, ra
 			reset_at = excluded.reset_at
 	`, tenantID, endUserID, LocalDayKeyAt(now), rawToday, now.Format(time.RFC3339Nano))
 	if err != nil {
-		return 0, 0, fmt.Errorf("usage: reset today cost by end user: %w", err)
+		return fmt.Errorf("usage: reset today cost by end user: %w", err)
 	}
-	return usedBefore, rawToday, nil
+	return nil
 }
