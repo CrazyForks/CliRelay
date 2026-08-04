@@ -312,6 +312,16 @@ func postgresSmokeAllowsStatus(routePath string, status int, body string) bool {
 		return routePath == "/v0/management/update/progress" && strings.Contains(body, "update_progress_failed") ||
 			routePath == "/v0/management/update/events" && strings.Contains(body, "update_events_failed")
 	}
+	if status == http.StatusInternalServerError {
+		// Qwen and Kimi use OAuth *device* login: the handler must reach the upstream
+		// provider to exchange a device code before it can return an auth URL. The other
+		// six *-auth-url routes build a PKCE URL locally and stay green offline.
+		// This smoke asserts the route is registered and reachable — upstream availability
+		// is not what it covers — so a sandboxed runner with no egress must not fail it.
+		deviceLogin := routePath == "/v0/management/qwen-auth-url" ||
+			routePath == "/v0/management/kimi-auth-url"
+		return deviceLogin && strings.Contains(body, "failed to generate authorization url")
+	}
 	if status != http.StatusServiceUnavailable {
 		return false
 	}
@@ -362,4 +372,28 @@ func (client postgresManagementClient) request(method, path, body string) *httpt
 	rec := httptest.NewRecorder()
 	client.router.ServeHTTP(rec, req)
 	return rec
+}
+
+func TestPostgresSmokeAllowsDeviceLoginUpstreamFailure(t *testing.T) {
+	const authURLFailure = `{"error":"failed to generate authorization url"}`
+
+	// Device-login routes must survive a runner with no egress to the provider.
+	for _, routePath := range []string{
+		"/v0/management/qwen-auth-url",
+		"/v0/management/kimi-auth-url",
+	} {
+		if !postgresSmokeAllowsStatus(routePath, http.StatusInternalServerError, authURLFailure) {
+			t.Errorf("%s: upstream device-code failure should be tolerated by the route smoke", routePath)
+		}
+	}
+
+	// The remaining *-auth-url routes build their URL locally, so a 500 there is a real bug.
+	if postgresSmokeAllowsStatus("/v0/management/codex-auth-url", http.StatusInternalServerError, authURLFailure) {
+		t.Error("codex-auth-url builds its URL locally; a 500 must still fail the smoke")
+	}
+
+	// The allowance is scoped to this one failure, not to 500s in general.
+	if postgresSmokeAllowsStatus("/v0/management/qwen-auth-url", http.StatusInternalServerError, `{"error":"boom"}`) {
+		t.Error("unrelated 500s on qwen-auth-url must still fail the smoke")
+	}
 }
