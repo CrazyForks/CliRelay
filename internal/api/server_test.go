@@ -1073,3 +1073,41 @@ func TestServerTrustedProxiesAllowConfiguredReverseProxyClientIP(t *testing.T) {
 		t.Fatalf("ClientIP() = %q, want forwarded client IP", got)
 	}
 }
+
+// The preflight must advertise every auth header the server is willing to authenticate with.
+// When these drift apart the server accepts a scheme that no browser client can ever send:
+// the browser rejects the request at preflight and the user only sees a bare CORS error.
+func TestCORSPreflightAdvertisesEveryAcceptedAuthHeader(t *testing.T) {
+	server := newTestServerWithConfig(t, func(cfg *proxyconfig.Config) {
+		cfg.CORSAllowOrigins = []string{"chrome-extension://*"}
+	})
+
+	req := httptest.NewRequest(http.MethodOptions, "/v1/messages", nil)
+	req.Header.Set("Origin", "chrome-extension://dnjfbdinlpcfefpheddgehgobcefebli")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusNoContent, rr.Body.String())
+	}
+
+	allowed := make(map[string]bool)
+	for _, header := range strings.Split(rr.Header().Get("Access-Control-Allow-Headers"), ",") {
+		allowed[strings.ToLower(strings.TrimSpace(header))] = true
+	}
+
+	// Mirrors config_access.provider.Authenticate.
+	for _, header := range []string{"authorization", "x-api-key", "x-goog-api-key"} {
+		if !allowed[header] {
+			t.Errorf("auth header %q is accepted by the server but not advertised to browsers", header)
+		}
+	}
+	// Mandatory / near-universal on the Anthropic wire format and the official SDKs.
+	for _, header := range []string{"anthropic-version", "anthropic-beta", "content-type"} {
+		if !allowed[header] {
+			t.Errorf("header %q is required by browser clients but not advertised", header)
+		}
+	}
+}

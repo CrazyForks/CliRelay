@@ -12,6 +12,10 @@
 </p>
 
 <p align="center">
+  多租户管理面板 · 请求日志与配额 · 分组路由与故障转移 · 可私有部署
+</p>
+
+<p align="center">
   <a href="README.md">English</a> | 中文
 </p>
 
@@ -22,13 +26,19 @@
   <a href="https://github.com/kittors/CliRelay/pulls">✨ 功能请求</a>
 </p>
 
+<p align="center">
+  <img src="docs/images/readme-showcase/landing.png" width="100%" alt="CliRelay portal landing page" />
+</p>
+
 ---
 
 ## ⚡ CliRelay 是什么？
 
 > **✨ 基于 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的深度增强版** — 补强了生产级管理层、Web 控制面板托管能力，以及面向日常运维的终端 TUI。
 
-CliRelay 会把 AI CLI 订阅、OAuth 凭据、API Key 以及兼容上游服务整合成一个可管理的 API 层。它可以让 Claude Code、Gemini CLI、OpenAI Codex、Qwen、iFlow、Kimi、Antigravity、xAI/Grok、OpenCode Go、ClinePass、Ollama Cloud、Bedrock、Amp、Vertex、OpenAI 兼容客户端等工具通过统一端点访问多类上游，同时围绕流量提供分组路由、故障转移、请求日志、配额管控、模型价格、生图配置、API Key 自助查询、在线更新、`/manage` Web 面板托管和终端管理流程。
+CliRelay 会把 AI CLI 订阅、OAuth 凭据、API Key 以及兼容上游服务整合成一个可管理的 API 层。它可以让 Claude Code、Gemini CLI、OpenAI Codex、Qwen、iFlow、Kimi、Antigravity、xAI/Grok、OpenCode Go、ClinePass、Ollama Cloud、Bedrock、Amp、Vertex、OpenAI 兼容客户端等工具通过统一端点访问多类上游，同时围绕流量提供分组路由、故障转移、请求日志、配额管控、模型价格、生图配置、内容审核、在线更新、`/manage` Web 面板托管和终端管理流程。
+
+它从一开始就假设**不止一个人在用**。租户、用户、角色和细粒度权限模型（`governance.tenants`、`models.write`、`providers.test` 等）决定每个账号能看到哪些页面、能按哪些按钮、能做哪些操作，安全敏感的变更都会落到审计日志里。门户账号则让终端用户在一个身份下持有多把 API Key，不用找管理员就能自查用量。
 
 当前运行时数据栈是 PostgreSQL 15+、Redis 7+ 和 Ent ORM。PostgreSQL 是运行时数据事实源；Redis 只承担缓存、锁、限流、队列和可重建状态。SQLite 已经是旧版本数据源，只在迁移导入时保留支持。
 
@@ -71,14 +81,26 @@ CliRelay 会把 AI CLI 订阅、OAuth 凭据、API Key 以及兼容上游服务�
 | 📡 **WebSocket 监控** | 通过 WebSocket 实时推送系统状态：CPU、内存、goroutines、网络 I/O、数据库大小 |
 | 🗄️ **Ent + PostgreSQL** | 使用 PostgreSQL 15+ 作为运行时主数据库，并保留 Ent 生成的 schema 元数据 |
 
-### 🔐 API Key 与权限管理
+### 🏛️ 多租户与治理
+
+| 特性 | 说明 |
+|:-----|:-----|
+| 🏢 **租户生命周期** | 创建租户并管理租用期限，运行时数据按租户端到端隔离 |
+| 👤 **用户管理** | 管理当前生效租户下的账号，含密码策略与重置流程 |
+| 🎭 **角色权限** | 细粒度的「资源.动作」权限（`governance.tenants`、`models.write`、`providers.test` 等）决定账号能触达的页面、按钮和操作 |
+| 🧾 **审计日志** | 账号与租户的安全敏感变更全部留痕，可在面板中检索 |
+| 🧭 **菜单管理** | 按租户裁剪导航入口，让菜单与实际授予的权限保持一致 |
+
+### 🔐 API Key 与门户账号
 
 | 特性 | 说明 |
 |:-----|:-----|
 | 🔑 **API Key CRUD** | 通过管理 API 创建、编辑、删除 API Key — 支持自定义名称、备注和独立启用/禁用开关 |
+| 🧑‍💼 **门户账号** | 把多把 API Key 归到同一个终端用户账号下，按人管理而不是按 Key 管理 |
 | 📊 **单 Key 配额** | 为每个 Key 设置最大 Token / 请求配额，系统自动执行限制 |
+| 🔁 **按周期重置额度** | 按选定周期重置消费额度，可作用于整个账号或单把自有 Key |
 | ⏱️ **速率限制** | 单 Key 速率限制（每分钟/每小时请求数） |
-| 👥 **多人权限划分** | 可将 API Key 分配给不同用户或团队，并限制可用渠道分组和模型权限 |
+| 🧩 **权限配置档** | 用可复用的权限档把渠道分组范围和模型权限绑定到 Key 上 |
 | 🔒 **Key 脱敏** | API Key 在 UI 和日志中始终脱敏显示（`sk-***xxx`） |
 | 🌍 **公开查询页面** | 终端用户可通过公开自助页面查询自己的用量统计和请求日志（无需登录） |
 
@@ -101,8 +123,10 @@ CliRelay 会把 AI CLI 订阅、OAuth 凭据、API Key 以及兼容上游服务�
 |:-----|:-----|
 | 🔐 **OAuth 支持** | 原生 OAuth 流程覆盖 Gemini、Claude、Codex、Qwen、iFlow、Antigravity、Kimi、xAI/Grok，并在支持的渠道中提供设备码 / 浏览器 / Cookie 变体 |
 | 🪪 **身份指纹维护** | 集中维护上游身份信息，让请求在不同 provider 侧保持一致的客户端指纹 |
+| 🧹 **内容审核** | 创建可复用的审核配置，先测试审核结果，再绑定到 AI 账号、供应商密钥或供应商默认项 |
 | 🔒 **TLS 处理** | 可配置的上游通信 TLS 设置 |
 | 🏠 **面板隔离** | 管理面板访问由管理员密码独立控制 |
+| 🌐 **受控 CORS** | 浏览器与扩展来源需显式加入白名单，支持受控的 `chrome-extension://*` 写法；预检会如实声明服务端真正接受的每一个认证头 |
 | 🛡️ **请求伪装** | 上游请求自动剥离客户端标识 Headers，保护隐私 |
 
 ### 🛠️ 运维体验
@@ -110,11 +134,12 @@ CliRelay 会把 AI CLI 订阅、OAuth 凭据、API Key 以及兼容上游服务�
 | 特性 | 说明 |
 |:-----|:-----|
 | 🖥️ **可视化管理面板** | 在 `/manage` 中配置服务商、认证、API Key、模型、路由、日志、更新与系统状态 |
-| 🌐 **中英文界面** | 管理面板内置 i18n，Docker Compose 和 TUI 也支持语言选择 |
+| 🌐 **三语界面** | 管理面板内置 i18n，支持简体中文、English、Русский，Docker Compose 和 TUI 也支持语言选择 |
 | 🌙 **Dark Mode** | 为长时间运维提供完整暗色主题 |
 | 🧬 **可视化配置编辑** | 可通过表单编辑运行时配置，也能切换到 YAML 源码视图精细控制 |
 | 🔄 **在线更新机制** | 在面板中检查版本、查看更新内容、触发 updater sidecar，并等待后端恢复 |
-| 📥 **CC Switch 导入** | 将 cc-switch 风格配置导入到可管理的模型/渠道工作区 |
+| 📥 **CC Switch 配置预设** | 从一个渠道分组生成可复用的 CC Switch 供应商配置，为 Claude 的主模型 / Haiku / Sonnet / Opus / Fable 或 Codex 模型分别指定实际上游模型，并给出一键导入链接 |
+| 🛒 **模型广场** | 一处浏览当前租户下所有可用模型 |
 
 ### 🗄️ 数据持久化
 
@@ -138,61 +163,77 @@ CliRelay 会把 AI CLI 订阅、OAuth 凭据、API Key 以及兼容上游服务�
 
 ## 📸 管理面板预览
 
-CliRelay 可以在 `/manage` 暴露内置 Web 控制面板。服务端既可以托管打包后的 SPA 资源，也可以回退到同步的管理面板资源。
+CliRelay 可以在 `/manage` 提供内置 Web 控制面板。服务端既能托管打包好的 SPA 资源，也能回退到从配置的面板仓库同步的管理端资源。
 
-下面这组 gallery 使用了最新提供的截图素材，覆盖当前管理面板的完整工作流。
+下面的截图按面板自身的导航分组，取自真实部署环境。
 
-### 仪表盘与监控
+### 运行观测
 
-| 仪表盘概览 | 系统健康 |
-| :--------- | :------- |
-| <img src="docs/images/readme-showcase/dashboard-overview.png" width="100%" alt="CliRelay 仪表盘概览" /> | <img src="docs/images/readme-showcase/dashboard-health.png" width="100%" alt="CliRelay 健康分与系统监控" /> |
+| 仪表盘 | 监控中心 |
+| :----- | :------- |
+| <img src="docs/images/readme-showcase/dashboard.png" width="100%" alt="仪表盘展示请求、Token、费用与缓存指标" /> | <img src="docs/images/readme-showcase/monitor.png" width="100%" alt="监控中心展示模型分布与每日用量趋势" /> |
 
-| 流量趋势 | 监控汇总 |
+| 请求日志 | 运行日志 |
 | :------- | :------- |
-| <img src="docs/images/readme-showcase/dashboard-traffic.png" width="100%" alt="CliRelay 流量趋势图" /> | <img src="docs/images/readme-showcase/monitor-summary.png" width="100%" alt="监控中心汇总图表" /> |
+| <img src="docs/images/readme-showcase/request-logs.png" width="100%" alt="请求日志表格，每条调用都有延迟与 Token 指标" /> | <img src="docs/images/readme-showcase/runtime-logs.png" width="100%" alt="运行错误日志，含单请求诊断与下载" /> |
 
-| 监控拆分 | 请求日志 |
+### 接入与凭证
+
+| AI 供应商 | AI 账号 |
+| :-------- | :------ |
+| <img src="docs/images/readme-showcase/ai-providers.png" width="100%" alt="按上游类型分组的供应商渠道" /> | <img src="docs/images/readme-showcase/ai-accounts.png" width="100%" alt="AI 账号卡片，含配额窗口与健康度" /> |
+
+| 门户账号 | 门户账号权限 |
+| :------- | :----------- |
+| <img src="docs/images/readme-showcase/portal-accounts.png" width="100%" alt="门户账号下各自持有多把 API Key" /> | <img src="docs/images/readme-showcase/portal-account-permissions.png" width="100%" alt="可复用的权限配置档，含额度与系统提示词" /> |
+
+| 内容审核 | CC Switch 配置 |
+| :------- | :------------- |
+| <img src="docs/images/readme-showcase/content-moderation.png" width="100%" alt="审核配置绑定到账号、密钥或供应商默认项" /> | <img src="docs/images/readme-showcase/cc-switch-config.png" width="100%" alt="按客户端维护的可复用 CC Switch 配置预设" /> |
+
+### 模型与调度
+
+| 模型广场 | 模型目录 |
 | :------- | :------- |
-| <img src="docs/images/readme-showcase/monitor-breakdown.png" width="100%" alt="监控中心模型与 API Key 拆分" /> | <img src="docs/images/readme-showcase/request-logs.png" width="100%" alt="请求日志表格与过滤器" /> |
+| <img src="docs/images/readme-showcase/model-plaza.png" width="100%" alt="模型广场浏览当前租户可用模型" /> | <img src="docs/images/readme-showcase/model-catalog.png" width="100%" alt="模型目录含能力标签与每百万 Token 定价" /> |
 
-| 请求详情 | API Key 独立查询页 |
-| :------- | :----------------- |
-| <img src="docs/images/readme-showcase/request-details.png" width="100%" alt="请求详情查看器" /> | <img src="docs/images/readme-showcase/api-key-lookup.png" width="100%" alt="API Key 独立查询页面" /> |
+| 生图模型 | 渠道分组 |
+| :------- | :------- |
+| <img src="docs/images/readme-showcase/image-models.png" width="100%" alt="生图端点与可直接运行的 curl 示例" /> | <img src="docs/images/readme-showcase/channel-groups.png" width="100%" alt="渠道分组的健康状态与路由路径" /> |
 
-### 服务商、认证与权限
+| 出站代理 |
+| :------- |
+| <img src="docs/images/readme-showcase/outbound-proxies.png" width="100%" alt="可复用的出站代理池与延迟探测" /> |
 
-| OpenCode Go 认证文件 | Claude 认证控制 |
-| :------------------- | :-------------- |
-| <img src="docs/images/readme-showcase/auth-files-opencode-go.png" width="100%" alt="OpenCode Go 认证文件管理" /> | <img src="docs/images/readme-showcase/auth-files-claude.png" width="100%" alt="Claude 认证文件管理" /> |
+### 组织与权限
 
-| Claude OAuth 健康 | API Keys |
-| :---------------- | :------- |
-| <img src="docs/images/readme-showcase/auth-files-claude-oauth.png" width="100%" alt="Claude OAuth 健康与账号状态" /> | <img src="docs/images/readme-showcase/api-keys.png" width="100%" alt="API Key 管理表格" /> |
+| 租户管理 | 租户切换 |
+| :------- | :------- |
+| <img src="docs/images/readme-showcase/tenants.png" width="100%" alt="租户列表含生命周期与到期时间" /> | <img src="docs/images/readme-showcase/tenant-switcher.png" width="100%" alt="在顶栏切换当前生效租户" /> |
 
-| API Key 权限配置 | 代理池 |
-| :--------------- | :----- |
-| <img src="docs/images/readme-showcase/api-key-permissions.png" width="100%" alt="API Key 权限配置" /> | <img src="docs/images/readme-showcase/proxy-pool.png" width="100%" alt="可复用代理池管理" /> |
+| 用户管理 | 角色权限 |
+| :------- | :------- |
+| <img src="docs/images/readme-showcase/users.png" width="100%" alt="当前生效租户下的账号与已分配角色" /> | <img src="docs/images/readme-showcase/roles-permissions.png" width="100%" alt="内置与自定义角色及其权限数量" /> |
 
-### 路由、模型与配置
+| 审计日志 |
+| :------- |
+| <img src="docs/images/readme-showcase/audit-logs.png" width="100%" alt="账号与租户安全敏感变更的审计留痕" /> |
 
-| CC Switch 导入 | 生图配置 |
+### 系统与自助
+
+| 可视化配置编辑 | 菜单管理 |
 | :------------- | :------- |
-| <img src="docs/images/readme-showcase/cc-switch-import.png" width="100%" alt="CC Switch 导入设置" /> | <img src="docs/images/readme-showcase/image-generation.png" width="100%" alt="生图渠道配置" /> |
+| <img src="docs/images/readme-showcase/config-visual-editor.png" width="100%" alt="可视化配置编辑器与推荐生产档位" /> | <img src="docs/images/readme-showcase/menu-management.png" width="100%" alt="菜单可见性、排序与所需权限" /> |
 
-| 渠道分组 | 模型目录 |
+| 系统信息 | 用户门户 |
 | :------- | :------- |
-| <img src="docs/images/readme-showcase/channel-groups.png" width="100%" alt="配置分组调用策略与自定义调用路径" /> | <img src="docs/images/readme-showcase/models.png" width="100%" alt="模型目录与价格管理" /> |
+| <img src="docs/images/readme-showcase/system-info.png" width="100%" alt="系统信息含版本、构建时间与更新检查" /> | <img src="docs/images/readme-showcase/user-portal.png" width="100%" alt="终端用户门户的用量统计与请求热力图" /> |
 
-| 运行时配置 | 系统信息 |
-| :--------- | :------- |
-| <img src="docs/images/readme-showcase/config.png" width="100%" alt="运行时配置编辑器" /> | <img src="docs/images/readme-showcase/system-info.png" width="100%" alt="系统信息页面" /> |
+| 公开 API Key 查询 |
+| :---------------- |
+| <img src="docs/images/readme-showcase/api-key-lookup.png" width="100%" alt="无需登录的公开 API Key 用量查询" /> |
 
-| 运行时日志 |
-| :--------- |
-| <img src="docs/images/readme-showcase/live-logs.png" width="100%" alt="运行时日志查看器" /> |
-
-> 🔗 面板资源仓库可通过 `remote-management.panel-github-repository` 配置，默认仓库为 [kittors/codeProxy](https://github.com/kittors/codeProxy)。
+> 🔗 运行时面板来源可通过 `remote-management.panel-github-repository` 配置，默认仓库是 [kittors/codeProxy](https://github.com/kittors/codeProxy)。
 
 ## 🏗️ 支持的服务商
 
@@ -366,6 +407,7 @@ CliRelay/
 ├── internal/auth/            # Provider 的 OAuth / Cookie / 浏览器认证流程
 ├── internal/config/          # 配置解析、默认值、迁移
 ├── internal/store/           # 本地、Git、PostgreSQL、对象存储配置/认证持久化
+├── internal/identity/        # 租户、用户、角色、权限、菜单与审计日志
 ├── internal/tui/             # 终端管理 UI
 ├── internal/usage/           # PostgreSQL 支撑的用量数据、保留策略、分析聚合
 ├── internal/managementasset/ # /manage 面板托管与资源同步
