@@ -64,6 +64,18 @@ func (m *Manager) KnownChannelGroupsForTenant(tenantID string) map[string]struct
 	return out
 }
 
+// ChannelGroupsForAuthForTenant returns the channel groups auth belongs to under
+// the tenant's routing config, including the implicit "default" pool.
+// Management model scoping must use the same membership rule routing uses; the
+// default pool carries no match rules, so callers cannot re-derive it from the
+// routing config without duplicating (and drifting from) this logic.
+func (m *Manager) ChannelGroupsForAuthForTenant(tenantID string, auth *Auth) map[string]struct{} {
+	if m == nil || auth == nil {
+		return nil
+	}
+	return authGroups(m.currentRuntimeConfigForTenant(normalizedTenantID(tenantID)), auth)
+}
+
 // ServeModelScopeOptions tunes CanServeModelWithScopes* for management UI paths.
 type ServeModelScopeOptions struct {
 	// IgnoreGroupAllowedModels skips channel-group AllowedModels checks so the
