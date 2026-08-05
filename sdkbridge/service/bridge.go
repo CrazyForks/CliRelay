@@ -63,6 +63,14 @@ func ListOAuthProviderModelConfigRows() []OAuthProviderModelConfigRow {
 	return internalserviceapp.ListOAuthProviderModelConfigRows()
 }
 
+func ListOAuthProviderModelConfigRowsForTenant(tenantID string) []OAuthProviderModelConfigRow {
+	return internalserviceapp.ListOAuthProviderModelConfigRowsForTenant(tenantID)
+}
+
+func ListModelOwnersForAuthGroupsForTenant(tenantID string, authGroups []string) []string {
+	return internalserviceapp.ListModelOwnersForAuthGroupsForTenant(tenantID, authGroups)
+}
+
 func ConfigureServiceAccess(cfg *config.Config, accessManager *sdkaccess.Manager) {
 	internalserviceapp.ConfigureServiceAccess(cfg, accessManager)
 }

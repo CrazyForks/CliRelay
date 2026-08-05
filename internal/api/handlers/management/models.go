@@ -221,6 +221,9 @@ func (h *ModelsHandler) PatchAuthGroupModelOwnerMapping(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	// The mapping decides which catalog models a credential can serve, so it must
+	// trigger re-registration just like editing the models themselves.
+	h.notifyModelConfigMutated(c)
 	c.JSON(http.StatusOK, payload)
 }
 
@@ -287,12 +290,14 @@ func (h *ModelsHandler) PostOpenRouterModelSyncRun(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "result": result, "state": state})
 }
 
+// notifyModelConfigMutated asks the runtime to re-register credential models for
+// the tenant whose catalog just changed. It used to fire for the system tenant
+// only, which matched registration reading just that tenant's library; now that
+// registration is tenant-scoped, every tenant must be able to trigger it, or a
+// newly added model id would stay unroutable until the next refresh cycle.
 func (h *ModelsHandler) notifyModelConfigMutated(c *gin.Context) {
-	if effectiveTenantID(c) != identity.SystemTenantID {
-		return
-	}
 	if h == nil || h.Handler == nil || h.onModelConfigMutated == nil {
 		return
 	}
-	h.onModelConfigMutated()
+	h.onModelConfigMutated(effectiveTenantID(c))
 }

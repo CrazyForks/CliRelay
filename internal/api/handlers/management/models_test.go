@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -114,7 +115,11 @@ func TestModelConfigHandlersNotifyModelConfigMutation(t *testing.T) {
 	initManagementModelsTestDB(t)
 	h := NewHandler(&config.Config{}, "", nil)
 	notifications := 0
-	h.SetModelConfigMutatedHook(func() { notifications++ })
+	notifiedTenants := []string{}
+	h.SetModelConfigMutatedHook(func(tenantID string) {
+		notifications++
+		notifiedTenants = append(notifiedTenants, tenantID)
+	})
 
 	createBody := []byte(`{"id":"notify-model","owned_by":"codex","enabled":true}`)
 	createRec := performModelsRequest(http.MethodPost, "/model-configs", createBody, h.Models().PostModelConfig)
@@ -1278,5 +1283,37 @@ func TestOpenRouterModelSyncHandlersConfigureAndRun(t *testing.T) {
 	getRec := performModelsRequest(http.MethodGet, "/model-openrouter-sync", nil, h.Models().GetOpenRouterModelSync)
 	if getRec.Code != http.StatusOK {
 		t.Fatalf("GetOpenRouterModelSync status = %d body = %s", getRec.Code, getRec.Body.String())
+	}
+}
+
+func TestModelConfigHandlersNotifyNonSystemTenantMutation(t *testing.T) {
+	// The runtime re-registers a tenant's credential models from this hook. It
+	// used to fire for the system tenant only, so a model added by any other
+	// tenant stayed unroutable until the next refresh cycle.
+	initManagementModelsTestDB(t)
+	h := NewHandler(&config.Config{}, "", nil)
+	var notifiedTenants []string
+	h.SetModelConfigMutatedHook(func(tenantID string) {
+		notifiedTenants = append(notifiedTenants, tenantID)
+	})
+
+	const tenantID = "cccccccc-1111-2222-3333-444444444444"
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/model-configs",
+		bytes.NewReader([]byte(`{"id":"tenant-scoped-model","owned_by":"grok-build","enabled":true}`)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set(managementPrincipalKey, identity.Principal{
+		EffectiveTenant: identity.Tenant{ID: tenantID},
+	})
+
+	h.Models().PostModelConfig(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PostModelConfig status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if len(notifiedTenants) != 1 || notifiedTenants[0] != tenantID {
+		t.Fatalf("notified tenants = %v, want [%s]", notifiedTenants, tenantID)
 	}
 }

@@ -2,6 +2,7 @@ package serviceapp
 
 import (
 	"context"
+	"strings"
 
 	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
@@ -39,7 +40,15 @@ func ApplyTenantRuntimeConfigs(base *config.Config, manager *coreauth.Manager) {
 }
 
 func ListOAuthProviderModelConfigRows() []OAuthProviderModelConfigRow {
-	rows := modelconfigsettings.ListAllConfigs()
+	return ListOAuthProviderModelConfigRowsForTenant("")
+}
+
+// ListOAuthProviderModelConfigRowsForTenant reads the model library of the
+// tenant that owns the credential being registered. Registration used to read
+// the system tenant only, so catalog models added by any other tenant never
+// became routable for that tenant's accounts.
+func ListOAuthProviderModelConfigRowsForTenant(tenantID string) []OAuthProviderModelConfigRow {
+	rows := modelconfigsettings.ListAllConfigsForTenant(tenantID)
 	if len(rows) == 0 {
 		return nil
 	}
@@ -54,6 +63,48 @@ func ListOAuthProviderModelConfigRows() []OAuthProviderModelConfigRow {
 		})
 	}
 	return out
+}
+
+// ListModelOwnersForAuthGroupsForTenant returns the model owners a tenant has
+// mapped onto the given auth-group identifiers (provider, channel name, channel
+// identifiers). Operators express "these catalog models belong to this channel"
+// through that mapping, so registration must honour it instead of relying only
+// on the built-in provider→owner aliases.
+func ListModelOwnersForAuthGroupsForTenant(tenantID string, authGroups []string) []string {
+	if len(authGroups) == 0 {
+		return nil
+	}
+	mappings := modelconfigsettings.ListAuthGroupOwnerMappingsForTenant(tenantID)
+	if len(mappings) == 0 {
+		return nil
+	}
+	byGroup := make(map[string]string, len(mappings))
+	for _, row := range mappings {
+		group := normalizeOwnerScopeKey(row.AuthGroup)
+		owner := strings.TrimSpace(row.Owner)
+		if group == "" || owner == "" {
+			continue
+		}
+		byGroup[group] = owner
+	}
+	seen := make(map[string]struct{}, len(authGroups))
+	out := make([]string, 0, len(authGroups))
+	for _, group := range authGroups {
+		owner := byGroup[normalizeOwnerScopeKey(group)]
+		if owner == "" {
+			continue
+		}
+		if _, exists := seen[owner]; exists {
+			continue
+		}
+		seen[owner] = struct{}{}
+		out = append(out, owner)
+	}
+	return out
+}
+
+func normalizeOwnerScopeKey(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
 }
 
 func ConfigureServiceAccess(cfg *config.Config, accessManager *sdkaccess.Manager) {
