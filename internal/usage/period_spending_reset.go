@@ -106,6 +106,9 @@ func periodResetSubjectType(subject periodSubject) (string, error) {
 	}
 }
 
+// lifetimeWindowKey is the constant window key stored for cumulative-spend resets.
+const lifetimeWindowKey = "lifetime"
+
 func periodWindowKey(period quota.Period, windows PeriodWindowKeys) string {
 	switch period {
 	case quota.PeriodFiveHour:
@@ -116,6 +119,11 @@ func periodWindowKey(period quota.Period, windows PeriodWindowKeys) string {
 		return windows.WeekFrom
 	case quota.PeriodMonth:
 		return windows.MonthFrom
+	case quota.PeriodLifetime:
+		// Cumulative spend has no window to roll over, so its baseline stays in
+		// force until the next grant. A constant key makes the generic
+		// "same window?" validity check always hold for this period.
+		return lifetimeWindowKey
 	default:
 		return ""
 	}
@@ -134,6 +142,8 @@ func setPeriodUsageValue(used *quota.PeriodSpendingUsage, period quota.Period, v
 		used.Week = value
 	case quota.PeriodMonth:
 		used.Month = value
+	case quota.PeriodLifetime:
+		used.Lifetime = value
 	}
 }
 

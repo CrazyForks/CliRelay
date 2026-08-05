@@ -3,6 +3,7 @@ package usage
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -265,7 +266,11 @@ func CountTotalByEndUser(endUserID string) (int64, error) {
 	return queryLifetimeCountByEndUserFromRollup(tenantID, endUserID)
 }
 
-// QueryTotalCostByEndUser sums lifetime cost across all keys of the end user.
+// QueryTotalCostByEndUser returns spend counted against the account's current
+// lifetime allowance: cumulative cost minus the baseline recorded by the last
+// allowance grant. Without the baseline the limit would be a permanent ceiling
+// on the account's entire history, so granting a fresh allowance would require
+// the operator to add past spend into the new limit by hand.
 func QueryTotalCostByEndUser(endUserID string) (float64, error) {
 	quota := GetEndUserQuota(endUserID)
 	tenantID := systemTenantID
@@ -280,7 +285,39 @@ func QueryTotalCostByEndUser(endUserID string) (float64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("usage: total cost by end user: %w", err)
 	}
-	return agg.CostTotal, nil
+	baseline, err := lifetimeSpendingBaseline(tenantID, periodSubjectEndUser, endUserID)
+	if err != nil {
+		return 0, fmt.Errorf("usage: total cost by end user: %w", err)
+	}
+	if remaining := agg.CostTotal - baseline; remaining > 0 {
+		return remaining, nil
+	}
+	return 0, nil
+}
+
+// lifetimeSpendingBaseline returns the cumulative-spend baseline stored by the
+// last allowance grant, or 0 when the subject was never granted one.
+func lifetimeSpendingBaseline(tenantID string, subject periodSubject, subjectID string) (float64, error) {
+	subjectType, err := periodResetSubjectType(subject)
+	if err != nil {
+		return 0, err
+	}
+	db := getReadDB()
+	if db == nil {
+		return 0, ErrQuotaUsageUnavailable
+	}
+	var baseline float64
+	err = db.QueryRow(`SELECT cost_baseline FROM period_spending_resets
+		WHERE tenant_id = ? AND subject_type = ? AND subject_id = ? AND period = ?`,
+		normalizeTenantID(tenantID), subjectType, strings.TrimSpace(subjectID), string(quota.PeriodLifetime),
+	).Scan(&baseline)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return baseline, nil
 }
 
 // QueryTodayCostByEndUser returns account-level project-day spend after the latest same-day reset baseline.
