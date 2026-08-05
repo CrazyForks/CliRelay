@@ -43,6 +43,9 @@ type Service struct {
 	// hooks provides lifecycle callbacks.
 	hooks Hooks
 
+	// catalogRefresh coalesces model-library driven credential re-registration.
+	catalogRefresh catalogRefreshState
+
 	// serverOptions contains additional server configuration options.
 	serverOptions []api.ServerOption
 

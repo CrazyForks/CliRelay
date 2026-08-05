@@ -23,7 +23,7 @@ type serverOptionConfig struct {
 	keepAliveOnTimeout         func()
 	postAuthHook               auth.PostAuthHook
 	configMutatedCallback      func(*config.Config)
-	modelConfigMutatedCallback func()
+	modelConfigMutatedCallback func(tenantID string)
 }
 
 // ServerOption customises HTTP server construction.
@@ -97,7 +97,7 @@ func WithConfigMutatedCallback(fn func(*config.Config)) ServerOption {
 	}
 }
 
-func WithModelConfigMutatedCallback(fn func()) ServerOption {
+func WithModelConfigMutatedCallback(fn func(tenantID string)) ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.modelConfigMutatedCallback = fn
 	}

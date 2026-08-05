@@ -43,7 +43,7 @@ type Handler struct {
 	logDir               string
 	postAuthHook         coreauth.PostAuthHook
 	onConfigMutated      func(*config.Config)
-	onModelConfigMutated func()
+	onModelConfigMutated func(tenantID string)
 	startTime            time.Time
 	accessManager        *sdkaccess.Manager
 	trendCacheMu         sync.Mutex
@@ -142,7 +142,7 @@ func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
 
 func (h *Handler) SetConfigMutatedHook(fn func(*config.Config)) { h.onConfigMutated = fn }
 
-func (h *Handler) SetModelConfigMutatedHook(fn func()) { h.onModelConfigMutated = fn }
+func (h *Handler) SetModelConfigMutatedHook(fn func(tenantID string)) { h.onModelConfigMutated = fn }
 
 // SetAccessManager wires the request authentication access manager so management writes
 // (such as API key channel/model restrictions) can be applied immediately at runtime.
