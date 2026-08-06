@@ -252,6 +252,36 @@ func TestProxyPoolHandlersUseSQLiteWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestPutProxyPoolRejectsDuplicateIDs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cleanup := usageTestProxyPoolDB(t)
+	defer cleanup()
+
+	h := NewHandler(&config.Config{}, "", nil)
+	defer h.Close()
+
+	payload := []byte(`{"items":[
+		{"id":"ip","name":"old","url":"socks5://1.1.1.1:1080","enabled":true},
+		{"id":"IP","name":"new","url":"socks5://2.2.2.2:1080","enabled":true}
+	]}`)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPut, "/proxy-pool", bytes.NewReader(payload))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.PutProxyPool(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "duplicate proxy ids") {
+		t.Fatalf("body = %s, want duplicate proxy ids", w.Body.String())
+	}
+	if rows := usage.ListProxyPool(); len(rows) != 0 {
+		t.Fatalf("store should stay empty on rejected put, got %#v", rows)
+	}
+}
+
 func TestPatchProxyPoolEntryUsesSQLiteWhenAvailable(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	cleanup := usageTestProxyPoolDB(t)

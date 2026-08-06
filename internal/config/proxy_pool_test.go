@@ -25,6 +25,39 @@ func TestNormalizeProxyPoolTrimsDeduplicatesAndValidatesEntries(t *testing.T) {
 	}
 }
 
+func TestNormalizeProxyPoolEmptyChineseNameUsesURLHash(t *testing.T) {
+	t.Parallel()
+
+	a := NormalizeProxyPool([]ProxyPoolEntry{
+		{Name: "洛杉矶 ip", URL: "socks5://user:pass@1.2.3.4:1080", Enabled: true},
+	})
+	b := NormalizeProxyPool([]ProxyPoolEntry{
+		{Name: "住宅 ip", URL: "socks5://user:pass@5.6.7.8:1080", Enabled: true},
+	})
+	if len(a) != 1 || len(b) != 1 {
+		t.Fatalf("normalize lengths a=%d b=%d", len(a), len(b))
+	}
+	if a[0].ID == "ip" || b[0].ID == "ip" {
+		t.Fatalf("CJK names must not collapse to id=ip: a=%q b=%q", a[0].ID, b[0].ID)
+	}
+	if a[0].ID == b[0].ID {
+		t.Fatalf("different proxy URLs must get different auto ids: %q", a[0].ID)
+	}
+}
+
+func TestProxyPoolDuplicateIDsReportsCollisions(t *testing.T) {
+	t.Parallel()
+
+	dups := ProxyPoolDuplicateIDs([]ProxyPoolEntry{
+		{ID: "ip", Name: "old", URL: "socks5://1.1.1.1:1080", Enabled: true},
+		{ID: "IP", Name: "new", URL: "socks5://2.2.2.2:1080", Enabled: true},
+		{ID: "ok", Name: "ok", URL: "socks5://3.3.3.3:1080", Enabled: true},
+	})
+	if len(dups) != 1 || dups[0] != "ip" {
+		t.Fatalf("ProxyPoolDuplicateIDs = %#v, want [ip]", dups)
+	}
+}
+
 func TestValidateProxyURLAllowsSupportedSchemesOnly(t *testing.T) {
 	t.Parallel()
 
