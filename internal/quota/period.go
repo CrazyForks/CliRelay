@@ -13,6 +13,11 @@ const (
 	PeriodDay      Period = "day"
 	PeriodWeek     Period = "week"
 	PeriodMonth    Period = "month"
+	// PeriodLifetime is the account's cumulative spend. It is not a rolling
+	// window: it only resets when an operator explicitly grants a new allowance,
+	// which is why it is deliberately absent from OrderedPeriods (that list drives
+	// the four rolling per-period limits) while still being a resettable period.
+	PeriodLifetime Period = "lifetime"
 )
 
 var OrderedPeriods = [...]Period{PeriodFiveHour, PeriodDay, PeriodWeek, PeriodMonth}
@@ -46,7 +51,7 @@ func NormalizePeriods(periods []Period) ([]Period, error) {
 	seen := make(map[Period]struct{}, len(periods))
 	for _, period := range periods {
 		switch period {
-		case PeriodFiveHour, PeriodDay, PeriodWeek, PeriodMonth:
+		case PeriodFiveHour, PeriodDay, PeriodWeek, PeriodMonth, PeriodLifetime:
 		default:
 			return nil, &InvalidPeriodError{Period: period}
 		}
@@ -232,6 +237,8 @@ func (u PeriodSpendingUsage) Value(period Period) float64 {
 		return u.Week
 	case PeriodMonth:
 		return u.Month
+	case PeriodLifetime:
+		return u.Lifetime
 	default:
 		return 0
 	}

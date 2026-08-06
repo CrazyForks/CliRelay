@@ -45,7 +45,7 @@ func WithConfigMutatedCallback(fn func(*sdkconfig.Config)) ServerOption {
 	return internalapisdkbridge.WithConfigMutatedCallback(fn)
 }
 
-func WithModelConfigMutatedCallback(fn func()) ServerOption {
+func WithModelConfigMutatedCallback(fn func(tenantID string)) ServerOption {
 	return internalapisdkbridge.WithModelConfigMutatedCallback(fn)
 }
 

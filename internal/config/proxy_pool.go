@@ -47,18 +47,9 @@ func NormalizeProxyPool(entries []ProxyPoolEntry) []ProxyPoolEntry {
 	seen := make(map[string]struct{}, len(entries))
 	out := make([]ProxyPoolEntry, 0, len(entries))
 	for _, entry := range entries {
-		entry.ID = normalizeProxyID(entry.ID)
-		entry.Name = strings.TrimSpace(entry.Name)
-		entry.URL = strings.TrimSpace(entry.URL)
-		entry.Description = strings.TrimSpace(entry.Description)
-		if entry.URL == "" || ValidateProxyURL(entry.URL) != nil {
+		entry = normalizeProxyPoolEntry(entry)
+		if entry.URL == "" {
 			continue
-		}
-		if entry.ID == "" {
-			entry.ID = proxyIDFromURL(entry.URL)
-		}
-		if entry.Name == "" {
-			entry.Name = entry.ID
 		}
 		if _, ok := seen[entry.ID]; ok {
 			continue
@@ -70,6 +61,52 @@ func NormalizeProxyPool(entries []ProxyPoolEntry) []ProxyPoolEntry {
 		return nil
 	}
 	return out
+}
+
+// ProxyPoolDuplicateIDs returns normalized ids that appear more than once among valid entries.
+// Used by the management API so silent first-wins drops cannot hide a failed create.
+func ProxyPoolDuplicateIDs(entries []ProxyPoolEntry) []string {
+	if len(entries) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(entries))
+	var dups []string
+	dupSeen := make(map[string]struct{})
+	for _, entry := range entries {
+		entry = normalizeProxyPoolEntry(entry)
+		if entry.URL == "" {
+			continue
+		}
+		if _, ok := seen[entry.ID]; ok {
+			if _, reported := dupSeen[entry.ID]; !reported {
+				dups = append(dups, entry.ID)
+				dupSeen[entry.ID] = struct{}{}
+			}
+			continue
+		}
+		seen[entry.ID] = struct{}{}
+	}
+	return dups
+}
+
+func normalizeProxyPoolEntry(entry ProxyPoolEntry) ProxyPoolEntry {
+	entry.ID = normalizeProxyID(entry.ID)
+	entry.Name = strings.TrimSpace(entry.Name)
+	entry.URL = strings.TrimSpace(entry.URL)
+	entry.Description = strings.TrimSpace(entry.Description)
+	if entry.URL == "" || ValidateProxyURL(entry.URL) != nil {
+		entry.URL = ""
+		return entry
+	}
+	if entry.ID == "" {
+		// Prefer a stable id from the full proxy URL (host+auth+port) so
+		// Chinese-only names do not all collapse to the same slug.
+		entry.ID = proxyIDFromURL(entry.URL)
+	}
+	if entry.Name == "" {
+		entry.Name = entry.ID
+	}
+	return entry
 }
 
 // SanitizeProxyPool normalizes the configured reusable proxy list in-place.

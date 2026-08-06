@@ -211,3 +211,85 @@ func TestPeriodSpendingResetExpiresWhenWindowChanges(t *testing.T) {
 		t.Fatalf("next-week used = %+v, want week=4 (old baseline expired)", got[keyID])
 	}
 }
+
+// TestLifetimeAllowanceResetsToFullOnGrant covers the operator-facing promise:
+// granting a new allowance makes the account spendable again for the full
+// amount, no matter how much it spent historically. Before cumulative spend
+// became resettable, a $1000 limit on an account that had already spent $594
+// only bought it $406 of runway, forcing operators to hand-compute
+// "past spend + intended allowance" on every top-up.
+func TestLifetimeAllowanceResetsToFullOnGrant(t *testing.T) {
+	initTestUsageDB(t, config.RequestLogStorageConfig{})
+	db := getDB()
+	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	const endUserID = "lifetime-grant-user"
+
+	if _, err := db.Exec(`INSERT INTO usage_rollup_buckets
+		(tenant_id,bucket_kind,bucket_start,end_user_id,cost_total,updated_at)
+		VALUES (?,?,?,?,?,?)`, systemTenantID, rollupBucketLifetime, rollupLifetimeStart, endUserID, 594.92, now); err != nil {
+		t.Fatalf("seed lifetime spend: %v", err)
+	}
+
+	spent, err := QueryTotalCostByEndUser(endUserID)
+	if err != nil {
+		t.Fatalf("QueryTotalCostByEndUser: %v", err)
+	}
+	if spent != 594.92 {
+		t.Fatalf("spend before grant = %v, want 594.92", spent)
+	}
+
+	if _, err := resetPeriodSpendingForSubject(systemTenantID, periodSubjectEndUser, endUserID,
+		[]quota.Period{quota.PeriodLifetime}, PeriodSpendingResetActor{Username: "admin"}, now); err != nil {
+		t.Fatalf("grant allowance: %v", err)
+	}
+
+	spent, err = QueryTotalCostByEndUser(endUserID)
+	if err != nil {
+		t.Fatalf("QueryTotalCostByEndUser after grant: %v", err)
+	}
+	if spent != 0 {
+		t.Fatalf("spend after grant = %v, want 0 so the full allowance is available", spent)
+	}
+
+	// Spend that lands after the grant counts against the new allowance.
+	if _, err := db.Exec(`UPDATE usage_rollup_buckets SET cost_total = ? WHERE end_user_id = ? AND bucket_kind = ?`,
+		630.92, endUserID, rollupBucketLifetime); err != nil {
+		t.Fatalf("add post-grant spend: %v", err)
+	}
+	spent, err = QueryTotalCostByEndUser(endUserID)
+	if err != nil {
+		t.Fatalf("QueryTotalCostByEndUser after new spend: %v", err)
+	}
+	if spent != 36 {
+		t.Fatalf("post-grant spend = %v, want 36", spent)
+	}
+}
+
+func TestLifetimeAllowanceBaselineSurvivesWindowRollover(t *testing.T) {
+	// Rolling periods lose their baseline when the window changes. A lifetime
+	// allowance has no window, so a grant must still hold days later — otherwise
+	// the account would silently revert to counting its whole history.
+	initTestUsageDB(t, config.RequestLogStorageConfig{})
+	db := getDB()
+	granted := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	const endUserID = "lifetime-rollover-user"
+
+	if _, err := db.Exec(`INSERT INTO usage_rollup_buckets
+		(tenant_id,bucket_kind,bucket_start,end_user_id,cost_total,updated_at)
+		VALUES (?,?,?,?,?,?)`, systemTenantID, rollupBucketLifetime, rollupLifetimeStart, endUserID, 500, granted); err != nil {
+		t.Fatalf("seed spend: %v", err)
+	}
+	if _, err := resetPeriodSpendingForSubject(systemTenantID, periodSubjectEndUser, endUserID,
+		[]quota.Period{quota.PeriodLifetime}, PeriodSpendingResetActor{Username: "admin"}, granted); err != nil {
+		t.Fatalf("grant allowance: %v", err)
+	}
+
+	muchLater := granted.AddDate(0, 2, 3)
+	usage, err := QueryPeriodSpendingByEndUsersForTenantAt(systemTenantID, []string{endUserID}, muchLater)
+	if err != nil {
+		t.Fatalf("QueryPeriodSpending: %v", err)
+	}
+	if got := usage[endUserID].Lifetime; got != 0 {
+		t.Fatalf("lifetime used two months after the grant = %v, want 0", got)
+	}
+}

@@ -52,6 +52,22 @@ func SetGlobalModelRegistryHook(hook ModelRegistryHook) {
 	reg.SetHook(hook)
 }
 
+// oauthCatalogScope returns the catalog rows and mapped model owners that make a
+// tenant's model-library entries routable for this credential. Both are scoped to
+// the credential's own tenant: registration must not leak (or depend on) another
+// tenant's library.
+func oauthCatalogScope(a *coreauth.Auth) ([]oauthProviderModelConfigRow, []string) {
+	if a == nil {
+		return nil, nil
+	}
+	rows := listOAuthProviderModelConfigRowsForTenant(a.TenantID)
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	groups := append([]string{a.Provider, a.ChannelName()}, a.ChannelIdentifiers()...)
+	return rows, serviceapp.ListModelOwnersForAuthGroupsForTenant(a.TenantID, groups)
+}
+
 // registerModelsForAuth (re)binds provider models in the global registry using the core auth ID as client identifier.
 func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 	if a == nil || a.ID == "" {
@@ -142,7 +158,8 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 				excluded = entry.ExcludedModels
 			}
 		}
-		models = appendOAuthProviderModelConfigs(models, provider, authKind, listOAuthProviderModelConfigRows())
+		catalogRows, mappedOwners := oauthCatalogScope(a)
+		models = appendOAuthProviderModelConfigs(models, provider, authKind, catalogRows, mappedOwners)
 		models = applyExcludedModels(models, excluded)
 	case "bedrock":
 		models = sdkmodelcatalog.StaticModelDefinitionsByChannel("bedrock")
@@ -195,13 +212,21 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 				excluded = entry.ExcludedModels
 			}
 		}
-		models = appendOAuthProviderModelConfigs(models, provider, authKind, listOAuthProviderModelConfigRows())
+		catalogRows, mappedOwners := oauthCatalogScope(a)
+		models = appendOAuthProviderModelConfigs(models, provider, authKind, catalogRows, mappedOwners)
 		models = applyExcludedModels(models, excluded)
 	case "qwen":
 		models = sdkmodelcatalog.StaticModelDefinitionsByChannel("qwen")
 		models = applyExcludedModels(models, excluded)
 	case "xai":
+		// Live xAI discovery returns only the models the account is entitled to
+		// today, so a newly released model id is unroutable until we ship a
+		// catalog update. Honour the tenant's model library the same way
+		// claude/codex do, letting operators add an id and use it immediately.
 		models = s.fetchXAIRegistryModels(ctx, a, excluded)
+		catalogRows, mappedOwners := oauthCatalogScope(a)
+		models = appendOAuthProviderModelConfigs(models, provider, authKind, catalogRows, mappedOwners)
+		models = applyExcludedModels(models, excluded)
 	case "iflow":
 		models = sdkmodelcatalog.StaticModelDefinitionsByChannel("iflow")
 		models = applyExcludedModels(models, excluded)
