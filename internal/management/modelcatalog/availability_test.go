@@ -8,6 +8,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	managementauthfiles "github.com/router-for-me/CLIProxyAPI/v6/internal/management/authfiles"
+	modelconfigsettings "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -847,4 +848,144 @@ func containsModelID(ids []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func modelsResultIDSet(t *testing.T, result map[string]any) map[string]struct{} {
+	t.Helper()
+	data, ok := result["data"].([]map[string]any)
+	if !ok {
+		t.Fatalf("models data = %#v, want []map[string]any", result["data"])
+	}
+	out := make(map[string]struct{}, len(data))
+	for _, entry := range data {
+		if id, _ := entry["id"].(string); id != "" {
+			out[id] = struct{}{}
+		}
+	}
+	return out
+}
+
+// seedOwnerMappedCatalogRows registers two enabled catalog rows for the same
+// owner: one already on a group's allow-list and one that is not.
+func seedOwnerMappedCatalogRows(t *testing.T, tenantID, listed, unlisted string) {
+	t.Helper()
+	for _, modelID := range []string{listed, unlisted} {
+		if err := usage.UpsertModelConfigForTenant(tenantID, usage.ModelConfigRow{
+			ModelID:     modelID,
+			OwnedBy:     "grok-build",
+			Enabled:     true,
+			PricingMode: "token",
+			Source:      "seed",
+		}); err != nil {
+			t.Fatalf("UpsertModelConfigForTenant(%s) error = %v", modelID, err)
+		}
+	}
+	if _, err := modelconfigsettings.UpsertAuthGroupOwnerMappingForTenant(tenantID, "xai", "grok-build"); err != nil {
+		t.Fatalf("UpsertAuthGroupOwnerMappingForTenant() error = %v", err)
+	}
+}
+
+func TestModelsDefaultGroupEditorListsOwnerMappedConfigRows(t *testing.T) {
+	// Regression: a DB-only catalog model could never be added to the system
+	// default group. `default` carries no match block, so owner scope resolved no
+	// accounts for it, and the group's own AllowedModels additionally filtered the
+	// catalog rows the editor picks from — the model had to already be in the
+	// group to become selectable.
+	initModelCatalogTestDB(t)
+
+	const (
+		tenantID = "11111111-2222-3333-4444-555555555555"
+		authID   = "default-pool-xai-auth"
+		listed   = "editor-scope-listed-model"
+		unlisted = "editor-scope-unlisted-model"
+	)
+	seedOwnerMappedCatalogRows(t, tenantID, listed, unlisted)
+
+	cfg := &config.Config{
+		Routing: config.RoutingConfig{
+			IncludeDefaultGroup: true,
+			ChannelGroups: []config.RoutingChannelGroup{
+				{Name: "default", AllowedModels: []string{listed}},
+			},
+		},
+	}
+	// Non-system tenants keep routing in the DB, which is what the service reads.
+	if err := usage.UpsertRoutingConfigForTenant(tenantID, cfg.Routing); err != nil {
+		t.Fatalf("UpsertRoutingConfigForTenant() error = %v", err)
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfigForTenant(tenantID, cfg)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID: authID, TenantID: tenantID, Provider: "xai", Status: coreauth.StatusActive,
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	svc := NewForTenant(tenantID, cfg, manager)
+
+	editor := modelsResultIDSet(t, svc.Models("", "default", AvailabilityFilterOptions{IgnoreGroupAllowedModels: true}))
+	if _, ok := editor[unlisted]; !ok {
+		t.Fatalf("editor models = %v, want %q selectable", editor, unlisted)
+	}
+	if _, ok := editor[listed]; !ok {
+		t.Fatalf("editor models = %v, want %q", editor, listed)
+	}
+
+	// Plaza/catalog must still enforce the saved allow-list.
+	enforced := modelsResultIDSet(t, svc.Models("", "default"))
+	if _, ok := enforced[unlisted]; ok {
+		t.Fatalf("enforced models = %v, must not include %q", enforced, unlisted)
+	}
+	if _, ok := enforced[listed]; !ok {
+		t.Fatalf("enforced models = %v, want %q", enforced, listed)
+	}
+}
+
+func TestModelsNamedGroupEditorIgnoresAllowedModelsForConfigRows(t *testing.T) {
+	// IgnoreGroupAllowedModels must reach the catalog-row branch for named groups
+	// too: the editor picks from this list to edit AllowedModels, so AllowedModels
+	// cannot be what defines it.
+	initModelCatalogTestDB(t)
+
+	const (
+		tenantID  = "22222222-3333-4444-5555-666666666666"
+		authID    = "named-group-xai-auth"
+		groupName = "grok build"
+		listed    = "named-scope-listed-model"
+		unlisted  = "named-scope-unlisted-model"
+	)
+	seedOwnerMappedCatalogRows(t, tenantID, listed, unlisted)
+
+	cfg := &config.Config{
+		Routing: config.RoutingConfig{
+			IncludeDefaultGroup: true,
+			ChannelGroups: []config.RoutingChannelGroup{
+				{
+					Name:          groupName,
+					Match:         config.ChannelGroupMatch{Channels: []string{"xai"}},
+					AllowedModels: []string{listed},
+				},
+			},
+		},
+	}
+	if err := usage.UpsertRoutingConfigForTenant(tenantID, cfg.Routing); err != nil {
+		t.Fatalf("UpsertRoutingConfigForTenant() error = %v", err)
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfigForTenant(tenantID, cfg)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID: authID, TenantID: tenantID, Provider: "xai", Status: coreauth.StatusActive,
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	svc := NewForTenant(tenantID, cfg, manager)
+
+	editor := modelsResultIDSet(t, svc.Models("", groupName, AvailabilityFilterOptions{IgnoreGroupAllowedModels: true}))
+	if _, ok := editor[unlisted]; !ok {
+		t.Fatalf("editor models = %v, want %q selectable", editor, unlisted)
+	}
+
+	enforced := modelsResultIDSet(t, svc.Models("", groupName))
+	if _, ok := enforced[unlisted]; ok {
+		t.Fatalf("enforced models = %v, must not include %q", enforced, unlisted)
+	}
 }

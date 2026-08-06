@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	serviceapp "github.com/router-for-me/CLIProxyAPI/v6/internal/app/service"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
 	proxypoolsettings "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/proxypool"
@@ -69,6 +70,10 @@ func (h *Handler) PutProxyPool(c *gin.Context) {
 		body.Items = entries
 	}
 
+	if dups := config.ProxyPoolDuplicateIDs(body.Items); len(dups) > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("duplicate proxy ids: %s", strings.Join(dups, ", "))})
+		return
+	}
 	normalized := config.NormalizeProxyPool(body.Items)
 	if len(body.Items) > 0 && len(normalized) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no valid proxy entries"})
@@ -192,8 +197,11 @@ func (h *Handler) applyTenantProxyPoolConfig(tenantID string) {
 	if h == nil || h.authManager == nil || h.cfg == nil {
 		return
 	}
+	// Executors capture a tenant cfg snapshot (including ProxyPool) at bind time.
+	// SetConfig alone is not enough: rebind so auth ProxyID resolves to the new URL.
 	tenantCfg := usage.BuildTenantRuntimeConfig(h.cfg, tenantID)
 	h.authManager.SetConfigForTenant(tenantID, &tenantCfg)
+	serviceapp.RebindTenantExecutors(h.cfg, h.authManager, tenantID, nil)
 }
 
 // GetPublicPing returns a lightweight public 204 endpoint for proxy latency probes.

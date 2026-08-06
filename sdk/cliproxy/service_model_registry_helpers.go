@@ -245,11 +245,16 @@ type oauthProviderModelConfigRow struct {
 	Enabled     bool
 }
 
+// appendOAuthProviderModelConfigs makes catalog rows routable for an OAuth
+// credential. mappedOwners carries the tenant's own auth-group→owner mappings so
+// operators can attach a model to a channel without the owner name having to
+// match a built-in provider alias.
 func appendOAuthProviderModelConfigs(
 	models []*ModelInfo,
 	provider string,
 	authKind string,
 	rows []oauthProviderModelConfigRow,
+	mappedOwners []string,
 ) []*ModelInfo {
 	if !strings.EqualFold(strings.TrimSpace(authKind), "oauth") {
 		return models
@@ -259,6 +264,14 @@ func appendOAuthProviderModelConfigs(
 		return models
 	}
 	owners := modelConfigOwnerAliases(provider)
+	for _, owner := range mappedOwners {
+		if key := normalizeModelConfigOwner(owner); key != "" {
+			if owners == nil {
+				owners = make(map[string]struct{}, len(mappedOwners))
+			}
+			owners[key] = struct{}{}
+		}
+	}
 	if len(owners) == 0 {
 		return models
 	}

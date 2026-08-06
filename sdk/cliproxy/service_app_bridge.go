@@ -8,8 +8,8 @@ import (
 	serviceapp "github.com/router-for-me/CLIProxyAPI/v6/sdkbridge/service"
 )
 
-func listOAuthProviderModelConfigRows() []oauthProviderModelConfigRow {
-	rows := serviceapp.ListOAuthProviderModelConfigRows()
+func listOAuthProviderModelConfigRowsForTenant(tenantID string) []oauthProviderModelConfigRow {
+	rows := serviceapp.ListOAuthProviderModelConfigRowsForTenant(tenantID)
 	if len(rows) == 0 {
 		return nil
 	}

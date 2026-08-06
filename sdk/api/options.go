@@ -103,7 +103,7 @@ func WithConfigMutatedCallback(fn func(*config.Config)) ServerOption {
 }
 
 // WithModelConfigMutatedCallback registers a callback invoked after management-side model catalog mutations.
-func WithModelConfigMutatedCallback(fn func()) ServerOption {
+func WithModelConfigMutatedCallback(fn func(tenantID string)) ServerOption {
 	return apisdkbridge.WithModelConfigMutatedCallback(fn)
 }
 
