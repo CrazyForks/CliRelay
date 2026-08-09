@@ -11,13 +11,37 @@ import (
 
 func TestRuntimeMigrationsCoverCoreTables(t *testing.T) {
 	migrations := RuntimeMigrations()
-	if len(migrations) != 25 {
-		t.Fatalf("RuntimeMigrations len = %d, want 25", len(migrations))
+	if len(migrations) != 27 {
+		t.Fatalf("RuntimeMigrations len = %d, want 27", len(migrations))
 	}
-	// Latest: windowed lockout state + per-token session rows for grace-window
-	// refresh rotation.
+	// Latest: retire the audit rows the pre-fix policy wrote for read traffic.
+	if migrations[26].Version != "202608080001_audit_log_read_noise_cleanup" {
+		t.Fatalf("latest migration version = %q", migrations[26].Version)
+	}
+	for _, fragment := range []string{
+		"DELETE FROM audit_logs",
+		"result <> 'denied'",
+		"idx_audit_logs_created_at",
+	} {
+		if !strings.Contains(migrations[26].SQL, fragment) {
+			t.Fatalf("audit log cleanup migration missing %q", fragment)
+		}
+	}
+	// Quota observation time, so a failing probe stops making stale quota look
+	// freshly checked.
+	if migrations[25].Version != "202608070001_ai_account_quota_observed_at" {
+		t.Fatalf("quota observed_at migration version = %q", migrations[25].Version)
+	}
+	for _, fragment := range []string{
+		"ADD COLUMN IF NOT EXISTS quota_observed_at TIMESTAMPTZ",
+		"FROM ai_account_subject_quota_points p",
+	} {
+		if !strings.Contains(migrations[25].SQL, fragment) {
+			t.Fatalf("quota observed_at migration missing %q", fragment)
+		}
+	}
 	if migrations[24].Version != "202608060001_auth_session_hardening" {
-		t.Fatalf("latest migration version = %q", migrations[24].Version)
+		t.Fatalf("auth session migration version = %q", migrations[24].Version)
 	}
 	authSessionSQL := migrations[24].SQL
 	for _, fragment := range []string{
