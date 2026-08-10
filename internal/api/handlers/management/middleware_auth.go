@@ -104,8 +104,9 @@ func (h *Handler) managementAuthMiddleware(c *gin.Context) {
 		// or compares a stored secret, and an already-banned client must not be able
 		// to make the server pay for that.
 		mgmtKey = h.clientThrottleKey(c, scopeManagementKey)
-		if d := h.loginThrottle.evaluate(mgmtKey, now); d.Outcome != outcomeAllow {
+		if d := h.throttleEvaluate(c, mgmtKey, now); d.Outcome != outcomeAllow {
 			h.logAuthFailure(c, mgmtKey, d)
+			h.noteThrottledAttempt(c, mgmtKey, "")
 			abortThrottled(c, d)
 			return
 		}
@@ -126,7 +127,9 @@ func (h *Handler) managementAuthMiddleware(c *gin.Context) {
 	if kind == credentialMissing {
 		if !localClient {
 			key := h.clientThrottleKey(c, scopeUnauthenticated)
-			if d := h.loginThrottle.recordFailure(key, now); d.Outcome != outcomeAllow {
+			d := h.throttleCharge(c, key, now)
+			h.noteNonCredentialFailure(c, key, d, "management request carried no credential")
+			if d.Outcome != outcomeAllow {
 				h.logAuthFailure(c, key, d)
 				abortThrottled(c, d)
 				return
@@ -156,8 +159,9 @@ func (h *Handler) managementAuthMiddleware(c *gin.Context) {
 
 	if secretHash == "" || bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) != nil {
 		if !localClient {
-			d := h.loginThrottle.recordFailure(mgmtKey, now)
+			d := h.throttleCharge(c, mgmtKey, now)
 			h.logAuthFailure(c, mgmtKey, d)
+			h.noteCredentialFailure(c, mgmtKey, d, "", "invalid management key")
 			if d.Outcome != outcomeAllow {
 				abortThrottled(c, d)
 				return

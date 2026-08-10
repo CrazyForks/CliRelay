@@ -11,12 +11,26 @@ import (
 
 func TestRuntimeMigrationsCoverCoreTables(t *testing.T) {
 	migrations := RuntimeMigrations()
-	if len(migrations) != 27 {
-		t.Fatalf("RuntimeMigrations len = %d, want 27", len(migrations))
+	if len(migrations) != 28 {
+		t.Fatalf("RuntimeMigrations len = %d, want 28", len(migrations))
 	}
-	// Latest: retire the audit rows the pre-fix policy wrote for read traffic.
+	// Latest: the IP allow/deny list, authentication attempt log, and source
+	// address on audit rows. Appended from laterRuntimeMigrations() because
+	// migrations.go sits at its structure-gate size ceiling.
+	if migrations[27].Version != "202608100001_ip_access_control" {
+		t.Fatalf("latest migration version = %q", migrations[27].Version)
+	}
+	for _, fragment := range []string{
+		"CREATE TABLE IF NOT EXISTS ip_access_rules",
+		"CREATE TABLE IF NOT EXISTS auth_attempt_events",
+		"ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS ip_address",
+	} {
+		if !strings.Contains(migrations[27].SQL, fragment) {
+			t.Fatalf("ip access migration missing %q", fragment)
+		}
+	}
 	if migrations[26].Version != "202608080001_audit_log_read_noise_cleanup" {
-		t.Fatalf("latest migration version = %q", migrations[26].Version)
+		t.Fatalf("audit cleanup migration version = %q", migrations[26].Version)
 	}
 	for _, fragment := range []string{
 		"DELETE FROM audit_logs",

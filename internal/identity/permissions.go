@@ -75,6 +75,10 @@ var PermissionCatalog = []PermissionSeed{
 	{Code: "proxies.test", Name: "Test proxies", Scope: "tenant", Resource: "proxies", Action: "test", Sensitive: true},
 	{Code: "tenant_settings.read", Name: "Read tenant settings", Scope: "tenant", Resource: "tenant_settings", Action: "read"},
 	{Code: "tenant_settings.write", Name: "Write tenant settings", Scope: "tenant", Resource: "tenant_settings", Action: "write", Sensitive: true},
+	// Platform scope: the allow/deny list gates the process itself, before any
+	// tenant is identified, so it cannot be delegated per tenant.
+	{Code: "platform.ip_access.read", Name: "Read IP access control", Scope: "platform", Resource: "ip_access", Action: "read", Sensitive: true},
+	{Code: "platform.ip_access.write", Name: "Write IP access control", Scope: "platform", Resource: "ip_access", Action: "write", Sensitive: true},
 }
 
 func menuCodeForPermission(permission PermissionSeed) string {
@@ -87,6 +91,8 @@ func menuCodeForPermission(permission PermissionSeed) string {
 		return "governance.roles"
 	case "audit":
 		return "governance.audit"
+	case "ip_access":
+		return "governance.ip-access"
 	case "menus":
 		return MenuManagementCode
 	case "system":

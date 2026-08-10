@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/ipaccess"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	log "github.com/sirupsen/logrus"
 )
@@ -27,6 +28,7 @@ type AuditLog struct {
 	ResourceID       string  `json:"resource_id"`
 	Result           string  `json:"result"`
 	RequestID        string  `json:"request_id"`
+	IPAddress        string  `json:"ip_address"`
 	// Changes is only populated for detail views.
 	Changes   map[string]any `json:"changes,omitempty"`
 	CreatedAt time.Time      `json:"created_at"`
@@ -87,10 +89,17 @@ func (s *Service) RecordAudit(ctx context.Context, event AuditEvent) {
 	if err != nil {
 		changesJSON = []byte("{}")
 	}
+	// Source address comes from the request context rather than a parameter, so
+	// every audit row gets provenance without each call site remembering to pass
+	// it. An explicit event.IPAddress still wins for callers outside a request.
+	ipAddress := event.IPAddress
+	if ipAddress == "" {
+		ipAddress = ipaccess.AuditAddress(ctx)
+	}
 	ctx = context.WithoutCancel(ctx)
 	auditCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if _, err := s.db.ExecContext(auditCtx, `INSERT INTO audit_logs (tenant_id,actor_kind,actor_user_id,actor_session_id,action,resource_type,resource_id,result,request_id,changes) VALUES (?,?,?,?,?,?,?,?,?,?::jsonb)`, tenantID, event.ActorKind, actorUserID, actorSessionID, event.Action, event.ResourceType, event.ResourceID, event.Result, event.RequestID, string(changesJSON)); err != nil {
+	if _, err := s.db.ExecContext(auditCtx, `INSERT INTO audit_logs (tenant_id,actor_kind,actor_user_id,actor_session_id,action,resource_type,resource_id,result,request_id,changes,ip_address) VALUES (?,?,?,?,?,?,?,?,?,?::jsonb,?)`, tenantID, event.ActorKind, actorUserID, actorSessionID, event.Action, event.ResourceType, event.ResourceID, event.Result, event.RequestID, string(changesJSON), ipAddress); err != nil {
 		log.WithError(err).WithFields(log.Fields{"action": event.Action, "resource_type": event.ResourceType, "resource_id": event.ResourceID}).Error("identity: record audit event")
 	}
 }
@@ -113,11 +122,12 @@ func scanAuditLog(scanner interface {
 }, includeChanges bool) (AuditLog, error) {
 	var item AuditLog
 	var tenant, actor, tenantName, tenantSlug, actorUsername, actorDisplay sql.NullString
+	var ipAddress sql.NullString
 	var changesRaw []byte
 	dest := []any{
 		&item.ID, &tenant, &tenantName, &tenantSlug,
 		&item.ActorKind, &actor, &actorUsername, &actorDisplay,
-		&item.Action, &item.ResourceType, &item.ResourceID, &item.Result, &item.RequestID, &item.CreatedAt,
+		&item.Action, &item.ResourceType, &item.ResourceID, &item.Result, &item.RequestID, &ipAddress, &item.CreatedAt,
 	}
 	if includeChanges {
 		dest = append(dest, &changesRaw)
@@ -135,6 +145,7 @@ func scanAuditLog(scanner interface {
 	item.TenantSlug = tenantSlug.String
 	item.ActorUsername = actorUsername.String
 	item.ActorDisplayName = actorDisplay.String
+	item.IPAddress = ipAddress.String
 	if includeChanges {
 		item.Changes = map[string]any{}
 		if len(changesRaw) > 0 {
@@ -147,7 +158,7 @@ func scanAuditLog(scanner interface {
 const auditLogSelectBase = `
 SELECT a.id, a.tenant_id, t.name, t.slug,
        a.actor_kind, a.actor_user_id, u.username, u.display_name,
-       a.action, a.resource_type, a.resource_id, a.result, a.request_id, a.created_at`
+       a.action, a.resource_type, a.resource_id, a.result, a.request_id, a.ip_address, a.created_at`
 
 // ListAuditLogs returns a page of audit logs. Platform readers may see all tenants.
 func (s *Service) ListAuditLogs(ctx context.Context, tenantID string, platform bool, page, size int) (AuditLogListResult, error) {

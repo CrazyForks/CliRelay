@@ -126,8 +126,10 @@ func (h *Handler) SetConfig(cfg *config.Config) {
 	h.mu.Unlock()
 	// Throttle thresholds are part of the reloadable config, so a limit raised in
 	// config.yaml has to take effect without a restart — otherwise the documented
-	// escape hatch for an over-tight limit is "restart the server".
-	h.loginThrottle.setPolicies(throttlePoliciesFromConfig(cfg))
+	// escape hatch for an over-tight limit is "restart the server". Panel-set
+	// overrides are re-applied on top, or a config reload would silently revert
+	// them while the panel kept displaying them as active.
+	h.loginThrottle.setPolicies(overlayThrottleOverride(throttlePoliciesFromConfig(cfg), storedThrottleOverride()))
 }
 
 // SetAuthManager updates the auth manager reference used by management endpoints.
