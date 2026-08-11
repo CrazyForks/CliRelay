@@ -77,6 +77,7 @@ type Registry struct {
 	stopOnce sync.Once
 
 	autoBan *autoBanEngine
+	alerter *alerter
 }
 
 // NewRegistry builds a registry over the given store. The snapshot starts empty,
@@ -88,6 +89,7 @@ func NewRegistry(store *Store) *Registry {
 	r.policy.Store(&policy)
 	r.matcher.Store(NewMatcher(nil, false, time.Now()))
 	r.autoBan = newAutoBanEngine(r)
+	r.alerter = newAlerter()
 	return r
 }
 

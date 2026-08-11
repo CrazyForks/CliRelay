@@ -13,11 +13,6 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// authEventRetention is how long authentication attempts are kept. Long enough
-// to investigate an incident reported a few weeks late, short enough that a
-// sustained attack cannot fill the disk.
-const authEventRetention = 30 * 24 * time.Hour
-
 // authEventPurgeInterval is how often the retention sweep runs.
 const authEventPurgeInterval = 6 * time.Hour
 
@@ -59,13 +54,15 @@ func initializeIPAccessControl(ctx context.Context, cfg *config.Config) {
 	// limits to management handlers, and the retention sweep needs a long-lived
 	// process to run in.
 	recorder := authevents.EnsureDefault(ctx, db)
-	startAuthEventRetention(ctx, recorder)
 
 	registry := ipaccess.EnsureDefault(ctx, db, trustedProxies)
 	registry.SetPolicyPersister(ctx, ipAccessPolicyStore{})
+	// Retention is read from the policy on each sweep rather than captured here,
+	// so changing it in the panel takes effect without a restart.
+	startAuthEventRetention(ctx, recorder, registry)
 }
 
-func startAuthEventRetention(ctx context.Context, recorder *authevents.Recorder) {
+func startAuthEventRetention(ctx context.Context, recorder *authevents.Recorder, registry *ipaccess.Registry) {
 	if recorder == nil || !recorder.Available() {
 		return
 	}
@@ -77,13 +74,17 @@ func startAuthEventRetention(ctx context.Context, recorder *authevents.Recorder)
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				removed, err := recorder.Purge(ctx, time.Now().Add(-authEventRetention))
+				retention := time.Duration(registry.Policy().AttemptRetentionDays) * 24 * time.Hour
+				if retention <= 0 {
+					retention = ipaccess.DefaultAttemptRetentionDays * 24 * time.Hour
+				}
+				removed, err := recorder.Purge(ctx, time.Now().Add(-retention))
 				if err != nil {
 					log.WithError(err).Debug("auth-events: retention sweep failed")
 					continue
 				}
 				if removed > 0 {
-					log.Debugf("auth-events: purged %d attempts older than %s", removed, authEventRetention)
+					log.Debugf("auth-events: purged %d attempts older than %s", removed, retention)
 				}
 			}
 		}

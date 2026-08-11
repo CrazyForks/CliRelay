@@ -33,6 +33,7 @@ func registerIdentityAuthRoutes(engine *gin.Engine, h *managementhandlers.Handle
 	portal.POST("/auth/logout", h.PostPortalLogout)
 	portal.GET("/auth/me", h.GetPortalMe)
 	portal.PUT("/auth/password", h.PutPortalPassword)
+	portal.GET("/auth/attempts", h.GetPortalAuthAttempts)
 	portal.GET("/api-keys", h.GetPortalAPIKeys)
 	portal.POST("/api-keys", h.PostPortalAPIKey)
 	portal.GET("/api-keys/:id/secret", h.GetPortalAPIKeySecret)
@@ -94,6 +95,8 @@ func registerManagementIdentityRoutes(group *gin.RouterGroup, h *managementhandl
 	group.GET("/ip-access/status", h.GetIPAccessStatus)
 	group.GET("/ip-access/policy", h.GetIPAccessPolicy)
 	group.PUT("/ip-access/policy", h.PutIPAccessPolicy)
+	group.PATCH("/ip-access/rules", h.PatchIPAccessRulesBulk)
 	group.GET("/auth-attempts", h.GetAuthAttempts)
 	group.GET("/auth-attempts/summary", h.GetAuthAttemptSummary)
+	group.GET("/auth-attempts/export", h.GetAuthAttemptsExport)
 }

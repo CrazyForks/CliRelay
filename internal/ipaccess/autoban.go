@@ -121,6 +121,7 @@ func (e *autoBanEngine) RecordFailure(ctx context.Context, addr ClientAddress, r
 		e.markBanned(cidr, outcome.Until, now)
 		log.Warnf("ip-access: auto-ban would trigger for %s (%d failures in %s, %s) — observe mode, no rule written",
 			cidr, failures, policy.Window(), reason)
+		e.registry.notifyBan(outcome, reason)
 		return outcome
 	}
 
@@ -142,6 +143,7 @@ func (e *autoBanEngine) RecordFailure(ctx context.Context, addr ClientAddress, r
 	if err = e.registry.Refresh(ctx); err != nil {
 		log.WithError(err).Debug("ip-access: refresh after auto-ban failed")
 	}
+	e.registry.notifyBan(outcome, reason)
 	return outcome
 }
 
