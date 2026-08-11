@@ -46,21 +46,23 @@ func (ipAccessPolicyStore) Save(policy ipaccess.ProtectionPolicy) error {
 // attempt log into the process.
 func initializeIPAccessControl(ctx context.Context, cfg *config.Config) {
 	db := usage.RuntimeDB()
-
-	recorder := authevents.NewRecorder(db)
-	recorder.Start(ctx)
-	authevents.SetDefault(recorder)
-	startAuthEventRetention(ctx, recorder)
-
+	if db == nil {
+		return
+	}
 	var trustedProxies []string
 	if cfg != nil {
 		trustedProxies = cfg.TrustedProxies
 	}
-	registry := ipaccess.NewRegistry(ipaccess.NewStore(db))
-	registry.SetProxyTrusted(ipaccess.ProxyTrustConfigured(trustedProxies))
+	// The registry and recorder themselves are installed by the same helpers the
+	// management handler uses, so both startup paths converge on one instance.
+	// What only the CLI runner can add is persistence: the settings store is off
+	// limits to management handlers, and the retention sweep needs a long-lived
+	// process to run in.
+	recorder := authevents.EnsureDefault(ctx, db)
+	startAuthEventRetention(ctx, recorder)
+
+	registry := ipaccess.EnsureDefault(ctx, db, ipaccess.ProxyTrustConfigured(trustedProxies))
 	registry.SetPolicyPersister(ctx, ipAccessPolicyStore{})
-	registry.Start(ctx)
-	ipaccess.SetDefault(registry)
 }
 
 func startAuthEventRetention(ctx context.Context, recorder *authevents.Recorder) {
