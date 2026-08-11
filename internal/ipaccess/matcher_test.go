@@ -324,3 +324,91 @@ func TestRegistryPrefersStoredProxiesOverConfig(t *testing.T) {
 		t.Errorf("got %q, want the config fallback after clearing the stored list", source)
 	}
 }
+
+func TestRelayedChainEndingOnLoopbackIsNotTrusted(t *testing.T) {
+	// Reproduces a real production incident. Declaring only the outer proxy left
+	// the chain one hop short, so it resolved to the loopback address the inner
+	// hop used — and loopback was being treated as the local operator channel.
+	// Every external request was therefore exempt from rate limiting and from the
+	// rule list at once.
+	req := httptest.NewRequest("GET", "/", nil)
+	req.RemoteAddr = "104.194.69.137:5000"
+	req.Header.Set("X-Forwarded-For", "203.0.113.9, 127.0.0.1")
+
+	addr := resolveForwarded(req, newTrustedProxyMatcher([]string{"104.194.69.137/32"}))
+	if addr.Raw != "127.0.0.1" {
+		t.Fatalf("got %q, want the hop the chain stopped at", addr.Raw)
+	}
+	if addr.Trusted {
+		t.Error("a chain that dead-ends on loopback must not be trusted")
+	}
+	if addr.LocalOperator() {
+		t.Error("a relayed request is never the local operator, whatever it resolves to")
+	}
+}
+
+func TestLocalOperatorRequiresADirectConnection(t *testing.T) {
+	direct := httptest.NewRequest("GET", "/", nil)
+	direct.RemoteAddr = "127.0.0.1:5000"
+	if addr := resolveForwarded(direct, newTrustedProxyMatcher(nil)); !addr.LocalOperator() {
+		t.Error("a direct loopback connection with no forwarding header is the local operator")
+	}
+
+	relayed := httptest.NewRequest("GET", "/", nil)
+	relayed.RemoteAddr = "127.0.0.1:5000"
+	relayed.Header.Set("X-Forwarded-For", "203.0.113.9")
+	if addr := resolveForwarded(relayed, newTrustedProxyMatcher(nil)); addr.LocalOperator() {
+		t.Error("a relayed request must not qualify as the local operator")
+	}
+}
+
+func TestRegistryDoesNotExemptARelayedLoopbackChain(t *testing.T) {
+	// The end-to-end shape of the same incident: the verdict must not come back
+	// as an enforced allow just because the chain resolved to loopback.
+	registry := NewRegistry(NewStore(nil))
+	req := httptest.NewRequest("GET", "/", nil)
+	req.RemoteAddr = "104.194.69.137:5000"
+	req.Header.Set("X-Forwarded-For", "203.0.113.9, 127.0.0.1")
+	registry.SetPolicy(context.Background(), ProtectionPolicy{TrustedProxies: []string{"104.194.69.137/32"}})
+
+	addr := registry.ResolveAddress(req, "")
+	verdict := registry.Evaluate(addr)
+	if verdict.Enforced {
+		t.Error("an unresolved chain must not produce an enforced verdict")
+	}
+	if verdict.Exempt() {
+		t.Error("an unresolved chain must not exempt the request from throttling")
+	}
+}
+
+func TestFullyDeclaredChainResolvesTheRealClient(t *testing.T) {
+	// Declaring every hop is what makes the feature work; this is the state the
+	// diagnostics are meant to guide an operator towards.
+	req := httptest.NewRequest("GET", "/", nil)
+	req.RemoteAddr = "104.194.69.137:5000"
+	req.Header.Set("X-Forwarded-For", "203.0.113.9, 127.0.0.1")
+
+	addr := resolveForwarded(req, newTrustedProxyMatcher([]string{"104.194.69.137/32", "127.0.0.1/32"}))
+	if addr.Raw != "203.0.113.9" || !addr.Trusted {
+		t.Fatalf("got %q trusted=%t, want the real client trusted", addr.Raw, addr.Trusted)
+	}
+	if addr.LocalOperator() {
+		t.Error("a resolved external client is not the local operator")
+	}
+}
+
+func TestForwardedChainIsReportedForDiagnostics(t *testing.T) {
+	// Operators cannot declare the right hops without seeing the chain; guessing
+	// is what produced the half-configured state in the first place.
+	req := httptest.NewRequest("GET", "/", nil)
+	req.RemoteAddr = "104.194.69.137:5000"
+	req.Header.Set("X-Forwarded-For", "203.0.113.9, 127.0.0.1")
+
+	addr := resolveForwarded(req, newTrustedProxyMatcher([]string{"104.194.69.137/32"}))
+	if addr.Peer != "104.194.69.137" {
+		t.Errorf("peer = %q, want the direct TCP peer", addr.Peer)
+	}
+	if len(addr.Chain) != 2 || addr.Chain[0] != "203.0.113.9" || addr.Chain[1] != "127.0.0.1" {
+		t.Errorf("chain = %v, want both hops in order", addr.Chain)
+	}
+}

@@ -74,10 +74,12 @@ func resolveForwarded(req *http.Request, matcher *trustedProxyMatcher) ClientAdd
 		return addr
 	}
 	addr.RelayHeader = firstForwardedHeader(req)
+	addr.Chain = collectForwardedChain(req)
+	addr.DirectPeer = addr.RelayHeader == ""
 
 	peerText := hostOnly(req.RemoteAddr)
 	peer := net.ParseIP(peerText)
-	addr.Raw, addr.IP = peerText, peer
+	addr.Peer, addr.Raw, addr.IP = peerText, peerText, peer
 
 	if peer == nil {
 		return addr
@@ -107,12 +109,39 @@ func resolveForwarded(req *http.Request, matcher *trustedProxyMatcher) ClientAdd
 			if matcher.trusts(ip) {
 				continue
 			}
-			return ClientAddress{IP: ip, Raw: ip.String(), Trusted: true, RelayHeader: addr.RelayHeader}
+			resolved := ClientAddress{
+				Peer:        addr.Peer,
+				Chain:       addr.Chain,
+				IP:          ip,
+				Raw:         ip.String(),
+				Trusted:     true,
+				RelayHeader: addr.RelayHeader,
+			}
+			// A relayed chain that dead-ends on a loopback address has not been
+			// resolved: some hop in front of us is talking to the next over
+			// loopback and was never declared. Trusting it would hand every
+			// external client the local-operator exemption, which is exactly the
+			// "everyone is localhost" failure this guard exists to prevent.
+			if ip.IsLoopback() {
+				resolved.Trusted = false
+			}
+			return resolved
 		}
 	}
 	// Every hop was a trusted proxy: the real client never made it into the
 	// header, so nothing here identifies one.
 	return addr
+}
+
+// collectForwardedChain returns every hop seen across the forwarding headers,
+// left to right, purely for diagnostics. Operators cannot declare the right
+// proxies without being able to see what the chain actually contains.
+func collectForwardedChain(req *http.Request) []string {
+	var chain []string
+	for _, header := range forwardedHeaders {
+		chain = append(chain, parseForwardedHeader(req, header)...)
+	}
+	return chain
 }
 
 func firstForwardedHeader(req *http.Request) string {

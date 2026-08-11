@@ -90,7 +90,14 @@ func (e *autoBanEngine) RecordFailure(ctx context.Context, addr ClientAddress, r
 		return AutoBanOutcome{}
 	}
 	// An untrusted address is the proxy's, so banning it would take down every
-	// client behind it. A loopback source is the operator's own channel.
+	// client behind it.
+	//
+	// Loopback is skipped here in its broad sense — any loopback result, not just
+	// a genuine local operator — because the two directions fail asymmetrically.
+	// Admission uses the strict LocalOperator test: wrongly exempting a chain that
+	// merely dead-ends on loopback lets everyone past. Banning uses the broad test:
+	// a deny rule on a loopback address that a half-configured chain resolves to
+	// would block every external request at once. Each side takes the safer error.
 	if !addr.Trusted || addr.Loopback() || addr.IP == nil {
 		return AutoBanOutcome{}
 	}
