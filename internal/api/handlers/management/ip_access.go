@@ -2,6 +2,8 @@ package management
 
 import (
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -97,10 +99,14 @@ func (h *Handler) PostIPAccessRule(c *gin.Context) {
 		input.CreatedBy = principal.User.ID
 	}
 
-	// Refuse to deny the address making the request. The operator would lose the
-	// panel on the very next call, and recovering means editing the database by
-	// hand — a mistake the API can simply decline to make.
+	// Refuse to deny an address the deployment depends on. These are exactly the
+	// rules an operator writes by accident while under attack, and each of them
+	// takes the service down rather than stopping anyone.
 	if effect == ipaccess.EffectDeny {
+		if entry, covered := coversProtectedAddress(input.CIDR); covered {
+			ipAccessBadRequest(c, fmt.Errorf("this rule would cover %s, which is protected (%s) and cannot be denied", entry.CIDR, entry.Reason))
+			return
+		}
 		if blocked, checkErr := selfDenyCheck(c, input.CIDR); checkErr != nil {
 			ipAccessBadRequest(c, checkErr)
 			return
@@ -125,6 +131,27 @@ func (h *Handler) PostIPAccessRule(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{"rule": rule})
+}
+
+// coversProtectedAddress reports whether a proposed CIDR would swallow any
+// address the process must never reject.
+func coversProtectedAddress(cidr string) (ipaccess.ProtectedEntry, bool) {
+	normalized, _, err := ipaccess.NormalizeCIDR(cidr)
+	if err != nil {
+		return ipaccess.ProtectedEntry{}, false
+	}
+	_, network, parseErr := net.ParseCIDR(normalized)
+	if parseErr != nil || network == nil {
+		return ipaccess.ProtectedEntry{}, false
+	}
+	registry := ipaccess.Default()
+	for _, entry := range registry.ProtectedEntries() {
+		probe := ipaccess.ParseIPForMatch(entry.CIDR[:strings.Index(entry.CIDR, "/")])
+		if probe != nil && network.Contains(probe) {
+			return entry, true
+		}
+	}
+	return ipaccess.ProtectedEntry{}, false
 }
 
 // selfDenyCheck reports whether a proposed deny rule would cover the requester.
@@ -244,6 +271,7 @@ func (h *Handler) GetIPAccessStatus(c *gin.Context) {
 	if recorder := authevents.Default(); recorder != nil {
 		response["dropped_events"] = recorder.Dropped()
 	}
+	response["protected"] = registry.ProtectedEntries()
 	if address.IP != nil {
 		response["self_allowed"] = matcher.AllowsAddress(address.IP)
 		response["suggested_self_rule"] = ipaccess.BanCIDR(address.IP)
