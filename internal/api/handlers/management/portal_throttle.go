@@ -23,14 +23,16 @@ import (
 func (h *Handler) PortalAuthThrottleMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		key := h.clientThrottleKey(c, scopePortalPassword)
-		if d := h.loginThrottle.evaluate(key, time.Now()); d.Outcome != outcomeAllow {
+		if d := h.throttleEvaluate(c, key, time.Now()); d.Outcome != outcomeAllow {
+			h.noteThrottledAttempt(c, key, "")
 			abortThrottled(c, d)
 			return
 		}
 		c.Next()
 		if c.Writer.Status() == http.StatusUnauthorized {
-			d := h.loginThrottle.recordFailure(key, time.Now())
+			d := h.throttleCharge(c, key, time.Now())
 			h.logAuthFailure(c, key, d)
+			h.noteCredentialFailure(c, key, d, "", "invalid portal credentials")
 		}
 	}
 }

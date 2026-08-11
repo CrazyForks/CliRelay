@@ -87,4 +87,13 @@ func registerManagementIdentityRoutes(group *gin.RouterGroup, h *managementhandl
 	group.DELETE("/audit-logs", h.ClearAuditLogs)
 	group.GET("/audit-logs/:id", h.GetAuditLog)
 	group.DELETE("/audit-logs/:id", h.DeleteAuditLog)
+	group.GET("/ip-access/rules", h.GetIPAccessRules)
+	group.POST("/ip-access/rules", h.PostIPAccessRule)
+	group.PATCH("/ip-access/rules/:id", h.PatchIPAccessRule)
+	group.DELETE("/ip-access/rules/:id", h.DeleteIPAccessRule)
+	group.GET("/ip-access/status", h.GetIPAccessStatus)
+	group.GET("/ip-access/policy", h.GetIPAccessPolicy)
+	group.PUT("/ip-access/policy", h.PutIPAccessPolicy)
+	group.GET("/auth-attempts", h.GetAuthAttempts)
+	group.GET("/auth-attempts/summary", h.GetAuthAttemptSummary)
 }

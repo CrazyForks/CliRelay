@@ -1,7 +1,7 @@
 package postgres
 
 func RuntimeMigrations() []Migration {
-	return []Migration{
+	return append([]Migration{
 		{Version: "202607050001_runtime_schema", SQL: runtimeSchemaSQL},
 		{Version: "202607100001_identity_fingerprint_profiles", SQL: identityFingerprintProfilesSQL},
 		{Version: "202607110001_multi_tenant_identity", SQL: multiTenantIdentitySQL},
@@ -46,7 +46,7 @@ func RuntimeMigrations() []Migration {
 		// Retire audit rows written by the pre-fix policy that logged read traffic,
 		// and index created_at for the new retention pass.
 		{Version: "202608080001_audit_log_read_noise_cleanup", SQL: auditLogReadNoiseCleanupSQL},
-	}
+	}, laterRuntimeMigrations()...)
 }
 
 const aiAccountSubjectUsageTokensSQL = `

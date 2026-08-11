@@ -88,6 +88,10 @@ type AuditEvent struct {
 	ResourceID     string
 	Result         string
 	RequestID      string
+	// IPAddress is the source address. Usually left empty: RecordAudit fills it
+	// from the request context. Set it explicitly only for events raised outside
+	// a request, where no context carries the address.
+	IPAddress string
 	// Changes stores structured call-chain / mutation metadata (JSON object).
 	Changes map[string]any
 }
