@@ -262,17 +262,28 @@ func (h *Handler) GetIPAccessStatus(c *gin.Context) {
 		// (config.yaml fallback) or "none". The panel needs it to explain why an
 		// edit here may not be what is in force.
 		"trusted_proxies_source": proxySource,
-		"enforced":               address.Trusted || address.Loopback(),
-		"lockdown":               policy.Lockdown,
-		"active_rules":           matcher.Count(),
-		"storage_available":      registry.Store().Available(),
-		"auto_ban_mode":          policy.AutoBan.Mode,
+		// Diagnostics: an operator cannot declare the right proxies without
+		// seeing what the chain actually contains. Guessing produced a
+		// half-configured chain that resolved to loopback and quietly exempted
+		// every external client.
+		"peer":              address.Peer,
+		"forwarded_chain":   address.Chain,
+		"direct_peer":       address.DirectPeer,
+		"enforced":          address.Trusted || address.Loopback(),
+		"lockdown":          policy.Lockdown,
+		"active_rules":      matcher.Count(),
+		"storage_available": registry.Store().Available(),
+		"auto_ban_mode":     policy.AutoBan.Mode,
 	}
-	if !address.Trusted && address.Raw != "" {
-		// The address the panel should add as a trusted proxy to fix this. It is
-		// applied through the policy endpoint, so the remedy is a button rather
-		// than a file edit and a restart.
-		response["suggested_trusted_proxies"] = []string{address.Raw + "/32"}
+	if !address.Trusted {
+		// Suggest the hop the chain actually stopped at: that is the one still to
+		// be declared. With a multi-hop chain this converges one hop per click,
+		// and the diagnostics above show how many remain.
+		if candidate := address.Raw; candidate != "" {
+			response["suggested_trusted_proxies"] = []string{candidate + "/32"}
+		} else if address.Peer != "" {
+			response["suggested_trusted_proxies"] = []string{address.Peer + "/32"}
+		}
 	}
 	if recorder := authevents.Default(); recorder != nil {
 		response["dropped_events"] = recorder.Dropped()

@@ -11,6 +11,15 @@ import (
 // ClientAddress is everything the admission and throttle layers need to know
 // about where a request came from.
 type ClientAddress struct {
+	// Peer is the direct TCP peer, before any forwarding header is considered.
+	// Kept for diagnostics: it is the hop an operator has to declare next when
+	// the chain cannot be resolved.
+	Peer string
+	// DirectPeer reports that the request carried no forwarding header at all, so
+	// Peer is the client itself rather than infrastructure in front of it.
+	DirectPeer bool
+	// Chain is the forwarding chain as received, left to right, for diagnostics.
+	Chain []string
 	// IP is the address the framework resolved, honouring trusted-proxies.
 	IP net.IP
 	// Raw is the textual form, kept for display and for the rare case where the
@@ -35,11 +44,21 @@ func ProxyTrustConfigured(trustedProxies []string) bool {
 	return false
 }
 
-// Loopback reports whether the peer is the local host. Loopback keeps an
-// unconditional operator channel: a misconfigured allow list must never be able
-// to lock the machine's own administrator out of the process it is running.
+// Loopback reports whether the resolved address is a loopback address.
 func (a ClientAddress) Loopback() bool {
 	return a.IP != nil && a.IP.IsLoopback()
+}
+
+// LocalOperator reports a request that genuinely originated on this host: a
+// loopback peer that arrived with no forwarding header at all.
+//
+// This is the distinction that matters, and conflating it with Loopback() was a
+// real defect. A relayed request whose chain resolves to a loopback address is
+// not a local operator — it is a chain that could not be resolved, and treating
+// it as the operator channel exempts the entire internet from rate limiting and
+// from the rule list. Only a direct connection earns that exemption.
+func (a ClientAddress) LocalOperator() bool {
+	return a.DirectPeer && a.Loopback()
 }
 
 // Resolve derives the client address from a request.

@@ -294,10 +294,13 @@ func (r *Registry) Evaluate(addr ClientAddress) Verdict {
 	if r == nil {
 		return Verdict{Decision: DecisionNeutral}
 	}
-	// Loopback is unconditionally admitted so a bad list can never lock an
-	// operator out of the host the process runs on.
-	if addr.Loopback() {
-		return Verdict{Decision: DecisionAllow, Enforced: true, Reason: "loopback"}
+	// A genuine local connection is unconditionally admitted so a bad list can
+	// never lock an operator out of the host the process runs on. Note this is
+	// LocalOperator, not Loopback: a relayed chain that merely dead-ends on a
+	// loopback address is an unresolved chain, and admitting it would exempt
+	// every external client from the rules.
+	if addr.LocalOperator() {
+		return Verdict{Decision: DecisionAllow, Enforced: true, Reason: "local_operator"}
 	}
 	if !addr.Trusted {
 		return Verdict{Decision: DecisionNeutral, Enforced: false, Reason: reasonUntrustedClientIP}
