@@ -1,6 +1,7 @@
 package ipaccess
 
 import (
+	"context"
 	"net"
 	"net/http/httptest"
 	"testing"
@@ -179,5 +180,57 @@ func TestBanCIDRCollapsesIPv6ToSixtyFour(t *testing.T) {
 	}
 	if got := BanCIDR(net.ParseIP("192.0.2.5")); got != "192.0.2.5/32" {
 		t.Errorf("got %q, want a host route for IPv4", got)
+	}
+}
+
+func TestProtectedAddressesSurviveEveryRule(t *testing.T) {
+	// The interesting failure here is self-inflicted: a rule covering the host's
+	// own address or its reverse proxy takes the deployment offline instead of
+	// blocking an attacker, so the list must not be able to express it.
+	registry := NewRegistry(NewStore(nil))
+	registry.SetProtectedAddresses([]string{"10.0.0.5"}, []string{"104.194.69.137"}, nil)
+	registry.matcher.Store(NewMatcher([]Rule{
+		mustRule(t, "10.0.0.0/8", EffectDeny),
+		mustRule(t, "104.194.69.137/32", EffectDeny),
+	}, true, time.Now()))
+
+	for _, ip := range []string{"10.0.0.5", "104.194.69.137"} {
+		verdict := registry.Evaluate(ClientAddress{IP: net.ParseIP(ip), Raw: ip, Trusted: true})
+		if !verdict.Allowed() || !verdict.Enforced || verdict.Decision != DecisionAllow {
+			t.Errorf("%s: got %v (enforced=%t), want an enforced allow despite the deny rules", ip, verdict.Decision, verdict.Enforced)
+		}
+	}
+	// Protection is per-address, not per-range: a neighbour inside the same denied
+	// /8 must not inherit it.
+	if _, ok := registry.Protected(net.ParseIP("10.0.0.6")); ok {
+		t.Error("protection leaked to an unprotected address in the same range")
+	}
+}
+
+func TestProtectedAddressesAreNotAutoBanned(t *testing.T) {
+	policy := DefaultPolicy()
+	policy.AutoBan.FailureThreshold = 2
+	registry := testRegistry(t, policy)
+	registry.SetProtectedAddresses(nil, []string{"104.194.69.137"}, nil)
+
+	for i := 0; i < 5; i++ {
+		outcome := registry.AutoBan().RecordFailure(context.Background(), trustedAddress("104.194.69.137"), "test")
+		if outcome.Triggered {
+			t.Fatal("the reverse proxy was proposed for an automatic ban")
+		}
+	}
+}
+
+func TestProxyHostAddressesKeepsOnlyLiterals(t *testing.T) {
+	// A hostname is skipped rather than resolved: resolving at startup bakes in
+	// one answer and silently protects the wrong address after a DNS change.
+	got := ProxyHostAddresses([]string{
+		"http://203.0.113.9:8080",
+		"socks5://proxy.internal:1080",
+		"not a url",
+		"",
+	})
+	if len(got) != 1 || got[0] != "203.0.113.9" {
+		t.Errorf("got %v, want [203.0.113.9]", got)
 	}
 }

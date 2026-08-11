@@ -2,6 +2,7 @@ package management
 
 import (
 	"context"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/authevents"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -33,5 +34,27 @@ func ensureIPAccessRuntime(cfg *config.Config) {
 	if cfg != nil {
 		trustedProxies = cfg.TrustedProxies
 	}
-	ipaccess.EnsureDefault(ctx, db, ipaccess.ProxyTrustConfigured(trustedProxies))
+	registry := ipaccess.EnsureDefault(ctx, db, ipaccess.ProxyTrustConfigured(trustedProxies))
+	registry.SetProtectedAddresses(
+		ipaccess.LocalInterfaceAddresses(),
+		trustedProxies,
+		ipaccess.ProxyHostAddresses(outboundProxyURLs(cfg)),
+	)
+}
+
+// outboundProxyURLs collects the egress proxy pool so those hosts are protected
+// too. Operators reasonably read "our proxies" as something that must never be
+// blocked; an egress proxy never arrives as an inbound client, so protecting it
+// costs nothing and stops a confusing manual rule from being written instead.
+func outboundProxyURLs(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	urls := make([]string, 0, len(cfg.ProxyPool))
+	for _, entry := range cfg.ProxyPool {
+		if strings.TrimSpace(entry.URL) != "" {
+			urls = append(urls, entry.URL)
+		}
+	}
+	return urls
 }

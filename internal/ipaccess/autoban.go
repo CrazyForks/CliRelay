@@ -99,6 +99,10 @@ func (e *autoBanEngine) RecordFailure(ctx context.Context, addr ClientAddress, r
 	if e.registry.Matcher().AllowsAddress(addr.IP) {
 		return AutoBanOutcome{}
 	}
+	// Nor may it ban the host itself, its reverse proxy, or an egress proxy.
+	if _, ok := e.registry.Protected(addr.IP); ok {
+		return AutoBanOutcome{}
+	}
 
 	cidr := BanCIDR(addr.IP)
 	now := time.Now()

@@ -2,6 +2,7 @@ package ipaccess
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -56,6 +57,9 @@ type Registry struct {
 	matcher   atomic.Pointer[Matcher]
 	policy    atomic.Pointer[ProtectionPolicy]
 	persister PolicyPersister
+
+	// protected is the set of addresses no rule may reject.
+	protected atomic.Pointer[protectedSet]
 
 	// proxyTrusted mirrors "trusted-proxies is non-empty". It lives here rather
 	// than being read from config at match time because a hot reload swaps the
@@ -158,6 +162,36 @@ func (r *Registry) ReloadPolicy(ctx context.Context) {
 	}
 }
 
+// SetProtectedAddresses rebuilds the un-bannable set.
+func (r *Registry) SetProtectedAddresses(localAddresses, trustedProxies, outboundProxies []string) {
+	if r == nil {
+		return
+	}
+	r.protected.Store(buildProtectedSet(localAddresses, trustedProxies, outboundProxies))
+}
+
+// ProtectedEntries lists the un-bannable addresses for display.
+func (r *Registry) ProtectedEntries() []ProtectedEntry {
+	if r == nil {
+		return nil
+	}
+	set := r.protected.Load()
+	if set == nil {
+		return nil
+	}
+	out := make([]ProtectedEntry, len(set.entries))
+	copy(out, set.entries)
+	return out
+}
+
+// Protected reports whether an address is structurally un-bannable.
+func (r *Registry) Protected(ip net.IP) (ProtectedEntry, bool) {
+	if r == nil {
+		return ProtectedEntry{}, false
+	}
+	return r.protected.Load().match(ip)
+}
+
 // SetProxyTrusted records whether the operator declared any trusted proxy.
 func (r *Registry) SetProxyTrusted(configured bool) {
 	if r == nil {
@@ -225,6 +259,12 @@ func (r *Registry) Evaluate(addr ClientAddress) Verdict {
 	}
 	if !addr.Trusted {
 		return Verdict{Decision: DecisionNeutral, Enforced: false, Reason: reasonUntrustedClientIP}
+	}
+	// Protected addresses win over every rule, including lockdown, and are checked
+	// before storage availability because the guarantee is absolute: the host's own
+	// address and its reverse proxy stay reachable whatever the rule store is doing.
+	if entry, ok := r.protected.Load().match(addr.IP); ok {
+		return Verdict{Decision: DecisionAllow, Enforced: true, Reason: string(entry.Reason)}
 	}
 	if !r.store.Available() {
 		return Verdict{Decision: DecisionNeutral, Enforced: false, Reason: reasonNoStorage}
