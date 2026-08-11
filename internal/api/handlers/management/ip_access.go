@@ -250,22 +250,28 @@ func (h *Handler) GetIPAccessStatus(c *gin.Context) {
 	address := ipaccess.AddressFor(c)
 	matcher := registry.Matcher()
 	policy := registry.Policy()
+	trustedProxies, proxySource := registry.TrustedProxies()
 
 	response := gin.H{
 		"client_ip":                  address.Raw,
 		"trusted":                    address.Trusted,
 		"relay_header":               address.RelayHeader,
 		"trusted_proxies_configured": registry.ProxyTrusted(),
-		"enforced":                   address.Trusted || address.Loopback(),
-		"lockdown":                   policy.Lockdown,
-		"active_rules":               matcher.Count(),
-		"storage_available":          registry.Store().Available(),
-		"auto_ban_mode":              policy.AutoBan.Mode,
+		"trusted_proxies":            trustedProxies,
+		// Where the live list came from: "database" (panel-managed), "config"
+		// (config.yaml fallback) or "none". The panel needs it to explain why an
+		// edit here may not be what is in force.
+		"trusted_proxies_source": proxySource,
+		"enforced":               address.Trusted || address.Loopback(),
+		"lockdown":               policy.Lockdown,
+		"active_rules":           matcher.Count(),
+		"storage_available":      registry.Store().Available(),
+		"auto_ban_mode":          policy.AutoBan.Mode,
 	}
 	if !address.Trusted && address.Raw != "" {
-		// Hand back the exact line to paste into config.yaml: the remedy is one
-		// setting, and every minute this stays unfixed is a minute the rules do
-		// nothing.
+		// The address the panel should add as a trusted proxy to fix this. It is
+		// applied through the policy endpoint, so the remedy is a button rather
+		// than a file edit and a restart.
 		response["suggested_trusted_proxies"] = []string{address.Raw + "/32"}
 	}
 	if recorder := authevents.Default(); recorder != nil {

@@ -234,3 +234,93 @@ func TestProxyHostAddressesKeepsOnlyLiterals(t *testing.T) {
 		t.Errorf("got %v, want [203.0.113.9]", got)
 	}
 }
+
+func TestResolveForwardedWalksChainAgainstDeclaredProxies(t *testing.T) {
+	// The rightmost hops were appended by infrastructure we control; everything
+	// left of the first untrusted hop is attacker-supplied and must be discarded.
+	req := httptest.NewRequest("GET", "/", nil)
+	req.RemoteAddr = "10.0.0.1:5000"
+	req.Header.Set("X-Forwarded-For", "1.2.3.4, 203.0.113.7, 10.0.0.2")
+
+	matcher := newTrustedProxyMatcher([]string{"10.0.0.0/24"})
+	addr := resolveForwarded(req, matcher)
+	if !addr.Trusted {
+		t.Fatal("chain resolved through declared proxies should be trusted")
+	}
+	if addr.Raw != "203.0.113.7" {
+		t.Errorf("got %q, want the first hop no trusted proxy vouched for", addr.Raw)
+	}
+}
+
+func TestResolveForwardedIgnoresHeaderFromUndeclaredPeer(t *testing.T) {
+	// A direct client claiming upstream hops is unverifiable, so the claim is
+	// dropped rather than believed — otherwise a banned client renames itself.
+	req := httptest.NewRequest("GET", "/", nil)
+	req.RemoteAddr = "203.0.113.9:44000"
+	req.Header.Set("X-Forwarded-For", "1.2.3.4")
+
+	addr := resolveForwarded(req, newTrustedProxyMatcher([]string{"10.0.0.0/24"}))
+	if addr.Raw != "203.0.113.9" || !addr.Trusted {
+		t.Errorf("got %q trusted=%t, want the peer address treated as the client", addr.Raw, addr.Trusted)
+	}
+}
+
+func TestResolveForwardedUntrustedWhenRelayedWithNoDeclaredProxy(t *testing.T) {
+	// This is the production state: nginx relays, nothing is declared, so the
+	// address is the proxy's and stands for everyone behind it.
+	req := httptest.NewRequest("GET", "/", nil)
+	req.RemoteAddr = "104.194.69.137:5000"
+	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+
+	addr := resolveForwarded(req, newTrustedProxyMatcher(nil))
+	if addr.Trusted {
+		t.Error("relayed request with no declared proxy must not be trusted")
+	}
+	if addr.Raw != "104.194.69.137" {
+		t.Errorf("got %q, want the proxy address", addr.Raw)
+	}
+}
+
+func TestResolveForwardedAllHopsTrustedIsNotAClient(t *testing.T) {
+	req := httptest.NewRequest("GET", "/", nil)
+	req.RemoteAddr = "10.0.0.1:5000"
+	req.Header.Set("X-Forwarded-For", "10.0.0.2, 10.0.0.3")
+
+	addr := resolveForwarded(req, newTrustedProxyMatcher([]string{"10.0.0.0/24"}))
+	if addr.Trusted {
+		t.Error("a chain of only proxies identifies no client and must not be trusted")
+	}
+}
+
+func TestPolicyNormalizesAndDeduplicatesTrustedProxies(t *testing.T) {
+	policy := ProtectionPolicy{TrustedProxies: []string{
+		" 104.194.69.137 ", "104.194.69.137", "10.0.0.0/24", "not-an-ip", "",
+	}}.Normalized()
+	want := []string{"104.194.69.137/32", "10.0.0.0/24"}
+	if len(policy.TrustedProxies) != len(want) {
+		t.Fatalf("got %v, want %v", policy.TrustedProxies, want)
+	}
+	for i := range want {
+		if policy.TrustedProxies[i] != want[i] {
+			t.Errorf("index %d: got %q, want %q", i, policy.TrustedProxies[i], want[i])
+		}
+	}
+}
+
+func TestRegistryPrefersStoredProxiesOverConfig(t *testing.T) {
+	registry := NewRegistry(NewStore(nil))
+	registry.SetConfiguredProxies([]string{"10.0.0.0/24"})
+	if proxies, source := registry.TrustedProxies(); source != "config" || len(proxies) != 1 {
+		t.Fatalf("got %v from %q, want the config fallback", proxies, source)
+	}
+	registry.SetPolicy(context.Background(), ProtectionPolicy{TrustedProxies: []string{"104.194.69.137"}})
+	proxies, source := registry.TrustedProxies()
+	if source != "database" || len(proxies) != 1 || proxies[0] != "104.194.69.137/32" {
+		t.Fatalf("got %v from %q, want the stored list to win", proxies, source)
+	}
+	// Clearing the stored list must fall back rather than strand the deployment.
+	registry.SetPolicy(context.Background(), ProtectionPolicy{})
+	if _, source = registry.TrustedProxies(); source != "config" {
+		t.Errorf("got %q, want the config fallback after clearing the stored list", source)
+	}
+}

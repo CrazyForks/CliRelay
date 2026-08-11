@@ -23,7 +23,7 @@ var installed struct {
 // caller that assembled the management API itself — the route smoke tests, and
 // anyone embedding the server through the SDK — got a nil registry and every IP
 // access endpoint answered 503.
-func EnsureDefault(ctx context.Context, db *sql.DB, proxyTrusted bool) *Registry {
+func EnsureDefault(ctx context.Context, db *sql.DB, configuredProxies []string) *Registry {
 	if db == nil {
 		return Default()
 	}
@@ -31,14 +31,14 @@ func EnsureDefault(ctx context.Context, db *sql.DB, proxyTrusted bool) *Registry
 	defer installed.mu.Unlock()
 
 	if existing := Default(); existing != nil && installed.db == db {
-		existing.SetProxyTrusted(proxyTrusted)
+		existing.SetConfiguredProxies(configuredProxies)
 		return existing
 	}
 	if previous := Default(); previous != nil {
 		previous.Close()
 	}
 	registry := NewRegistry(NewStore(db))
-	registry.SetProxyTrusted(proxyTrusted)
+	registry.SetConfiguredProxies(configuredProxies)
 	registry.Start(ctx)
 	SetDefault(registry)
 	installed.db = db

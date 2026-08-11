@@ -34,10 +34,13 @@ func ensureIPAccessRuntime(cfg *config.Config) {
 	if cfg != nil {
 		trustedProxies = cfg.TrustedProxies
 	}
-	registry := ipaccess.EnsureDefault(ctx, db, ipaccess.ProxyTrustConfigured(trustedProxies))
+	registry := ipaccess.EnsureDefault(ctx, db, trustedProxies)
+	// Protection follows the list actually in force, which may come from the
+	// database rather than config.yaml.
+	effectiveProxies, _ := registry.TrustedProxies()
 	registry.SetProtectedAddresses(
 		ipaccess.LocalInterfaceAddresses(),
-		trustedProxies,
+		effectiveProxies,
 		ipaccess.ProxyHostAddresses(outboundProxyURLs(cfg)),
 	)
 }

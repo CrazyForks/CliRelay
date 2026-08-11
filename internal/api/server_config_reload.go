@@ -207,10 +207,9 @@ func (s *Server) commitUpdatedConfig(oldCfg, cfg *config.Config) {
 	}
 	s.cfg = cfg
 	// A reload replaces the config pointer, so the admission layer has to be told
-	// separately. "Is the client address trustworthy" is precisely the answer
-	// that changes when an operator finally configures trusted-proxies, and it
-	// gates whether the IP rules are enforced at all.
-	ipaccess.Default().SetProxyTrusted(ipaccess.ProxyTrustConfigured(cfg.TrustedProxies))
+	// separately. The config list is only the fallback now — the panel-managed
+	// list in the database wins — but it still has to track reloads.
+	ipaccess.Default().SetConfiguredProxies(cfg.TrustedProxies)
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	if oldCfg != nil && s.wsAuthChanged != nil && oldCfg.WebsocketAuth != cfg.WebsocketAuth {
 		s.wsAuthChanged(oldCfg.WebsocketAuth, cfg.WebsocketAuth)
