@@ -1,6 +1,10 @@
 package ipaccess
 
-import "time"
+import (
+	"net"
+	"strings"
+	"time"
+)
 
 // AutoBanMode controls what the automatic ban engine does with a source that
 // crosses the failure threshold.
@@ -55,6 +59,15 @@ type ProtectionPolicy struct {
 	Lockdown bool             `json:"lockdown"`
 	AutoBan  AutoBanPolicy    `json:"auto_ban"`
 	Throttle ThrottleOverride `json:"throttle"`
+	// TrustedProxies are the reverse proxies whose forwarding headers may be
+	// believed. It lives here, in the database, rather than in config.yaml
+	// because it is the single setting that decides whether this whole feature
+	// does anything — and an operator watching an attack should be able to fix it
+	// from the panel instead of editing a file and restarting the process.
+	//
+	// config.yaml's trusted-proxies still applies when this is empty, so existing
+	// deployments keep working and nothing silently changes under them.
+	TrustedProxies []string `json:"trusted_proxies,omitempty"`
 }
 
 // SettingKey is the runtime-settings document key for ProtectionPolicy.
@@ -122,7 +135,46 @@ func (p ProtectionPolicy) Normalized() ProtectionPolicy {
 	if p.Throttle.FailureResetHours < 0 {
 		p.Throttle.FailureResetHours = 0
 	}
+	cleaned := make([]string, 0, len(p.TrustedProxies))
+	seen := make(map[string]struct{}, len(p.TrustedProxies))
+	for _, proxy := range p.TrustedProxies {
+		normalized, ok := NormalizeTrustedProxy(proxy)
+		if !ok {
+			continue
+		}
+		if _, duplicate := seen[normalized]; duplicate {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		cleaned = append(cleaned, normalized)
+	}
+	p.TrustedProxies = cleaned
 	return p
+}
+
+// NormalizeTrustedProxy canonicalises one entry of the trusted proxy list. A
+// bare address becomes a host route so the stored form is always a network.
+func NormalizeTrustedProxy(raw string) (string, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", false
+	}
+	if strings.Contains(trimmed, "/") {
+		_, network, err := net.ParseCIDR(trimmed)
+		if err != nil || network == nil {
+			return "", false
+		}
+		return network.String(), true
+	}
+	ip := net.ParseIP(trimmed)
+	if ip == nil {
+		return "", false
+	}
+	bits := 128
+	if v4 := ip.To4(); v4 != nil {
+		ip, bits = v4, 32
+	}
+	return (&net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}).String(), true
 }
 
 // Window returns the auto-ban observation window.

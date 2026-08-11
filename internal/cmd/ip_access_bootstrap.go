@@ -61,7 +61,7 @@ func initializeIPAccessControl(ctx context.Context, cfg *config.Config) {
 	recorder := authevents.EnsureDefault(ctx, db)
 	startAuthEventRetention(ctx, recorder)
 
-	registry := ipaccess.EnsureDefault(ctx, db, ipaccess.ProxyTrustConfigured(trustedProxies))
+	registry := ipaccess.EnsureDefault(ctx, db, trustedProxies)
 	registry.SetPolicyPersister(ctx, ipAccessPolicyStore{})
 }
 

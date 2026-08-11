@@ -61,11 +61,14 @@ type Registry struct {
 	// protected is the set of addresses no rule may reject.
 	protected atomic.Pointer[protectedSet]
 
-	// proxyTrusted mirrors "trusted-proxies is non-empty". It lives here rather
-	// than being read from config at match time because a hot reload swaps the
-	// whole config pointer, so a middleware that captured the old one would keep
-	// answering from a stale deployment.
-	proxyTrusted atomic.Bool
+	// configProxies is the config.yaml fallback, used only when the stored policy
+	// lists none. Kept separately so saving an empty list in the panel restores
+	// the configured value instead of stranding the deployment with nothing.
+	configProxies atomic.Pointer[[]string]
+	// proxyMatcher resolves the forwarding chain. It is rebuilt whenever the
+	// policy or the config changes, so an operator can fix trust from the panel
+	// and have it apply to the very next request.
+	proxyMatcher atomic.Pointer[trustedProxyMatcher]
 
 	hitsMu sync.Mutex
 	hits   map[string]int64
@@ -107,6 +110,7 @@ func (r *Registry) SetPolicy(ctx context.Context, policy ProtectionPolicy) {
 	}
 	normalized := policy.Normalized()
 	r.policy.Store(&normalized)
+	r.rebuildProxyMatcher()
 	if err := r.Refresh(ctx); err != nil {
 		log.WithError(err).Warn("ip-access: refresh after policy change failed")
 	}
@@ -192,24 +196,60 @@ func (r *Registry) Protected(ip net.IP) (ProtectedEntry, bool) {
 	return r.protected.Load().match(ip)
 }
 
-// SetProxyTrusted records whether the operator declared any trusted proxy.
-func (r *Registry) SetProxyTrusted(configured bool) {
+// SetConfiguredProxies records the config.yaml fallback list.
+func (r *Registry) SetConfiguredProxies(proxies []string) {
 	if r == nil {
 		return
 	}
-	r.proxyTrusted.Store(configured)
+	copied := append([]string(nil), proxies...)
+	r.configProxies.Store(&copied)
+	r.rebuildProxyMatcher()
 }
 
-// ProxyTrusted reports whether forwarding headers may be believed.
+// TrustedProxies returns the list actually in force, and whether it came from
+// the database or from config.yaml.
+func (r *Registry) TrustedProxies() ([]string, string) {
+	if r == nil {
+		return nil, "none"
+	}
+	if stored := r.Policy().TrustedProxies; len(stored) > 0 {
+		return append([]string(nil), stored...), "database"
+	}
+	if configured := r.configProxies.Load(); configured != nil && len(*configured) > 0 {
+		return append([]string(nil), *configured...), "config"
+	}
+	return nil, "none"
+}
+
+func (r *Registry) rebuildProxyMatcher() {
+	proxies, _ := r.TrustedProxies()
+	r.proxyMatcher.Store(newTrustedProxyMatcher(proxies))
+}
+
+// ProxyTrusted reports whether any reverse proxy is declared, from either source.
 func (r *Registry) ProxyTrusted() bool {
-	return r != nil && r.proxyTrusted.Load()
+	if r == nil {
+		return false
+	}
+	return r.proxyMatcher.Load().configured()
 }
 
-// ResolveAddress derives the client address for a request using the registry's
-// view of proxy trust, so admission and throttling can never disagree about
-// whether an address is meaningful.
+// ResolveAddress derives the client address for a request by walking the
+// forwarding chain against the declared proxies, so admission and throttling can
+// never disagree about whether an address is meaningful.
+//
+// resolvedIP (the framework's ClientIP) is accepted for compatibility but is no
+// longer authoritative: it is fixed at engine construction from config.yaml,
+// which is exactly the restart-to-change behaviour this replaces.
 func (r *Registry) ResolveAddress(req *http.Request, resolvedIP string) ClientAddress {
-	return Resolve(req, resolvedIP, r.ProxyTrusted())
+	if r == nil {
+		return Resolve(req, resolvedIP, false)
+	}
+	matcher := r.proxyMatcher.Load()
+	if req == nil {
+		return Resolve(req, resolvedIP, matcher.configured())
+	}
+	return resolveForwarded(req, matcher)
 }
 
 // Store exposes the rule store for the management API.
