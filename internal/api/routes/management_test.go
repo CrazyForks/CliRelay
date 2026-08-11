@@ -26,7 +26,7 @@ func TestRegisterManagementRouteTable(t *testing.T) {
 		routes[key] = route
 	}
 
-	if got, want := len(routes), 318; got != want {
+	if got, want := len(routes), 321; got != want {
 		t.Fatalf("route count = %d, want %d", got, want)
 	}
 	if got, want := sortedRouteKeys(routes), expectedManagementRoutes(); !slices.Equal(got, want) {
@@ -203,6 +203,7 @@ func expectedManagementRoutes() []string {
 		"POST /v0/portal/auth/login",
 		"POST /v0/portal/auth/logout",
 		"GET /v0/portal/auth/me",
+		"GET /v0/portal/auth/attempts",
 		"PUT /v0/portal/auth/password",
 		"POST /v0/portal/auth/refresh",
 		"GET /v0/management/menus",
@@ -252,8 +253,10 @@ func expectedManagementRoutes() []string {
 		"GET /v0/management/ip-access/status",
 		"GET /v0/management/ip-access/policy",
 		"PUT /v0/management/ip-access/policy",
+		"PATCH /v0/management/ip-access/rules",
 		"GET /v0/management/auth-attempts",
 		"GET /v0/management/auth-attempts/summary",
+		"GET /v0/management/auth-attempts/export",
 		"DELETE /v0/management/roles/:id",
 		"DELETE /v0/management/ampcode/model-mappings",
 		"DELETE /v0/management/ampcode/upstream-api-key",

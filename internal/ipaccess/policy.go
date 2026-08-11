@@ -68,10 +68,24 @@ type ProtectionPolicy struct {
 	// config.yaml's trusted-proxies still applies when this is empty, so existing
 	// deployments keep working and nothing silently changes under them.
 	TrustedProxies []string `json:"trusted_proxies,omitempty"`
+	// Alert configures outbound notification for ban decisions.
+	Alert AlertPolicy `json:"alert"`
+	// AttemptRetentionDays bounds how long authentication attempts are kept.
+	// Zero uses the shipped default.
+	AttemptRetentionDays int `json:"attempt_retention_days"`
 }
 
 // SettingKey is the runtime-settings document key for ProtectionPolicy.
 const SettingKey = "ip-access-protection-policy"
+
+// DefaultAttemptRetentionDays is long enough to investigate an incident reported
+// a few weeks late, short enough that a sustained attack cannot fill the disk.
+const DefaultAttemptRetentionDays = 30
+
+// maxAttemptRetentionDays caps operator input. The attempt table grows with
+// attack volume, not with legitimate traffic, so unbounded retention is a
+// disk-exhaustion path an attacker controls.
+const maxAttemptRetentionDays = 365
 
 const (
 	defaultAutoBanWindowSeconds = 600
@@ -92,6 +106,8 @@ func DefaultPolicy() ProtectionPolicy {
 			BanMinutes:       defaultAutoBanMinutes,
 			MaxBanMinutes:    defaultAutoBanMaxMinutes,
 		},
+		Alert:                AlertPolicy{CooldownMinutes: defaultAlertCooldownMinutes},
+		AttemptRetentionDays: DefaultAttemptRetentionDays,
 	}
 }
 
@@ -149,6 +165,13 @@ func (p ProtectionPolicy) Normalized() ProtectionPolicy {
 		cleaned = append(cleaned, normalized)
 	}
 	p.TrustedProxies = cleaned
+	p.Alert = p.Alert.normalized()
+	if p.AttemptRetentionDays <= 0 {
+		p.AttemptRetentionDays = DefaultAttemptRetentionDays
+	}
+	if p.AttemptRetentionDays > maxAttemptRetentionDays {
+		p.AttemptRetentionDays = maxAttemptRetentionDays
+	}
 	return p
 }
 
