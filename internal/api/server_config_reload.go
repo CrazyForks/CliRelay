@@ -10,6 +10,7 @@ import (
 	internalserviceapp "github.com/router-for-me/CLIProxyAPI/v6/internal/app/service"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/ipaccess"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -205,6 +206,10 @@ func (s *Server) commitUpdatedConfig(oldCfg, cfg *config.Config) {
 		return
 	}
 	s.cfg = cfg
+	// A reload replaces the config pointer, so the admission layer has to be told
+	// separately. The config list is only the fallback now — the panel-managed
+	// list in the database wins — but it still has to track reloads.
+	ipaccess.Default().SetConfiguredProxies(cfg.TrustedProxies)
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	if oldCfg != nil && s.wsAuthChanged != nil && oldCfg.WebsocketAuth != cfg.WebsocketAuth {
 		s.wsAuthChanged(oldCfg.WebsocketAuth, cfg.WebsocketAuth)

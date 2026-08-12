@@ -15,7 +15,8 @@ func (h *Handler) PostLogin(c *gin.Context) {
 	// Password entry gets its own per-IP bucket, separate from the management-key
 	// bucket: a wrong management key must never cost users their ability to log in.
 	ipKey := h.clientThrottleKey(c, scopeUserPassword)
-	if d := h.loginThrottle.evaluate(ipKey, now); d.Outcome != outcomeAllow {
+	if d := h.throttleEvaluate(c, ipKey, now); d.Outcome != outcomeAllow {
+		h.noteThrottledAttempt(c, ipKey, "")
 		abortLoginThrottled(c, d)
 		return
 	}
@@ -32,7 +33,8 @@ func (h *Handler) PostLogin(c *gin.Context) {
 	// The account bucket is the layer that actually stops guessing: it survives an
 	// attacker rotating source addresses, which the per-IP bucket cannot.
 	acctKey := accountThrottleKey(scopeUserAccount, identity.NormalizeUsername(body.Username))
-	if d := h.loginThrottle.evaluate(acctKey, now); d.Outcome != outcomeAllow {
+	if d := h.throttleEvaluate(c, acctKey, now); d.Outcome != outcomeAllow {
+		h.noteThrottledAttempt(c, acctKey, body.Username)
 		abortLoginThrottled(c, d)
 		return
 	}
@@ -44,9 +46,12 @@ func (h *Handler) PostLogin(c *gin.Context) {
 	result, err := service.Login(c.Request.Context(), body.Username, body.Password, body.RememberMe, c.GetHeader("User-Agent"))
 	if err != nil {
 		if isCredentialGuessFailure(err) {
-			h.loginThrottle.recordFailure(ipKey, now)
-			d := h.loginThrottle.recordFailure(acctKey, now)
+			h.throttleCharge(c, ipKey, now)
+			d := h.throttleCharge(c, acctKey, now)
 			h.logAuthFailure(c, acctKey, d)
+			// One attempt, one record: the two charges above are two views of the
+			// same failure.
+			h.noteCredentialFailure(c, acctKey, d, body.Username, "invalid password")
 		}
 		identityError(c, err)
 		return
@@ -55,6 +60,7 @@ func (h *Handler) PostLogin(c *gin.Context) {
 	// per-IP quota — an attacker holding one valid account of their own would
 	// otherwise reset their guessing budget between stuffing rounds.
 	h.loginThrottle.recordSuccess(acctKey)
+	h.noteAuthSuccess(c, acctKey, body.Username)
 	c.JSON(http.StatusOK, result)
 }
 
@@ -91,7 +97,9 @@ func (h *Handler) PostRefresh(c *gin.Context) {
 	// Unauthenticated and one database lookup per call: charge every attempt, not
 	// just the failures, because a caller that can already refresh successfully
 	// has no reason to do so sixty times in five minutes.
-	if d := h.loginThrottle.recordFailure(h.clientThrottleKey(c, scopeRefresh), time.Now()); d.Outcome != outcomeAllow {
+	refreshKey := h.clientThrottleKey(c, scopeRefresh)
+	if d := h.throttleCharge(c, refreshKey, time.Now()); d.Outcome != outcomeAllow {
+		h.noteNonCredentialFailure(c, refreshKey, d, "refresh endpoint rate limit")
 		abortThrottled(c, d)
 		return
 	}

@@ -240,6 +240,8 @@ func initializeRuntimeDataStack(cfg *config.Config, configPath string, loc *time
 	usage.ApplyStoredProxyPool(cfg)
 	settingsstore.MigrateRuntimeSettingsFromConfig(cfg, configPath)
 	settingsstore.ApplyStoredRuntimeSettings(cfg)
+	// After the settings store is live: the protection policy is read from it.
+	initializeIPAccessControl(context.Background(), cfg)
 	middleware.InitQuotaUsageFuncs(usage.CountTodayByKey, usage.CountTotalByKey, usage.QueryTotalCostByKey, usage.QueryTodayCostByKey)
 	middleware.InitQuotaEndUserUsageFuncs(usage.CountTodayByEndUser, usage.CountTotalByEndUser, usage.QueryTotalCostByEndUser, usage.QueryTodayCostByEndUser)
 	middleware.InitQuotaPeriodUsageFuncs(usage.QueryPeriodSpendingByAPIKeyIDForTenant, usage.QueryPeriodSpendingByEndUserForTenant)
@@ -264,7 +266,10 @@ func defaultRuntimeDataStackMaintenanceOps() runtimeDataStackMaintenanceOps {
 			if _, err := usage.RunAIAccountSharedSubjectBackfillAtInit(); err != nil {
 				return err
 			}
-			return usage.RunAIAccountSubjectUsageTokensBackfillAtInit()
+			if err := usage.RunAIAccountSubjectUsageTokensBackfillAtInit(); err != nil {
+				return err
+			}
+			return usage.RunAIAccountSubjectCycleBucketMergeAtInit()
 		},
 		scheduleUsageRollupCatchup: usage.ScheduleUsageRollupBlueGreenCatchup,
 	}

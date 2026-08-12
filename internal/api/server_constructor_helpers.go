@@ -56,6 +56,9 @@ func newServerEngine(cfg *config.Config, optionState *serverOptionConfig) *gin.E
 
 	engine.Use(logging.GinLogrusLogger())
 	engine.Use(logging.GinLogrusRecovery())
+	// Admission runs before any body handling: a denied source must not be able
+	// to make the process decompress or buffer what it sent.
+	engine.Use(ipAccessMiddleware())
 	engine.Use(middleware.DecompressRequestMiddleware())
 	engine.Use(middleware.RequestBodyCleanupMiddleware())
 	if optionState != nil {

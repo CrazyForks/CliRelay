@@ -62,6 +62,10 @@ type trendCacheEntry struct {
 func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Manager) *Handler {
 	envSecret, _ := os.LookupEnv("MANAGEMENT_PASSWORD")
 	envSecret = strings.TrimSpace(envSecret)
+	// IP access control follows database availability, not one startup path: any
+	// caller that assembles the management API itself must get a working registry
+	// rather than 503 on every rule endpoint.
+	ensureIPAccessRuntime(cfg)
 
 	h := &Handler{
 		cfg:                 cfg,
@@ -124,10 +128,13 @@ func (h *Handler) SetConfig(cfg *config.Config) {
 	// Recreate lazily so provider probes use the new proxy/TLS/runtime config.
 	h.aiAccountStatus = nil
 	h.mu.Unlock()
+	ensureIPAccessRuntime(cfg)
 	// Throttle thresholds are part of the reloadable config, so a limit raised in
 	// config.yaml has to take effect without a restart — otherwise the documented
-	// escape hatch for an over-tight limit is "restart the server".
-	h.loginThrottle.setPolicies(throttlePoliciesFromConfig(cfg))
+	// escape hatch for an over-tight limit is "restart the server". Panel-set
+	// overrides are re-applied on top, or a config reload would silently revert
+	// them while the panel kept displaying them as active.
+	h.loginThrottle.setPolicies(overlayThrottleOverride(throttlePoliciesFromConfig(cfg), storedThrottleOverride()))
 }
 
 // SetAuthManager updates the auth manager reference used by management endpoints.
