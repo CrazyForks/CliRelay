@@ -30,7 +30,15 @@ var (
 type LogFormatter struct{}
 
 // logFieldOrder defines the display order for common log fields.
-var logFieldOrder = []string{"provider", "model", "mode", "budget", "level", "original_mode", "original_value", "min", "max", "clamped_to", "error_class", "profile_id", "profile_version", "resolution_source", "channel_type", "channel_id", "action", "latency_ms", "cache_hit", "category", "score", "error"}
+//
+// This is an allowlist: a field absent from it is silently dropped. That bit us
+// in production — the auth-throttle warnings carried scope/key/counts and none
+// of it was ever printed, so "credential failure armed a block" appeared with no
+// indication of which address or account triggered it, which is the only part an
+// operator needs. Any new structured field must be registered here to be visible.
+var logFieldOrder = []string{"provider", "model", "mode", "budget", "level", "original_mode", "original_value", "min", "max", "clamped_to", "error_class", "profile_id", "profile_version", "resolution_source", "channel_type", "channel_id", "action", "latency_ms", "cache_hit", "category", "score", "error",
+	// auth-throttle / ip-access diagnostics
+	"scope", "key", "shared", "short_count", "long_count", "limit", "long_limit", "outcome", "block_for", "generation", "path", "method", "ua", "relay_header"}
 
 // Format renders a single log entry with custom formatting.
 func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
